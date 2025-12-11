@@ -5,7 +5,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>迷宫冒险 - 1.8.3</title>
+    <title>迷宫冒险 - 1.7.1</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         body {
@@ -340,7 +340,6 @@
         }
         
         .connection-status {
-            background-color: rgba(244, 252, 2, 0.8);
             position: absolute;
             bottom: 15px;
             right: 15px;
@@ -352,7 +351,7 @@
         }
         
         .connected {
-            background-color: rgb(0, 255, 0);
+            background: rgba(76, 175, 80, 0.8);
         }
         
         .disconnected {
@@ -1290,665 +1289,7 @@
     cursor: not-allowed;
     transform: scale(1);
 }
-/* 版本检查模态框 */
-.version-modal {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.85);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 2000;
-}
 
-.version-content {
-    background: linear-gradient(135deg, #1a1a2e, #16213e);
-    border: 2px solid #4CAF50;
-    border-radius: 15px;
-    padding: 30px;
-    width: 90%;
-    max-width: 500px;
-    box-shadow: 0 0 40px rgba(76, 175, 80, 0.5);
-}
-
-.version-input-group {
-    margin-bottom: 20px;
-}
-
-.version-input-group label {
-    display: block;
-    margin-bottom: 8px;
-    color: #4CAF50;
-    font-weight: bold;
-}
-
-.version-input-group input {
-    width: 100%;
-    padding: 12px;
-    background: rgba(255, 255, 255, 0.1);
-    border: 1px solid #4CAF50;
-    border-radius: 5px;
-    color: white;
-    font-size: 16px;
-}
-
-.ip-tips {
-    margin-top: 5px;
-    color: #888;
-}
-
-.version-actions {
-    display: flex;
-    gap: 15px;
-    justify-content: center;
-    margin: 20px 0;
-}
-
-.version-actions button {
-    padding: 10px 25px;
-    background: linear-gradient(135deg, #4CAF50, #2E7D32);
-    color: white;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.3s ease;
-}
-
-.version-actions button:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 5px 15px rgba(0,0,0,0.4);
-}
-
-.version-status {
-    background: rgba(0, 0, 0, 0.3);
-    padding: 15px;
-    border-radius: 8px;
-    margin: 15px 0;
-    border: 1px solid #4CAF50;
-}
-
-.version-status h4 {
-    color: #4CAF50;
-    margin-top: 0;
-    margin-bottom: 10px;
-}
-
-.version-info {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin: 8px 0;
-    padding: 5px 0;
-    border-bottom: 1px solid rgba(76, 175, 80, 0.2);
-}
-
-.version-info:last-child {
-    border-bottom: none;
-}
-
-.version-label {
-    color: #aaa;
-    font-size: 14px;
-}
-
-.version-value {
-    color: white;
-    font-weight: bold;
-    font-family: monospace;
-}
-
-.connection-status {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 20px;
-    background: rgba(76, 175, 80, 0.2);
-    border-radius: 8px;
-    margin: 15px 0;
-}
-
-.spinner {
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top: 2px solid #4CAF50;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
-
-.server-response {
-    margin-top: 20px;
-    padding: 15px;
-    background: rgba(0, 0, 0, 0.3);
-    border-radius: 8px;
-    border: 1px solid #4CAF50;
-}
-
-.server-response h3 {
-    color: #4CAF50;
-    margin-top: 0;
-    margin-bottom: 10px;
-}
-
-#responseContent {
-    color: white;
-    white-space: pre-wrap;
-    font-family: monospace;
-}
-
-.update-progress {
-    margin-top: 15px;
-}
-
-.progress-bar {
-    width: 100%;
-    height: 8px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
-    overflow: hidden;
-    margin-bottom: 8px;
-}
-
-.progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #2196F3, #4CAF50);
-    border-radius: 4px;
-    transition: width 0.3s ease;
-    width: 0%;
-}
-
-.progress-text {
-    text-align: center;
-    color: #aaa;
-    font-size: 12px;
-    margin-top: 5px;
-}
-
-.update-files {
-    margin-top: 15px;
-    background: rgba(0, 0, 0, 0.3);
-    border-radius: 6px;
-    padding: 10px;
-    max-height: 200px;
-    overflow-y: auto;
-}
-
-.file-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 5px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    font-size: 12px;
-}
-
-.file-item:last-child {
-    border-bottom: none;
-}
-
-.file-name {
-    color: #ccc;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 60%;
-}
-
-.file-size {
-    color: #888;
-}
-
-.file-status {
-    color: #4CAF50;
-}
-
-.version-indicator {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    margin-right: 5px;
-}
-
-.version-indicator.up-to-date {
-    background: #4CAF50;
-}
-
-.version-indicator.outdated {
-    background: #f44336;
-    animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-    0% { opacity: 1; }
-    50% { opacity: 0.5; }
-    100% { opacity: 1; }
-}
-
-.version-indicator.checking {
-    background: #FF9800;
-    animation: spin 1s linear infinite;
-}
-
-/* 调试屏幕 */
-.screen {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: rgba(0, 0, 0, 0.9);
-    border: 1px solid #4CAF50;
-    border-radius: 10px;
-    padding: 20px;
-    min-width: 300px;
-    max-width: 500px;
-    z-index: 1000;
-    font-family: monospace;
-    font-size: 12px;
-    max-height: 80vh;
-    overflow-y: auto;
-}
-    .room-browser {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.85);
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        z-index: 2000;
-    }
-    
-    .room-browser-container {
-        background: linear-gradient(135deg, #1a1a2e, #16213e);
-        border: 2px solid #4CAF50;
-        border-radius: 15px;
-        padding: 30px;
-        width: 90%;
-        max-width: 800px;
-        height: 80vh;
-        display: flex;
-        flex-direction: column;
-        box-shadow: 0 0 40px rgba(76, 175, 80, 0.5);
-    }
-    
-    .browser-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 20px;
-        padding-bottom: 15px;
-        border-bottom: 1px solid #4CAF50;
-    }
-    
-    .browser-title {
-        color: #4CAF50;
-        font-size: 24px;
-        margin: 0;
-    }
-    
-    .browser-close {
-        background: none;
-        border: none;
-        color: #f44336;
-        font-size: 24px;
-        cursor: pointer;
-        padding: 0;
-        width: 30px;
-        height: 30px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 50%;
-        transition: all 0.3s;
-    }
-    
-    .browser-close:hover {
-        background: rgba(244, 67, 54, 0.2);
-    }
-    
-    .browser-controls {
-        display: flex;
-        gap: 15px;
-        margin-bottom: 20px;
-        flex-wrap: wrap;
-    }
-    
-    .search-box {
-        flex: 1;
-        min-width: 200px;
-        position: relative;
-    }
-    
-    .search-input {
-        width: 100%;
-        padding: 10px 40px 10px 15px;
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid #4CAF50;
-        border-radius: 5px;
-        color: white;
-        font-size: 16px;
-        outline: none;
-    }
-    
-    .search-input:focus {
-        border-color: #8BC34A;
-        box-shadow: 0 0 8px rgba(139, 195, 74, 0.5);
-    }
-    
-    .search-icon {
-        position: absolute;
-        right: 10px;
-        top: 50%;
-        transform: translateY(-50%);
-        color: #4CAF50;
-    }
-    
-    .filter-select {
-        padding: 10px 15px;
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid #4CAF50;
-        border-radius: 5px;
-        color: white;
-        font-size: 16px;
-        outline: none;
-        cursor: pointer;
-    }
-    
-    .filter-select option {
-        background: #16213e;
-        color: white;
-    }
-    
-    .room-list {
-        flex: 1;
-        overflow-y: auto;
-        border: 1px solid #333;
-        border-radius: 5px;
-        padding: 10px;
-        background: rgba(0, 0, 0, 0.3);
-    }
-    
-    .room-item {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid #4CAF50;
-        border-radius: 10px;
-        padding: 15px;
-        margin-bottom: 10px;
-        transition: all 0.3s ease;
-        cursor: pointer;
-    }
-    
-    .room-item:hover {
-        background: rgba(76, 175, 80, 0.1);
-        transform: translateX(5px);
-    }
-    
-    .room-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-    }
-    
-    .room-name {
-        font-size: 18px;
-        font-weight: bold;
-        color: #4CAF50;
-    }
-    
-    .room-code {
-        background: rgba(0, 0, 0, 0.5);
-        padding: 5px 10px;
-        border-radius: 15px;
-        font-size: 14px;
-        color: #fff;
-        border: 1px solid #666;
-    }
-    
-    .room-info {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-top: 10px;
-    }
-    
-    .room-host {
-        color: #8BC34A;
-        font-size: 14px;
-    }
-    
-    .room-players {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-    }
-    
-    .player-badge {
-        width: 25px;
-        height: 25px;
-        border-radius: 50%;
-        background: #4CAF50;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 12px;
-        font-weight: bold;
-        color: white;
-    }
-    
-    .room-status {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-top: 10px;
-    }
-    
-    .player-count {
-        font-size: 14px;
-        color: #ccc;
-    }
-    
-    .join-button {
-        padding: 8px 20px;
-        background: linear-gradient(135deg, #4CAF50, #2E7D32);
-        color: white;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 16px;
-        transition: all 0.3s;
-    }
-    
-    .join-button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 5px 15px rgba(0,0,0,0.4);
-    }
-    
-    .join-button:disabled {
-        background: #555;
-        cursor: not-allowed;
-        transform: none;
-        box-shadow: none;
-    }
-    
-    .room-private {
-        position: absolute;
-        top: 10px;
-        right: 10px;
-        background: rgba(255, 152, 0, 0.2);
-        border: 1px solid #FF9800;
-        border-radius: 15px;
-        padding: 3px 10px;
-        font-size: 12px;
-        color: #FF9800;
-    }
-    
-    .refresh-button {
-        position: absolute;
-        top: 20px;
-        right: 20px;
-        background: rgba(76, 175, 80, 0.2);
-        border: 1px solid #4CAF50;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        transition: all 0.3s;
-    }
-    
-    .refresh-button:hover {
-        background: rgba(76, 175, 80, 0.4);
-    }
-    
-    .refresh-button.spinning {
-        animation: spin 1s linear infinite;
-    }
-    
-    @keyframes spin {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
-    }
-    
-    .no-rooms {
-        text-align: center;
-        color: #888;
-        padding: 40px;
-        font-size: 18px;
-    }
-    
-    .connection-status-server {
-        position: absolute;
-        top: 20px;
-        left: 20px;
-        background: rgba(0, 0, 0, 0.7);
-        padding: 10px 15px;
-        border-radius: 5px;
-        font-size: 14px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-    
-    .status-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        background: #4CAF50;
-        animation: pulse 2s infinite;
-    }
-    
-    .status-dot.error {
-        background: #f44336;
-        animation: none;
-    }
-    
-    @keyframes pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.5; }
-        100% { opacity: 1; }
-    }
-/* 服务器设置样式 */
-.server-settings {
-    background: rgba(0, 0, 0, 0.7);
-    padding: 15px;
-    border-radius: 10px;
-    margin-bottom: 15px;
-    border: 1px solid #4CAF50;
-}
-
-.server-settings h4 {
-    margin-top: 0;
-    margin-bottom: 10px;
-    color: #8BC34A;
-}
-
-.test-button {
-    background: linear-gradient(135deg, #2196F3, #0D47A1);
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 16px;
-    cursor: pointer;
-    transition: all 0.3s ease;
-}
-
-.test-button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(0,0,0,0.4);
-}
-
-.test-button:disabled {
-    background: #666;
-    cursor: not-allowed;
-    transform: none;
-    box-shadow: none;
-}
-
-/* 离线模式提示 */
-.offline-mode {
-    background: rgba(255, 152, 0, 0.2);
-    border: 1px solid #FF9800;
-    border-radius: 8px;
-    padding: 10px;
-    margin: 10px 0;
-    color: #FF9800;
-    text-align: center;
-}
-/* 房间浏览器按钮样式 */
-.browser-footer .menu-button {
-    background: linear-gradient(135deg, #4CAF50, #2E7D32);
-    margin: 5px;
-    min-width: 120px;
-}
-
-.browser-footer .menu-button:last-child {
-    background: linear-gradient(135deg, #666, #444);
-}
-
-/* 加载动画 */
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
-.spinner {
-    display: inline-block;
-    width: 16px;
-    height: 16px;
-    border: 2px solid rgba(255,255,255,0.3);
-    border-top: 2px solid #4CAF50;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    margin-right: 8px;
-}
-.small-menu-button {
-    display: block;
-    width: 150px;
-    margin: 15px auto;
-    padding: 13px;
-    font-size: 18px;
-    background: linear-gradient(135deg, #4CAF50, #2E7D32);
-    color: white;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.3);
-}
     </style>
 </head>
 
@@ -2151,8 +1492,8 @@
                     </select>
                 </div>
             </div>
-                <button class="small-menu-button" onclick="connectToMultiplayerGame()">开始游戏</button>
-                <button class="small-menu-button" onclick="showScreen('mainMenu')">返回</button>
+                <button class="menu-button" onclick="connectToMultiplayerGame()">开始游戏</button>
+                <button class="menu-button" onclick="showScreen('mainMenu')">返回</button>
             </div>
         </div>
     </div>
@@ -2280,7 +1621,7 @@
         <div class="buttons">
             <button onclick="saveUISettings()">保存</button>
             <button onclick="document.getElementById('uiSettingsModal').classList.add('hidden')">取消</button>
-            <button onclick="versionManager.showVersionModal()">检查版本</button>
+            <button onclick="checkServerVersion()">检查版本</button>
         </div>
     </div>
     
@@ -2350,113 +1691,8 @@
         </div>
     </div>
     <div id="event-notifications"></div>
-    <div id="versionCheckModal" class="version-modal hidden">
-        <div class="version-content">
-            <h2>版本更新</h2>
-            
-            <div class="version-input-group">
-                <label for="serverIpInput">服务器IP地址:</label>
-                <input type="text" id="serverIpInput" placeholder="例: 192.168.1.100:1683" value="localhost:1683">
-                <div class="ip-tips">
-                    <small>提示: 服务器IP格式为 IP:端口，如 192.168.1.100:1683</small>
-                </div>
-            </div>
-            
-            <div id="versionStatus" class="version-status hidden">
-                <h4>版本信息</h4>
-                <div class="version-info">
-                    <span class="version-label">当前版本:</span>
-                    <span class="version-value" id="currentVersion">1.8.3</span>
-                </div>
-                <div class="version-info">
-                    <span class="version-label">服务器版本:</span>
-                    <span class="version-value" id="serverVersion">未检测</span>
-                </div>
-                <div class="version-info">
-                    <span class="version-label">更新状态:</span>
-                    <span class="version-value" id="updateStatus">
-                        <span class="version-indicator checking"></span>检测中
-                    </span>
-                </div>
-            </div>
-            
-            <div class="version-actions">
-                <button id="connectServerBtn" onclick="connectToServer()">连接服务器</button>
-                <button onclick="document.getElementById('versionCheckModal').classList.add('hidden')">取消</button>
-            </div>
-            
-            <div id="connectionStatus" class="connection-status-server hidden">
-                <div class="spinner"></div>
-                <span>连接中...</span>
-            </div>
-            
-            <div id="serverResponse" class="server-response hidden">
-                <h3>服务器响应:</h3>
-                <div id="responseContent"></div>
-            </div>
-            
-            <div id="updateProgress" class="update-progress" style="display: none;">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progressFill"></div>
-                </div>
-                <div class="progress-text" id="progressText">准备下载...</div>
-            </div>
-            
-            <div id="updateFiles" class="update-files" style="display: none;">
-                <!-- 文件列表将通过JS动态生成 -->
-            </div>
-        </div>
-    </div>
-<!-- 房间浏览器界面 -->
-<div id="roomBrowser" class="room-browser hidden">
-    <div class="room-browser-container">
-        <div class="browser-header">
-            <h2 class="browser-title">🏠 局域网房间</h2>
-            <button class="browser-close" onclick="closeRoomBrowser()">×</button>
-        </div>
-        
-        <div class="browser-controls">
-            <div class="search-box">
-                <input type="text" id="roomSearch" class="search-input" 
-                       placeholder="搜索房间名称或房主..." 
-                       onkeyup="filterRooms()">
-                <span class="search-icon">🔍</span>
-            </div>
-            
-            <div class="filter-group">
-                <label for="roomFilter">筛选：</label>
-                <select id="roomFilter" class="filter-select" onchange="filterRooms()">
-                    <option value="all">所有房间</option>
-                    <option value="available">可加入</option>
-                    <option value="public">公开</option>
-                    <option value="private">私密</option>
-                </select>
-            </div>
-            
-            <button class="refresh-button" onclick="refreshRooms()">
-                <span id="refreshIcon">🔄</span>
-                <span>刷新</span>
-            </button>
-        </div>
-        
-        <div class="connection-status">
-            <div class="status-dot" id="statusDot"></div>
-            <span id="statusText">连接中...</span>
-        </div>
-        
-        <div class="room-list" id="roomList">
-            <div class="loading-indicator">正在搜索房间...</div>
-        </div>
-        
-        <div class="browser-footer">
-            <button class="menu-button" onclick="createRoom()">➕ 创建新房间</button>
-            <button class="menu-button" onclick="closeRoomBrowser()">返回</button>
-        </div>
-    </div>
-</div>
     <script>
-
-const CLIENT_VERSION = "1.8.3";
+const CLIENT_VERSION = "1.7.1";
 const GAME_SERVER_URL = '/'; // 服务器URL，根据实际情况修改
 async function checkServerVersion() {
     const button = event.target; // 获取被点击的按钮本身
@@ -2466,7 +1702,7 @@ async function checkServerVersion() {
     button.disabled = true;
     button.textContent = '检查中...';
     
-    showNotification('正在检查服务器连接...', 5000);
+    showNotification('正在检查服务器连接...', 3000);
 
     try {
         const fullUrl = window.location.origin + GAME_SERVER_URL + 'api/version-check';
@@ -2490,18 +1726,16 @@ async function checkServerVersion() {
         // 根据返回的状态处理结果
         switch(data.status) {
             case 'ok':
-                showNotification(`✅ 版本检查成功！当前版本: ${data.version}`, 5000);
+                showNotification(`✅ 版本检查成功！当前版本: ${data.version}`, 4000);
                 break;
             case 'outdated':
                  // 如果需要，可以在这里显示更详细的服务器版本
-                 const serverVerMsg = data.version ? `\n服务器最新版本: ${data.version}` : '';
-                 const message = `⚠️ 提示: 您的游戏版本已过时！${serverVerMsg}\n\n请联系管理员更新游戏。`;
+                 const serverVerMsg = data.serverVersion ? `\n服务器最新版本: ${data.serverVersion}` : '';
+                 const message = `⚠️ 提示: 您的游戏版本已过时！${serverVerMsg}\n\n请刷新页面或联系管理员更新游戏。`;
                  alert(message);
                  showNotification('请立即更新游戏以保证体验！', 7000);
                  break;
-            case 'warning':
-                 showNotification(`⚠️ 警告: 你的游戏版本高于服务器版本${data.message || '服务器返回了警告信息'}`, 5000);
-                 break;
+            case 'error':
             default:
                  showNotification(`❌ 错误: ${data.message || '服务器返回了错误信息'}`, 5000);
         }
@@ -2766,8 +2000,8 @@ function createCoinDisplay() {
     coinDisplay.id = 'coinDisplay';
     coinDisplay.style.cssText = `
         position: fixed;
-        top: 50px;
-        right: 10px;
+        top: 20px;
+        right: 20px;
         background: rgba(0, 0, 0, 0.7);
         color: gold;
         padding: 10px 15px;
@@ -2780,7 +2014,7 @@ function createCoinDisplay() {
         display: none; /* 默认隐藏 */
     `;
     coinDisplay.innerHTML = `
-        <span style="color: gold;">金币:</span>
+        <span style="color: gold;">🪙</span>
         <span id="coinCount">0</span>
     `;
     document.body.appendChild(coinDisplay);
@@ -2828,558 +2062,6 @@ function addCoins(amount) {
     // 显示获得金币的提示
     showNotification(`获得 ${amount} 个金币！`);
 }
-let serverVersion = "未知";
-let needUpdate = false;
-let connectedServer = null;
-
-// 版本管理器类
-class VersionManager {
-    constructor() {
-        this.serverUrl = localStorage.getItem('serverUrl') || 'localhost:1683';
-        this.lastCheck = localStorage.getItem('lastVersionCheck') || 0;
-        this.isChecking = false;
-        this.initialize();
-    }
-
-    initialize() {
-        // 延迟初始化，确保DOM元素已存在
-        setTimeout(() => {
-            this.loadSavedVersionInfo();
-            this.bindEvents();
-            // 每小时自动检查一次版本
-            setInterval(() => this.autoCheckVersion(), 60 * 60 * 1000);
-        }, 100);
-    }
-
-    loadSavedVersionInfo() {
-        const savedServerVersion = localStorage.getItem('serverVersion');
-        const savedNeedUpdate = localStorage.getItem('needUpdate');
-        
-        serverVersion = savedServerVersion || '未知';
-        needUpdate = savedNeedUpdate === 'true';
-        
-        this.updateVersionDisplay(needUpdate);
-    }
-
-    bindEvents() {
-        // 服务器IP输入变化时自动保存
-        const serverIpInput = document.getElementById('serverIpInput');
-        if (serverIpInput) {
-            serverIpInput.addEventListener('input', (e) => {
-                this.serverUrl = e.target.value;
-                localStorage.setItem('serverUrl', this.serverUrl);
-                this.clearVersionCache();
-            });
-        }
-    }
-
-    clearVersionCache() {
-        localStorage.removeItem('serverVersion');
-        localStorage.removeItem('needUpdate');
-        localStorage.removeItem('lastVersionCheck');
-        document.getElementById('serverVersion').textContent = '未检测';
-        document.getElementById('updateStatus').innerHTML = '<span class="version-indicator checking"></span>检测中';
-    }
-
-    async checkVersion() {
-        if (this.isChecking) return;
-        
-        this.isChecking = true;
-        try {
-            await this._checkVersionInternal();
-        } finally {
-            this.isChecking = false;
-        }
-    }
-
-    async _checkVersionInternal() {
-        const btn = document.getElementById('connectServerBtn');
-        const connectionStatus = document.getElementById('connectionStatus');
-        const serverResponse = document.getElementById('serverResponse');
-        
-        if (!btn || !connectionStatus || !serverResponse) {
-            console.error('版本检查元素未找到');
-            return;
-        }
-        
-        try {
-            btn.disabled = true;
-            btn.textContent = '检查中...';
-            connectionStatus.classList.remove('hidden');
-            serverResponse.classList.add('hidden');
-            
-            // 显示版本状态
-            const versionStatus = document.getElementById('versionStatus');
-            if (versionStatus) {
-                versionStatus.classList.remove('hidden');
-            }
-            
-            // 显示正在尝试的URL
-            connectionStatus.innerHTML = `
-                <div class="spinner"></div>
-                <span>连接中: ${this.serverUrl}</span>
-            `;
-            
-            // 构建完整的URL
-            let baseUrl;
-            if (this.serverUrl.startsWith('http://') || this.serverUrl.startsWith('https://')) {
-                baseUrl = this.serverUrl;
-            } else {
-                baseUrl = `http://${this.serverUrl}`;
-            }
-            
-            const checkUrl = `${baseUrl}/api/version-check`;
-            
-            console.log('正在尝试连接:', checkUrl);
-            
-            // 创建 AbortController 用于超时控制
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
-            
-            const response = await fetch(checkUrl, {
-                method: 'GET',
-                headers: {
-                    'Client-Version': CLIENT_VERSION,
-                    'Accept': 'application/json',
-                },
-                signal: controller.signal
-            });
-            
-            clearTimeout(timeoutId);
-            
-            console.log('响应状态:', response.status, response.statusText);
-            
-            if (!response.ok) {
-                throw new Error(`HTTP错误! 状态: ${response.status} ${response.statusText}`);
-                showNotification(`❌ 连接失败: ${error.message}`, 'error');
-                
-            }
-            
-            const data = await response.json();
-            console.log('服务器响应:', data);
-            
-            // 更新版本信息显示
-            this.updateVersionDisplayElements(data);
-            
-            // 保存检测结果
-            serverVersion = data.version || "?";
-            needUpdate = data.status === 'outdated';
-            
-            localStorage.setItem('serverUrl', this.serverUrl);
-            localStorage.setItem('serverVersion', serverVersion);
-            localStorage.setItem('needUpdate', needUpdate);
-            localStorage.setItem('lastVersionCheck', Date.now());
-            // 显示详细的服务器响应
-            const responseContent = document.getElementById('responseContent');
-            if (responseContent) {
-                responseContent.textContent = `响应时间: ${new Date().toLocaleTimeString()}\n` +
-                                            `服务器地址: ${baseUrl}\n` +
-                                            `客户端版本: ${CLIENT_VERSION}\n` +
-                                            `服务器版本: ${data.version }\n\n` +
-                                            JSON.stringify(data, null, 2);
-            }
-            
-            serverResponse.classList.remove('hidden');
-            error = null;
-            btn.textContent = '重新连接';
-            // 详细的错误信息
-            let errorMessage = error.message;
-            connectionStatus.classList.remove('error');
-            
-            if (error.name === 'AbortError') {
-                errorMessage = '连接超时，请检查网络或服务器地址';
-            } else if (error.message.includes('Failed to fetch')) {
-                errorMessage = '无法连接到服务器，请确认：\n1. 服务器地址是否正确\n2. 服务器是否正在运行\n3. 是否有防火墙阻止连接';
-            } else if (error.message.includes('NetworkError')) {
-                errorMessage = '网络错误，请检查网络连接';
-            } else if (error.message.includes('CORS')) {
-                errorMessage = '跨域访问被拒绝，请配置服务器允许跨域访问';
-            }
-            
-            // 显示详细的错误信息
-            connectionStatus.innerHTML = `
-                <div class="error">连接失败</div>
-                <div style="text-align: left; font-size: 12px; margin-top: 10px;">
-                    <div>错误类型: ${error.name}</div>
-                    <div>错误详情: ${errorMessage}</div>
-                    <div>时间: ${new Date().toLocaleTimeString()}</div>
-                </div>
-            `;
-            connectionStatus.classList.add('error');
-            
-            // 3秒后恢复初始状态
-            setTimeout(() => {
-                connectionStatus.classList.remove('error');
-                connectionStatus.innerHTML = `
-                    <div class="spinner"></div>
-                    <span>连接中...</span>
-                `;
-            }, 5000);
-            
-            btn.textContent = '重试';
-        } finally {
-            btn.disabled = false;
-        }
-    }
-
-    updateVersionDisplay(hasUpdate) {
-        const updateStatus = document.getElementById('updateStatus');
-        const updateBtn = document.getElementById('updateBtn');
-        
-        if (!updateStatus || !updateBtn) {
-            console.log('版本检查元素尚未加载，跳过UI更新');
-            return;
-        }
-
-        // 清除之前的类
-        updateStatus.className = 'update-status';
-        
-        if (hasUpdate) {
-            updateStatus.innerHTML = '<span class="version-indicator outdated"></span>需要更新';
-            updateBtn.style.display = 'block';
-            updateBtn.textContent = `立即更新到 ${serverVersion}`;
-        } else {
-            updateStatus.innerHTML = '<span class="version-indicator up-to-date"></span>已是最新';
-            updateBtn.style.display = 'none';
-        }
-    }
-
-    updateVersionDisplayElements(data) {
-        const currentVersionEl = document.getElementById('currentVersion');
-        const serverVersionEl = document.getElementById('serverVersion');
-        const updateStatusEl = document.getElementById('updateStatus');
-        
-        if (currentVersionEl) {
-            currentVersionEl.textContent = CLIENT_VERSION;
-        }
-        
-        if (serverVersionEl) {
-            serverVersionEl.textContent = data.version || '未知';
-        }
-        
-        if (updateStatusEl) {
-            updateStatusEl.className = 'update-status';
-            
-            if (data.status === 'ok') {
-                updateStatusEl.innerHTML = '<span class="version-indicator up-to-date"></span>已是最新';
-                updateStatusEl.classList.add('success');
-            } else if (data.status === 'outdated') {
-                updateStatusEl.innerHTML = '<span class="version-indicator outdated"></span>需要更新';
-                updateStatusEl.classList.add('error');
-            } else {
-                updateStatusEl.innerHTML = '<span class="version-indicator checking"></span>状态未知';
-                updateStatusEl.classList.add('checking');
-            }
-        }
-    }
-
-    autoCheckVersion() {
-        const now = Date.now();
-        const lastCheck = parseInt(localStorage.getItem('lastVersionCheck') || 0);
-        
-        // 如果上次检查超过1小时，自动检查
-        if (now - lastCheck > 60 * 60 * 1000) {
-            console.log('自动检查版本更新...');
-            this.checkVersion().catch(err => {
-                console.log('自动版本检查失败:', err);
-            });
-        }
-    }
-
-    showVersionModal() {
-        const modal = document.getElementById('versionCheckModal');
-        if (!modal) {
-            console.error('版本检查模态框不存在');
-            return;
-        }
-        
-        modal.classList.remove('hidden');
-        
-        // 自动填充上次保存的服务器IP
-        const serverIpInput = document.getElementById('serverIpInput');
-        if (serverIpInput) {
-            serverIpInput.value = this.serverUrl;
-        }
-    }
-}
-
-// 全局变量
-versionManager = new VersionManager();
-
-// 连接服务器函数
-async function connectToServer() {
-    versionManager.checkVersion();
-}
-
-// 测试连接函数
-async function testServerConnection() {
-    const serverIpInput = document.getElementById('serverIpInput');
-    if (!serverIpInput) {
-        showNotification('界面元素未加载完成', 'error');
-        return;
-    }
-    
-    const ipValue = serverIpInput.value.trim();
-    if (!ipValue) {
-        showNotification('请先输入服务器地址', 'error');
-        return;
-    }
-    
-    showNotification('正在测试连接...');
-    
-    try {
-        // 测试基本连接
-        const testUrl = ipValue.startsWith('http') ? ipValue : `http://${ipValue}`;
-        
-        // 测试 1: 基本连接
-        const response1 = await fetch(testUrl, {
-            method: 'HEAD',
-            timeout: 5000
-        });
-        
-        showNotification('✓ 服务器可访问', 'success');
-        
-        // 测试 2: API 端点
-        const response2 = await fetch(`${testUrl}/api/version-check`, {
-            method: 'OPTIONS',
-            timeout: 5000
-        });
-        
-        showNotification('✓ API 端点可访问', 'success');
-        
-        // 测试 3: 跨域
-        const response3 = await fetch(`${testUrl}/api/version-check`, {
-            method: 'GET',
-            headers: {
-                'Client-Version': CLIENT_VERSION
-            },
-            timeout: 5000
-        });
-        
-        if (response3.ok) {
-            showNotification('✓ 连接测试成功', 'success');
-        } else {
-            showNotification('⚠ API 调用失败 (状态码: ' + response3.status + ')', 'warning');
-        }
-        
-    } catch (error) {
-        console.error('连接测试失败:', error);
-        showNotification('✗ 连接测试失败: ' + error.message, 'error');
-    }
-}
-
-async function startUpdateProcess() {
-    const versionModal = document.getElementById('versionCheckModal');
-    const serverUrl = localStorage.getItem('serverUrl') || 'localhost:1683';
-    const baseUrl = serverUrl.startsWith('http') ? serverUrl : `http://${serverUrl}`;
-    
-    showNotification('开始检查并准备更新...', 'info');
-
-    try {
-        // 显示模态框以显示进度
-        versionModal.classList.remove('hidden');
-
-        // 1. 获取更新文件列表
-        console.log('正在从服务器获取文件列表...');
-        const response = await fetch(`${baseUrl}/api/update-list`, {
-            headers: { 'Client-Version': CLIENT_VERSION }
-        });
-        const data = await response.json();
-        
-        if (data.status === 'ok') {
-            showNotification('✅ 你已经是最新版本！', 'success');
-            return; // 如果已经是最新的，则退出
-        }
-        
-        console.log('服务器需要更新的文件:', data.files);
-        displayUpdateFiles(data.files);
-
-        // 2. 清空之前可能存在的临时文件
-        if ('caches' in window) {
-            await caches.delete('game-update-cache');
-        }
-
-        // 3. 开始下载文件
-        await downloadFiles(data.files, baseUrl);
-        
-        // 4. 更新完成
-        showNotification('🎉 所有文件下载完成！', 'success');
-        
-        // 5. 询问是否应用更新（刷新页面）
-        setTimeout(() => {
-            if (confirm('更新已下载完成。是否刷新页面以应用更新？')) {
-                // 清空Service Worker缓存等（如果使用的话）
-                if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.getRegistrations().then(registrations => {
-                        registrations.forEach(registration => registration.unregister());
-                    });
-                }
-                location.reload();
-            }
-        }, 1500);
-
-    } catch (error) {
-        console.error('更新流程失败:', error);
-        showNotification(`❌ 更新失败: ${error.message}`, 'error');
-    }
-}
-
-// 获取更新文件列表
-async function getUpdateFileList() {
-    const serverUrl = localStorage.getItem('serverUrl') || 'localhost:1683';
-    const baseUrl = serverUrl.startsWith('http') ? serverUrl : `http://${serverUrl}`;
-    
-    // 实际应用中应该从服务器获取，这里模拟文件列表
-    const mockFileList = [
-        { name: 'maze.html', size: 123456 },
-        { name: 'maze.css', size: 23456 },
-        { name: 'maze.js', size: 345678 },
-        { name: 'images/icon.png', size: 5678 }
-    ];
-    
-    return mockFileList;
-}
-
-// 显示更新文件列表
-function displayUpdateFiles(fileList) {
-    const updateFiles = document.getElementById('updateFiles');
-    if (!updateFiles) return;
-    
-    updateFiles.innerHTML = '';
-    updateFiles.style.display = 'block';
-    
-    fileList.forEach(file => {
-        const fileItem = document.createElement('div');
-        fileItem.className = 'file-item';
-        fileItem.innerHTML = `
-            <span class="file-name">${file.name}</span>
-            <span class="file-size">${formatFileSize(file.size)}</span>
-            <span class="file-status">等待下载</span>
-        `;
-        updateFiles.appendChild(fileItem);
-    });
-}
-
-// 真正下载文件
-async function downloadFiles(fileList, baseUrl) {
-    const totalSize = fileList.reduce((sum, file) => sum + file.size, 0);
-    let downloadedSize = 0;
-
-    // 显示进度条
-    const updateProgress = document.getElementById('updateProgress');
-    const progressFill = document.getElementById('progressFill');
-    const progressText = document.getElementById('progressText');
-
-    if (updateProgress) {
-        updateProgress.style.display = 'block';
-    }
-
-    for (const file of fileList) {
-        try {
-            console.log(`正在下载文件: ${file.name}...`);
-            
-            // 更新状态
-            updateFileStatus(file.name, '下载中...');
-            
-            // 从服务器下载文件
-            const downloadUrl = `${baseUrl}/api/download/${file.name}`;
-            const response = await fetch(downloadUrl);
-
-            if (!response.ok) {
-                throw new Error(`下载 ${file.name} 失败: HTTP ${response.status}`);
-            }
-
-            // 获取文件内容
-            const blob = await response.blob();
-
-            // 【关键】创建一个下载链接并触发点击
-            const downloadLink = document.createElement('a');
-            const url = URL.createObjectURL(blob);
-            
-            downloadLink.href = url;
-            downloadLink.download = file.name; // 设置下载的文件名
-            document.body.appendChild(downloadLink);
-            downloadLink.click();
-            
-            // 清理
-            setTimeout(() => {
-                document.body.removeChild(downloadLink);
-                URL.revokeObjectURL(url); // 释放内存
-            }, 100);
-
-            // 模拟下载完成以更新进度
-            await new Promise(resolve => setTimeout(resolve, 500)); // 给浏览器时间处理下载
-
-            // 更新进度
-            downloadedSize += file.size;
-            const progress = (downloadedSize / totalSize) * 100;
-
-            if (progressFill) {
-                progressFill.style.width = `${progress}%`;
-            }
-
-            if (progressText) {
-                progressText.textContent = `下载进度: ${Math.round(progress)}% (${formatFileSize(downloadedSize)}/${formatFileSize(totalSize)})`;
-            }
-
-            // 更新状态
-            updateFileStatus(file.name, '下载完成');
-
-        } catch (error) {
-            console.error(`下载 ${file.name} 失败:`, error);
-            updateFileStatus(file.name, `下载失败: ${error.message}`);
-            throw error; // 抛出错误停止整个流程
-        }
-    }
-}
-
-// 模拟文件下载
-function simulateFileDownload(file) {
-    return new Promise((resolve) => {
-        // 模拟下载时间
-        const downloadTime = (file.size / 102400); // 假设每秒下载100KB
-        
-        let progress = 0;
-        const interval = setInterval(() => {
-            progress += 10;
-            if (progress >= 100) {
-                clearInterval(interval);
-                resolve();
-            }
-        }, downloadTime * 10);
-    });
-}
-
-// 更新文件状态
-function updateFileStatus(fileName, status) {
-    const fileItems = document.querySelectorAll('.file-item');
-    fileItems.forEach(item => {
-        if (item.querySelector('.file-name').textContent === fileName) {
-            const statusEl = item.querySelector('.file-status');
-            statusEl.textContent = status;
-            
-            if (status === '下载完成') {
-                statusEl.style.color = '#4CAF50';
-            } else if (status === '下载失败') {
-                statusEl.style.color = '#f44336';
-            } else {
-                statusEl.style.color = '#FF9800';
-            }
-        }
-    });
-}
-
-// 格式化文件大小
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
 
 // 在页面加载时初始化金币显示
 window.addEventListener('load', () => {
@@ -3387,11 +2069,7 @@ window.addEventListener('load', () => {
     // 从 localStorage 加载金币，如果没有则初始化为0
     gameState.coins = parseInt(localStorage.getItem('playerCoins')) || 0;
     gameState.playerData.coins = gameState.coins;
-    updateCoinDisplay();
-    // 初始化多人游戏设置
-    initMultiplayerSetup();
-    // 初始化房间管理器
-    roomManager.init();
+    // 初始不显示，在游戏开始时再显示
 });
 
 const EventSystem = {
@@ -3506,7 +2184,7 @@ EventSystem.register({
     notification.className = 'event-notification';
     notification.innerHTML = '<b>方向混乱！</b> 方向控制已暂时反转';
     document.getElementById('event-notifications').appendChild(notification);
-    setTimeout(() => notification.remove(), 5000);
+    setTimeout(() => notification.remove(), 3000);
     
     // 反转控制状态
     gameState.controlsReversed = true;
@@ -3536,11 +2214,309 @@ gameState.puzzleMode = {
     doorPosition: null, // 大门位置
     doorOpened: false // 大门是否已打开
 };
+// 随机事件系统
+
+// 解谜模式
+function startPuzzleMode() {
+    gameState.currentChallenge = 'puzzle';
+    gameState.currentLevel = 1;
+    showScreen('singlePlayerGame');
+    
+    // 初始化解谜模式
+    initPuzzleMode();
+}
+
+// 初始化解谜模式
+function initPuzzleMode() {
+    // 显示解谜模式UI
+    document.getElementById('puzzleInfo').classList.remove('hidden');
+    document.getElementById('sequenceDisplay').classList.remove('hidden');
+    
+    // 重置解谜状态
+    gameState.puzzleMode = {
+        buttons: [],
+        correctSequence: [],
+        currentSequence: [],
+        doorPosition: null,
+        doorOpened: false
+    };
+    
+    // 生成解谜迷宫
+    generatePuzzleMaze();
+    
+    // 更新序列显示
+    updateSequenceDisplay();
+}
+
+
+// 生成解谜迷宫
+function generatePuzzleMaze() {
+    const size = 15;
+    singlePlayerGame.maze = Array(size).fill().map(() => Array(size).fill(1));
+    
+    // 使用Prim算法生成基本迷宫
+    const walls = [];
+    singlePlayerGame.maze[1][1] = 0;
+    walls.push(...getCellWalls(1, 1, singlePlayerGame.maze));
+    
+    while (walls.length > 0) {
+        const wallIndex = Math.floor(Math.random() * walls.length);
+        const wall = walls[wallIndex];
+        walls.splice(wallIndex, 1);
+        
+        const opposite = getOppositeCell(wall, singlePlayerGame.maze);
+        
+        if (opposite.x > 0 && opposite.x < size-1 && 
+            opposite.y > 0 && opposite.y < size-1 && 
+            singlePlayerGame.maze[opposite.y][opposite.x] === 1) {
+            
+            singlePlayerGame.maze[wall.y][wall.x] = 0;
+            singlePlayerGame.maze[opposite.y][opposite.x] = 0;
+            walls.push(...getCellWalls(opposite.x, opposite.y, singlePlayerGame.maze));
+        }
+    }
+    
+    // 设置起点和出口
+    singlePlayerGame.player = { x: 1, y: 1 };
+    singlePlayerGame.exit = { x: size-2, y: size-2 };
+    
+    // 添加按钮（4-5个按钮）
+    const buttonCount = 4 + Math.floor(Math.random() * 2);
+    const buttonColors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'];
+    
+    for (let i = 0; i < buttonCount; i++) {
+        let x, y;
+        let attempts = 0;
+        do {
+            x = Math.floor(Math.random() * (size-4)) + 2;
+            y = Math.floor(Math.random() * (size-4)) + 2;
+            attempts++;
+        } while ((singlePlayerGame.maze[y][x] !== 0 || 
+                  isNearPlayer(x, y) ||
+                  gameState.puzzleMode.buttons.some(b => b.x === x && b.y === y)) && 
+                 attempts < 50);
+        
+        if (attempts < 50) {
+            singlePlayerGame.maze[y][x] = 10 + i; // 10-14 表示按钮
+            gameState.puzzleMode.buttons.push({
+                x, y, 
+                id: i,
+                pressed: false,
+                color: buttonColors[i]
+            });
+        }
+    }
+    
+    // 设置正确顺序（随机打乱）
+    gameState.puzzleMode.correctSequence = [];
+    for (let i = 0; i < buttonCount; i++) {
+        gameState.puzzleMode.correctSequence.push(i);
+    }
+    // 随机打乱顺序
+    gameState.puzzleMode.correctSequence.sort(() => Math.random() - 0.5);
+    
+    // 添加大门
+    let doorX = singlePlayerGame.exit.x;
+    let doorY = singlePlayerGame.exit.y;
+    
+    // 在出口前放置门
+    if (doorX < size-1 && singlePlayerGame.maze[doorY][doorX+1] === 0) {
+        doorX++;
+    } else if (doorX > 0 && singlePlayerGame.maze[doorY][doorX-1] === 0) {
+        doorX--;
+    } else if (doorY < size-1 && singlePlayerGame.maze[doorY+1][doorX] === 0) {
+        doorY++;
+    } else if (doorY > 0 && singlePlayerGame.maze[doorY-1][doorX] === 0) {
+        doorY--;
+    }
+    
+    singlePlayerGame.maze[doorY][doorX] = 9; // 9 表示门
+    gameState.puzzleMode.doorPosition = {x: doorX, y: doorY};
+    
+    // 调整画布大小并绘制
+    resizeSinglePlayerCanvas();
+    drawSinglePlayerMaze();
+}
 
 // 检查是否靠近玩家起点
 function isNearPlayer(x, y) {
     return Math.abs(x - 1) <= 2 && Math.abs(y - 1) <= 2;
 }
+
+// 处理按钮按下
+function handleButtonPress(buttonId) {
+    const button = gameState.puzzleMode.buttons.find(b => b.id === buttonId);
+    if (!button || button.pressed) return;
+    
+    // 添加到当前序列
+    gameState.puzzleMode.currentSequence.push(buttonId);
+    
+    // 标记按钮为已按下
+    button.pressed = true;
+    
+    // 更新显示
+    updateSequenceDisplay();
+    
+    // 检查序列是否正确
+    checkSequence();
+    
+    // 重新绘制迷宫以显示按下的按钮
+    drawSinglePlayerMaze();
+}
+
+// 更新序列显示
+function updateSequenceDisplay() {
+    const display = document.getElementById('sequenceDisplay');
+    let sequenceText = '当前顺序: ';
+    
+    if (gameState.puzzleMode.currentSequence.length === 0) {
+        sequenceText += '无';
+        display.className = 'sequence-display';
+    } else {
+        sequenceText += gameState.puzzleMode.currentSequence.map(id => {
+            const button = gameState.puzzleMode.buttons.find(b => b.id === id);
+            return `<span style="color:${button.color}">●</span>`;
+        }).join(' ');
+        
+        // 检查当前序列是否正确
+        const isCorrectSoFar = gameState.puzzleMode.currentSequence.every((id, index) => 
+            id === gameState.puzzleMode.correctSequence[index]
+        );
+        
+        if (isCorrectSoFar) {
+            display.className = 'sequence-display sequence-correct';
+        } else {
+            display.className = 'sequence-display sequence-wrong';
+        }
+    }
+    
+    display.innerHTML = sequenceText;
+}
+
+// 检查序列
+function checkSequence() {
+    const current = gameState.puzzleMode.currentSequence;
+    const correct = gameState.puzzleMode.correctSequence;
+    
+    // 检查是否完全正确
+    if (current.length === correct.length && 
+        current.every((id, index) => id === correct[index])) {
+        
+        // 序列正确，打开大门
+        openPuzzleDoor();
+    } else if (current.length > 0) {
+        // 检查当前部分是否正确
+        const isCorrectSoFar = current.every((id, index) => id === correct[index]);
+        
+        if (!isCorrectSoFar) {
+            // 序列错误，重置
+            setTimeout(() => {
+                resetPuzzleSequence();
+                alert('顺序错误！请重新开始。');
+            }, 500);
+        }
+    }
+}
+
+// 打开解谜大门
+function openPuzzleDoor() {
+    gameState.puzzleMode.doorOpened = true;
+    
+    // 将门变为通路
+    singlePlayerGame.maze[gameState.puzzleMode.doorPosition.y][gameState.puzzleMode.doorPosition.x] = 0;
+    
+    // 显示成功信息
+    document.getElementById('sequenceDisplay').innerHTML = 
+        '<span style="color:#4CAF50">✓ 序列正确！大门已打开</span>';
+    
+    // 重新绘制迷宫
+    drawSinglePlayerMaze();
+    
+    alert('恭喜！顺序正确，大门已经打开！');
+}
+
+// 重置解谜序列
+function resetPuzzleSequence() {
+    // 重置所有按钮状态
+    gameState.puzzleMode.buttons.forEach(button => {
+        button.pressed = false;
+    });
+    
+    // 清空当前序列
+    gameState.puzzleMode.currentSequence = [];
+    
+    // 更新显示
+    updateSequenceDisplay();
+    
+    // 重新绘制迷宫
+    drawSinglePlayerMaze();
+}
+
+// 修改绘制函数以显示按钮
+function drawSinglePlayerMaze() {
+    const ctx = singlePlayerGame.ctx;
+    ctx.clearRect(0, 0, singlePlayerGame.canvas.width, singlePlayerGame.canvas.height);
+    
+    // 绘制迷宫（原有逻辑）
+    for (let y = 0; y < singlePlayerGame.maze.length; y++) {
+        for (let x = 0; x < singlePlayerGame.maze[y].length; x++) {
+            const cellValue = singlePlayerGame.maze[y][x];
+            let fillStyle = '#111';
+            
+            switch(cellValue) {
+                case 1: fillStyle = '#333'; break; // 墙
+                case 2: fillStyle = '#FF0'; break; // 陷阱
+                case 3: fillStyle = '#0FF'; break; // 传送门
+                case 9: fillStyle = '#8B4513'; break; // 门
+                default: 
+                    if (cellValue >= 10 && cellValue <= 20) {
+                        // 按钮
+                        const buttonId = cellValue - 10;
+                        const button = gameState.puzzleMode.buttons.find(b => b.id === buttonId);
+                        if (button) {
+                            fillStyle = button.pressed ? '#666' : button.color;
+                        }
+                    }
+            }
+            
+            ctx.fillStyle = fillStyle;
+            ctx.fillRect(x * singlePlayerGame.cellSize, y * singlePlayerGame.cellSize, 
+                        singlePlayerGame.cellSize, singlePlayerGame.cellSize);
+            
+            // 绘制按钮编号（如果是解谜模式）
+            if (cellValue >= 10 && cellValue <= 20) {
+                const buttonId = cellValue - 10;
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold ' + (singlePlayerGame.cellSize/3) + 'px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText((buttonId + 1).toString(), 
+                    x * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2,
+                    y * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2
+                );
+            }
+        }
+    }
+    
+    // 绘制出口和玩家（原有逻辑）
+    ctx.fillStyle = '#F00';
+    ctx.fillRect(singlePlayerGame.exit.x * singlePlayerGame.cellSize, 
+                singlePlayerGame.exit.y * singlePlayerGame.cellSize, 
+                singlePlayerGame.cellSize, singlePlayerGame.cellSize);
+    
+    ctx.fillStyle = '#4CAF50';
+    ctx.beginPath();
+    ctx.arc(
+        singlePlayerGame.player.x * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2,
+        singlePlayerGame.player.y * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2,
+        singlePlayerGame.cellSize/2 - 2,
+        0,
+        Math.PI * 2
+    );
+    ctx.fill();
+}
+
+
 
         // 应用UI设置
         function applyUISettings() {
@@ -3641,12 +2617,7 @@ function isNearPlayer(x, y) {
             }
             
             gameState.currentScreen = screenId;
-            // 显示/隐藏金币UI
-            if (screenId === 'singlePlayerGame' || screenId === 'multiplayerGame') {
-                showCoinDisplay();
-            } else {
-                hideCoinDisplay();
-            }
+            
             // 执行屏幕特定的初始化
             switch(screenId) {
                 case 'singlePlayerLevelSelect':
@@ -3731,687 +2702,6 @@ function isNearPlayer(x, y) {
             document.getElementById('uiSettingsModal').classList.add('hidden');
             applyUISettings();
         }
-
-// 房间管理器类
-class RoomManager {
-    constructor() {
-        this.rooms = new Map();
-        this.serverUrl = localStorage.getItem('serverUrl') || 'localhost:1683';
-        this.pollInterval = null;
-        this.autoRefresh = true;
-        this.sortBy = 'created';
-        this.sortOrder = 'desc';
-        this.connected = false;
-    }
-
-    // 初始化房间管理器
-    init() {
-        this.checkServerConnection();
-        
-        // 如果自动刷新，启动轮询
-        if (this.autoRefresh) {
-            this.startPolling();
-        }
-    }
-    // 添加创建本地房间的方法
-    async createLocalRoom() {
-        try {
-            const playerName = document.getElementById('playerName')?.value.trim() || '玩家';
-            const maxPlayers = parseInt(document.getElementById('maxPlayers')?.value) || 4;
-            
-            // 生成本地房间ID
-            const roomId = `LOCAL-${Date.now()}`;
-            
-            // 创建本地游戏状态
-            gameState.playerName = playerName;
-            gameState.multiplayer.isHost = true;
-            gameState.multiplayer.roomCode = roomId;
-            gameState.multiplayer.maxPlayers = maxPlayers;
-            
-            // 初始化本地多人游戏
-            showNotification('本地房间创建成功！', 'success');
-            
-            // 立即开始本地游戏
-            setTimeout(() => {
-                showScreen('multiplayerGame');
-                startMultiplayerGame();
-            }, 1000);
-            
-        } catch (error) {
-            console.error('创建本地房间失败:', error);
-            showNotification(`创建房间失败: ${error.message}`, 'error');
-        }
-    }
-
-    getApiUrl(endpoint) {
-        return `http://${this.serverUrl}/api/${endpoint}`;
-        console.log(`getapi地址: http://${this.serverUrl}/api/${endpoint}`);
-    }
-    // 创建新房间（添加的方法）
-    async createRoom(roomData) {
-        try {
-            // 构建请求体
-            const requestBody = {
-                playerName: roomData.playerName,
-                maxPlayers: roomData.maxPlayers || 4,
-                roomName: roomData.roomName || `房间_${Date.now()}`,
-                isPrivate: roomData.isPrivate || false
-            };
-            
-            // 发送创建房间请求
-            const response = await fetch(this.getApiUrl('/api/create-room'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(requestBody)
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            const result = await response.json();
-            
-            if (result.success) {
-                // 创建成功，显示成功信息
-                showNotification(`房间创建成功！房间码: ${result.roomId}`, 'success');
-                
-                // 如果需要，可以立即加入房间
-                // 在这里我们只是返回房间ID，让调用者决定是否加入
-                return result.roomId;
-            } else {
-                throw new Error(result.message || '创建房间失败');
-            }
-        } catch (error) {
-            console.error('创建房间失败:', error);
-            showNotification(`创建房间失败: ${error.message}`, 'error');
-            return null;
-        }
-    }
-
-    // 检查服务器连接状态（添加的方法）
-    async checkServerConnection() {
-        try {
-            const statusDot = document.getElementById('statusDot');
-            const statusText = document.getElementById('statusText');
-            
-            // 更新UI状态
-            if (statusDot) statusDot.className = 'status-dot';
-            if (statusText) statusText.textContent = '检测中...';
-            
-            // 尝试连接服务器
-            const response = await fetch(this.getApiUrl('/api/server-status'), {
-                timeout: 5000
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                this.connected = true;
-                
-                // 更新连接状态UI
-                if (statusDot) statusDot.className = 'status-dot';
-                if (statusText) statusText.textContent = '已连接';
-                
-                console.log('服务器连接正常');
-            } else {
-                throw new Error(`HTTP ${response.status}`);
-            }
-            
-        } catch (error) {
-            this.connected = false;
-            
-            // 更新连接状态UI
-            if (statusDot) statusDot.className = 'status-dot error';
-            if (statusText) statusText.textContent = '连接失败';
-            
-            console.error('服务器连接失败:', error);
-        }
-    }
-
-    // 修改 startPolling 方法，只在连接成功时轮询
-    startPolling() {
-        if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-        }
-        
-        // 先检查连接状态
-        this.checkServerConnection().then(() => {
-            // 只有在连接成功时才启动轮询
-            if (this.connected && this.autoRefresh) {
-                this.pollInterval = setInterval(async () => {
-                    if (this.autoRefresh && this.connected) {
-                        await this.fetchRooms();
-                    }
-                }, 5000); // 每5秒更新一次
-            }
-        });
-    }
-
-
-    // 停止轮询
-    stopPolling() {
-        if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-            this.pollInterval = null;
-        }
-    }
-
-    async fetchRooms() {
-        const roomList = document.getElementById('roomList');
-        
-        try {
-            // 检查 serverUrl 是否配置
-            if (!this.serverUrl) {
-                this.showError('请先在多人游戏设置中配置服务器IP地址');
-                return;
-            }
-            
-            // 显示加载状态
-            if (roomList) {
-                roomList.innerHTML = '<div class="loading-indicator">正在搜索房间...</div>';
-            }
-            
-            // 构建完整的URL并添加时间戳防止缓存
-            const url = this.getApiUrl('/api/rooms') + '?t=' + Date.now();
-            
-            // 设置请求超时
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
-            
-            console.log('正在请求房间列表:', url);
-            
-            const response = await fetch(url, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                signal: controller.signal
-            });
-            
-            clearTimeout(timeoutId);
-            
-            console.log('服务器响应状态:', response.status, response.statusText);
-            
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error('服务器返回错误:', response.status, response.statusText, errorText);
-                throw new Error(`服务器返回错误: ${response.status} ${response.statusText}`);
-            }
-            
-            const data = await response.json();
-            console.log('房间列表数据:', data);
-            
-            if (data.success && Array.isArray(data.rooms)) {
-                this.updateRooms(data.rooms);
-            } else {
-                throw new Error(data.message || '服务器返回的数据格式不正确');
-            }
-            
-        } catch (error) {
-            console.error('获取房间列表失败:', error);
-            
-            // 根据错误类型显示不同的错误信息
-            let errorMessage = '无法获取房间列表';
-            
-            if (error.name === 'AbortError') {
-                errorMessage = '连接超时，请检查网络连接或服务器地址';
-            } else if (error.message.includes('Failed to fetch')) {
-                errorMessage = '无法连接到服务器，请确保服务器正在运行且地址正确';
-            } else if (error.message.includes('CORS')) {
-                errorMessage = '跨域访问被拒绝，请检查服务器配置';
-            } else {
-                errorMessage = error.message;
-            }
-            
-            this.showError(errorMessage);
-        }
-    }
-
-    // 修改 showError 方法
-    showError(message) {
-        const roomList = document.getElementById('roomList');
-        if (!roomList) return;
-        
-        roomList.innerHTML = `
-            <div class="error-message">
-                <div class="error-icon">⚠️</div>
-                <div class="error-text">${message}</div>
-                <div style="margin-top: 15px; font-size: 14px; color: #888;">
-                    <p>可能的原因:</p>
-                    <ul style="text-align: left; margin: 10px 0;">
-                        <li>服务器未启动或地址错误</li>
-                        <li>网络连接问题</li>
-                        <li>服务器API未正确配置</li>
-                    </ul>
-                </div>
-                <div style="margin-top: 15px;">
-                    <button onclick="versionManager.showVersionModal()" style="margin-right: 10px;">
-                        🔧 检查服务器设置
-                    </button>
-                    <button onclick="createRoom()">
-                        ➕ 创建本地房间
-                    </button>
-                </div>
-            </div>
-        `;
-    }
-
-    // 更新房间列表
-    updateRooms(rooms) {
-        this.rooms.clear();
-        
-        // 转换数据格式并存储
-        rooms.forEach(room => {
-            this.rooms.set(room.id, {
-                id: room.id,
-                name: room.name,
-                players: room.players,
-                maxPlayers: room.maxPlayers,
-                hostName: room.hostName,
-                private: room.private || false,
-                created: room.created || Date.now(),
-                status: 'waiting' // 假设所有房间都是等待状态
-            });
-        });
-        
-        renderRooms(this.getSortedRooms());
-    }
-
-    // 获取排序后的房间
-    getSortedRooms() {
-        const rooms = Array.from(this.rooms.values());
-        
-        rooms.sort((a, b) => {
-            let comparison = 0;
-            
-            switch (this.sortBy) {
-                case 'name':
-                    comparison = a.name.localeCompare(b.name);
-                    break;
-                case 'players':
-                    comparison = a.players - b.players;
-                    break;
-                case 'created':
-                    comparison = b.created - a.created; // 新的在前面
-                    break;
-            }
-            
-            return this.sortOrder === 'asc' ? comparison : -comparison;
-        });
-        
-        return rooms;
-    }
-
-    // 显示错误信息
-    showError(message) {
-        const roomList = document.getElementById('roomList');
-        roomList.innerHTML = `
-            <div class="error-message">
-                <div class="error-icon">⚠️</div>
-                <div class="error-text">${message}</div>
-                <button onclick="createRoom()" class="retry-button">
-                    创建房间
-                </button>
-            </div>
-        `;
-    }
-}
-
-
-// 房间管理器实例
-const roomManager = new RoomManager();
-// 在 getApiUrl 方法前添加这个辅助函数
-RoomManager.prototype.getApiUrl = function(path) {
-    if (this.serverUrl.startsWith('http://') || this.serverUrl.startsWith('https://')) {
-        return `${this.serverUrl}${path}`;
-    } else {
-        return `http://${this.serverUrl}${path}`;
-    }
-};
-// 渲染房间列表
-function renderRooms(rooms) {
-    const roomList = document.getElementById('roomList');
-    
-    if (rooms.length === 0) {
-        roomList.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">🏠</div>
-                <div class="empty-text">暂无可用房间</div>
-                <button onclick="createRoom()" class="create-button">
-                    创建第一个房间
-                </button>
-            </div>
-        `;
-        return;
-    }
-    
-    const searchTerm = document.getElementById('roomSearch').value.toLowerCase();
-    const filterValue = document.getElementById('roomFilter').value;
-    
-    // 过滤房间
-    const filteredRooms = rooms.filter(room => {
-        // 搜索过滤
-        const matchesSearch = !searchTerm || 
-            room.name.toLowerCase().includes(searchTerm) ||
-            room.hostName.toLowerCase().includes(searchTerm);
-        
-        // 类型过滤
-        let matchesFilter = true;
-        switch (filterValue) {
-            case 'available':
-                matchesFilter = room.players < room.maxPlayers;
-                break;
-            case 'public':
-                matchesFilter = !room.private;
-                break;
-            case 'private':
-                matchesFilter = room.private;
-                break;
-        }
-        
-        return matchesSearch && matchesFilter;
-    });
-    
-    if (filteredRooms.length === 0) {
-        roomList.innerHTML = `
-            <div class="no-results">
-                <div class="no-results-icon">🔍</div>
-                <div class="no-results-text">没有找到匹配的房间</div>
-            </div>
-        `;
-        return;
-    }
-    
-    // 渲染房间
-    roomList.innerHTML = filteredRooms.map(room => `
-        <div class="room-item" onclick="selectRoom('${room.id}')">
-            ${room.private ? '<div class="room-private">🔒 私密</div>' : ''}
-            
-            <div class="room-header">
-                <h3 class="room-name">${room.name}</h3>
-                <span class="room-code">#${room.id}</span>
-            </div>
-            
-            <div class="room-info">
-                <div class="room-host">
-                    👤 房主: ${room.hostName}
-                </div>
-                
-                <div class="room-players">
-                    ${Array(room.players).fill().map((_, i) => 
-                        `<div class="player-dot"></div>`
-                    ).join('')}
-                </div>
-            </div>
-            
-            <div class="room-footer">
-                <div class="player-count">
-                    ${room.players}/${room.maxPlayers} 玩家
-                </div>
-                
-                <button class="join-button" 
-                        ${room.players >= room.maxPlayers ? 'disabled' : ''}
-                        onclick="event.stopPropagation(); joinSelectedRoom('${room.id}')">
-                    ${room.players >= room.maxPlayers ? '已满' : '加入房间'}
-                </button>
-            </div>
-        </div>
-    `).join('');
-}
-
-// 过滤房间
-function filterRooms() {
-    const rooms = roomManager.getSortedRooms();
-    renderRooms(rooms);
-}
-
-// 排序房间
-function sortRooms(sortBy) {
-    roomManager.sortBy = sortBy;
-    
-    // 更新排序按钮状态
-    document.querySelectorAll('.sort-button').forEach(btn => {
-        btn.classList.remove('active');
-    });
-    event.target.classList.add('active');
-    
-    const rooms = roomManager.getSortedRooms();
-    renderRooms(rooms);
-}
-
-// 刷新房间列表
-async function refreshRooms() {
-    await roomManager.fetchRooms();
-}
-
-// 关闭房间浏览器
-function closeRoomBrowser() {
-    document.getElementById('roomBrowser').classList.add('hidden');
-    roomManager.stopPolling();
-}
-
-function openRoomBrowser() {
-    const browser = document.getElementById('roomBrowser');
-    if (!browser) {
-        console.error('房间浏览器元素未找到');
-        return;
-    }
-    
-    browser.classList.remove('hidden');
-    
-    try {
-        // 初始化房间管理器
-        roomManager.init();
-    } catch (error) {
-        console.error('初始化房间管理器失败:', error);
-        
-        // 如果初始化失败，至少显示房间列表
-        const roomList = document.getElementById('roomList');
-        if (roomList) {
-            roomList.innerHTML = `
-                <div class="error-message">
-                    <div class="error-icon">⚠️</div>
-                    <div class="error-text">房间管理器初始化失败</div>
-                    <button onclick="createRoom()" class="retry-button">
-                        创建房间
-                    </button>
-                </div>
-            `;
-        }
-    }
-}
-
-
-// 加入房间
-async function joinRoom(roomId) {
-    const room = roomManager.rooms.get(roomId);
-    if (!room || room.players >= room.maxPlayers) {
-        return;
-    }
-    
-    const playerName = document.getElementById('playerName').value.trim() || '玩家';
-    if (!confirm(`确定要加入房间 "${room.name}" 吗？`)) {
-        return;
-    }
-    
-    roomManager.joinRoom(roomId);
-}
-// 选择房间
-function selectRoom(roomId) {
-    // 高亮选中的房间
-    document.querySelectorAll('.room-item').forEach(item => {
-        item.classList.remove('selected');
-    });
-    event.currentTarget.classList.add('selected');
-    
-    // 保存选中的房间ID
-    gameState.selectedRoomId = roomId;
-}
-
-// 加入选中的房间
-async function joinSelectedRoom(roomId) {
-    const room = roomManager.rooms.get(roomId);
-    if (!room) return;
-    
-    if (room.players >= room.maxPlayers) {
-        showNotification('房间已满', 'error');
-        return;
-    }
-    
-    const playerName = document.getElementById('playerName').value.trim() || '玩家';
-    
-    // 连接到房间
-    try {
-        closeRoomBrowser(); // 关闭房间浏览器
-        
-        showNotification('正在连接...', 'info');
-        
-        // 使用原有的连接逻辑
-        gameState.playerName = playerName;
-        gameState.multiplayer.roomCode = roomId;
-        gameState.multiplayer.isHost = false;
-        
-        // 初始化Peer连接
-        gameState.multiplayer.peer = new Peer({
-            debug: 2,
-            config: {
-                'iceServers': [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ]
-            }
-        });
-        
-        gameState.multiplayer.peer.on('open', (id) => {
-            console.log('Peer连接建立，ID:', id);
-            gameState.multiplayer.currentPlayerId = id;
-            
-            // 连接到主机
-            connectToHost(roomId, playerName);
-        });
-        
-        gameState.multiplayer.peer.on('error', (err) => {
-            console.error('Peer错误:', err);
-            showNotification('连接失败: ' + err.message, 'error');
-            showScreen('multiplayerSetup');
-        });
-        
-    } catch (error) {
-        showNotification('加入房间失败', 'error');
-        console.error('加入房间失败:', error);
-    }
-}
-
-// 创建房间
-function createRoom() {
-    closeRoomBrowser();
-    
-    // 导航到创建房间界面
-    showScreen('multiplayerSetup');
-    
-    // 设置默认房间名称
-    setTimeout(() => {
-        const roomNameInput = document.querySelector('input[placeholder="房间代码 (留空创建新房间)"]');
-        if (roomNameInput) {
-            roomNameInput.value = '';
-        }
-    }, 100);
-}
-
-// 更新多人游戏开始函数以适配加入房间的方式
-function startMultiplayerGameWithHost(roomId, playerName, connection) {
-    // 设置当前玩家信息
-    gameState.multiplayer.isHost = false;
-    gameState.multiplayer.roomCode = roomId;
-    gameState.multiplayer.currentPlayerId = connection.peer;
-    gameState.multiplayer.connected = true;
-    gameState.multiplayer.connections[roomId] = connection;
-    
-    // 添加当前玩家
-    gameState.multiplayer.players = {
-        [connection.peer]: {
-            id: connection.peer,
-            name: playerName,
-            x: 1,
-            y: 1,
-            color: getRandomColor(),
-            reachedExit: false,
-            isHost: false
-        }
-    };
-    
-    // 处理连接事件
-    connection.on('data', (data) => {
-        handleMultiplayerData(data, connection.peer);
-    });
-    
-    // 设置房间信息显示
-    document.getElementById('multiplayerRoomCode').textContent = `房间: ${roomId}`;
-    document.getElementById('multiplayerGameInfo').style.display = 'flex';
-    document.getElementById('multiplayerMoveCount').textContent = `移动: 0`;
-    updatePlayerList();
-    
-    // 开始游戏
-    startMultiplayerGame();
-}
-// 修改 initMultiplayerSetup 函数
-function initMultiplayerSetup() {
-    const setupContainer = document.querySelector('.multiplayer-setup');
-    if (setupContainer) {
-        // 在房间设置前添加服务器配置
-        const serverConfig = document.createElement('div');
-        serverConfig.className = 'room-settings';
-        serverConfig.innerHTML = `
-            <h4>服务器设置</h4>
-            <div class="setting-row">
-                <label for="serverUrl">服务器地址:</label>
-                <input type="text" id="serverUrl" class="setup-input" 
-                       placeholder="例: localhost:1683"
-                       value="${localStorage.getItem('serverUrl') || 'localhost:1683'}">
-            </div>
-        `;
-        
-        const roomSettings = setupContainer.querySelector('.room-settings');
-        if (roomSettings) {
-            setupContainer.insertBefore(serverConfig, roomSettings);
-        } else {
-            setupContainer.appendChild(serverConfig);
-        }
-        
-        // 保存服务器配置变化
-        document.getElementById('serverUrl')?.addEventListener('input', function(e) {
-            localStorage.setItem('serverUrl', e.target.value);
-            roomManager.serverUrl = e.target.value;
-        });
-        
-        // 在原有按钮前添加搜索房间按钮
-        const buttonContainer = setupContainer.querySelector('.button-container') || setupContainer;
-        const searchButton = document.createElement('button');
-        searchButton.className = 'small-menu-button';
-        searchButton.style.marginTop = '10px';
-        searchButton.style.width = '100%';
-        searchButton.innerHTML = '🔍 搜索局域网房间';
-        searchButton.onclick = () => openRoomBrowser();
-        
-        // 插入到现有按钮之前
-        const startButton = buttonContainer.querySelector('button:last-child');
-        if (startButton) {
-            buttonContainer.insertBefore(searchButton, startButton);
-        } else {
-            buttonContainer.appendChild(searchButton);
-        }
-        
-        // 如果没有按钮容器，创建一个
-        if (!setupContainer.querySelector('.button-container')) {
-            const container = document.createElement('div');
-            container.className = 'button-container';
-            setupContainer.appendChild(container);
-        }
-    }
-}
-
-
 class LevelEditor {
     constructor() {
         this.currentLevel = null;
@@ -4549,7 +2839,7 @@ class LevelEditor {
         
         if(success) {
             this.currentLevel.meta.verified = true;
-            const zzshareCode = LevelEncryptor.encrypt(
+            const shareCode = LevelEncryptor.encrypt(
                 this.currentLevel,
                 this.currentLevel.meta.creator
             );
@@ -4757,12 +3047,11 @@ function makeDraggable(element, handle) {
         // 处理控制按钮点击
 
 
-// =============== 控制按钮点击处理 ===============
 function handleControlButtonClick(key) {
     // 检查是否是有效的方向键
     if(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) {
-        // 【修复点】直接调用核心移动函数，传入原始按键
-        // movePlayer 内部会处理反转逻辑，并自动区分单人/多人模式
+        // 直接调用核心移动函数，传入原始按键
+        // movePlayer 内部会处理反转逻辑
         movePlayer(key);
     }
 }
@@ -4842,7 +3131,6 @@ function sendPrivateMessage(playerId, message) {
             // showMessageToSelf(`你 → ${gameState.multiplayer.players[playerId].name}: ${message}`);
         } catch (err) {
             console.error('发送消息失败:', err);
-            showNotification(`❌ 发送消息失败: ${err.message}`, 'error');
         }
     }
 }
@@ -6733,12 +5021,8 @@ function completeLevel() {
     
     // 7. 保存数据
     recordAchievement('levelComplete', 1);
-    if (gameState.currentLevel === 30 || gameState.currentLevel === 60) {
-        addCoins(12)
-    } else {
-        addCoins(5);
-    }
-        
+
+    addCoins(5);
 
     // 保存金币到 localStorage
     localStorage.setItem('playerCoins', gameState.coins);
@@ -6876,73 +5160,73 @@ function resetSinglePlayerLevel() {
             
             drawSinglePlayerMaze();
         }
-/**
- * 统一的玩家移动核心函数
- * @param {string} key - 按下的键 ('ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight')
- * @param {number} [dx] - 可选，直接传入X方向移动量 (用于触摸按钮)
- * @param {number} [dy] - 可选，直接传入Y方向移动量 (用于触摸按钮)
- */
-function movePlayer(key, dx, dy) {
-    // 1. 应用反转状态（如果需要）
-    let effectiveKey = key;
+function movePlayer(rawKey, isFromSystem = false) {
+    // 1. 应用反转状态
+    let effectiveKey = rawKey;
     if (gameState.controlsReversed) {
+        // 反转逻辑
         effectiveKey = {
             'ArrowUp': 'ArrowDown',
             'ArrowDown': 'ArrowUp',
             'ArrowLeft': 'ArrowRight',
             'ArrowRight': 'ArrowLeft'
-        }[key] || key;
-        console.log('控制反转中:', key, '->', effectiveKey);
+        }[rawKey] || rawKey;
+        console.log('控制反转中:', rawKey, '->', effectiveKey);
     }
-
-    // 2. 计算移动量
-    let moveDx = 0, moveDy = 0;
-    if (dx !== undefined && dy !== undefined) {
-        // 如果直接传入了dx, dy (用于触摸按钮)，则直接使用
-        moveDx = dx;
-        moveDy = dy;
-    } else {
-        // 否则，根据effectiveKey计算
-        switch(effectiveKey) {
-            case 'ArrowUp': moveDy--; break;
-            case 'ArrowDown': moveDy++; break;
-            case 'ArrowLeft': moveDx--; break;
-            case 'ArrowRight': moveDx++; break;
-            default: return; // 不是方向键，不处理
-        }
+    
+    // 2. 根据最终确定的方向进行移动
+    let newX = 0, newY = 0;
+    
+    switch(effectiveKey) {
+        case 'ArrowUp': newY--; break;
+        case 'ArrowDown': newY++; break;
+        case 'ArrowLeft': newX--; break;
+        case 'ArrowRight': newX++; break;
+        default: return; // 不是方向键，不处理
     }
-
-    // 3. 根据当前游戏模式调用处理逻辑
+    // 3. 调用已存在的移动逻辑
     if (gameState.currentScreen === 'singlePlayerGame') {
-        handleSinglePlayerMove(moveDx, moveDy);
-    } else if (gameState.currentScreen === 'multiplayerGame') {
-        handleMultiplayerMove(moveDx, moveDy);
+        handleSinglePlayerMoveLogic(newX, newY);
     }
+    //} else if (gameState.currentScreen === 'multiplayerGame') {
+    //    handleMultiplayerMoveLogic(newX, newY);
+    //}
 }
 
-/**
- * 单人游戏移动处理
- */
-function handleSinglePlayerMove(dx, dy) {
-    const player = singlePlayerGame.player;
-    const originalX = player.x;
-    const originalY = player.y;
-    const newX = originalX + dx;
-    const newY = originalY + dy;
-
-    if (newX < 0 || newY < 0 || newY >= singlePlayerGame.maze.length || newX >= singlePlayerGame.maze[0].length) {
+function handleSinglePlayerMoveLogic(dx, dy) {
+    const originalPlayerX = singlePlayerGame.player.x;
+    const originalPlayerY = singlePlayerGame.player.y;
+    
+    const newX = originalPlayerX + dx;
+    const newY = originalPlayerY + dy;
+    
+    // 边界检查
+    if (newY < 0 || newY >= singlePlayerGame.maze.length || 
+        newX < 0 || newX >= singlePlayerGame.maze[0].length) {
         return;
     }
 
     const cellValue = singlePlayerGame.maze[newY][newX];
 
-    if (cellValue === 1) return; // 墙
+    // 墙
+    if (cellValue === 1) return;
 
-    // 移动陷阱
+    // 单向通道
+    if (cellValue >= 50 && cellValue <= 54) {
+        let allowed = false;
+        switch(cellValue) {
+            case 51: allowed = (dx > 0); break; // 右
+            case 52: allowed = (dx < 0); break; // 左
+            case 53: allowed = (dy > 0); break; // 下
+            case 54: allowed = (dy < 0); break; // 上
+        }
+        if (!allowed) return;
+    }
+
+    // 陷阱
     if (cellValue === 2 || cellValue === 4) {
         recordAchievement('trapHit', 1);
-        player.x = findStartPosition(singlePlayerGame.maze).x;
-        player.y = findStartPosition(singlePlayerGame.maze).y;
+        singlePlayerGame.player = findStartPosition(singlePlayerGame.maze);
         singlePlayerGame.moveCount++;
         document.getElementById('moveCount').textContent = `移动: ${singlePlayerGame.moveCount}`;
         drawSinglePlayerMaze();
@@ -6958,13 +5242,14 @@ function handleSinglePlayerMove(dx, dy) {
             );
             if (pairPortals.length > 0) {
                 const targetPortal = pairPortals[Math.floor(Math.random() * pairPortals.length)];
-                player.x = targetPortal.x;
-                player.y = targetPortal.y;
+                // 只更新坐标数值，这是安全的
+                singlePlayerGame.player.x = targetPortal.x;
+                singlePlayerGame.player.y = targetPortal.y;
                 singlePlayerGame.moveCount++;
                 document.getElementById('moveCount').textContent = `移动: ${singlePlayerGame.moveCount}`;
                 drawSinglePlayerMaze();
                 checkSinglePlayerExit();
-                return;
+                return; // 传送逻辑结束，不再执行后续的普通移动逻辑
             }
         }
     }
@@ -6973,7 +5258,7 @@ function handleSinglePlayerMove(dx, dy) {
     if (cellValue === 8) {
         singlePlayerGame.hasKey = true;
         document.getElementById('keyStatus').textContent = `钥匙: 已获得`;
-        singlePlayerGame.maze[newY][newX] = 0;
+        singlePlayerGame.maze[newY][newX] = 0; // 移除钥匙
     }
 
     // 门
@@ -6987,99 +5272,28 @@ function handleSinglePlayerMove(dx, dy) {
         }
     }
     
-    // 标准移动
-    player.x = newX;
-    player.y = newY;
+    // 所有检查通过，执行标准移动
+    singlePlayerGame.player.x = newX;
+    singlePlayerGame.player.y = newY;
     singlePlayerGame.moveCount++;
     document.getElementById('moveCount').textContent = `移动: ${singlePlayerGame.moveCount}`;
     drawSinglePlayerMaze();
     checkSinglePlayerExit();
 }
 
-/**
- * 多人游戏移动处理 (修复版)
- */
-// 添加玩家移动锁，防止在同一时间多次移动
-let playerMoveLock = false;
-
-// 修复版多人游戏移动逻辑
-function handleMultiplayerMoveLogic(dx, dy) {
-    if (globalMoveLock) return;
-    
-    const currentPlayer = gameState.multiplayer.players[gameState.multiplayer.currentPlayerId];
-    if (!currentPlayer || currentPlayer.reachedExit) return;
-
-    const newX = currentPlayer.x + dx;
-    const newY = currentPlayer.y + dy;
-
-    // 边界检查
-    if (!isValidPosition(newX, newY, gameState.multiplayer.maze)) return;
-
-    const cellValue = gameState.multiplayer.maze[newY][newX];
-    
-    // 处理特殊格子
-    if (cellValue === 2) { // 陷阱
-        if (!gameState.multiplayer.protectedPlayers[currentPlayer.id]) {
-            currentPlayer.x = 1;
-            currentPlayer.y = 1;
-            gameState.multiplayer.moveCount++;
-            document.getElementById('multiplayerMoveCount').textContent = `移动: ${gameState.multiplayer.moveCount}`;
-        }
-        broadcastPlayerMove(currentPlayer.id);
-        drawMultiplayerMaze();
-        return;
-    }
-    
-    // 处理传送门
-    if (cellValue === 3) {
-        const teleporter = gameState.multiplayer.teleporters.find(t => 
-            t.x === newX && t.y === newY);
-        if (teleporter) {
-            currentPlayer.x = teleporter.pairX;
-            currentPlayer.y = teleporter.pairY;
-            broadcastPlayerMove(currentPlayer.id);
-            drawMultiplayerMaze();
-            checkPlayerAtExit(currentPlayer);
-            return;
-        }
-    }
-
-    // 标准移动
-    if (cellValue !== 1 && cellValue !== 9) { // 允许通过
-        currentPlayer.x = newX;
-        currentPlayer.y = newY;
-        gameState.multiplayer.moveCount++;
-        document.getElementById('multiplayerMoveCount').textContent = `移动: ${gameState.multiplayer.moveCount}`;
-        
-        broadcastPlayerMove(currentPlayer.id);
-        drawMultiplayerMaze();
-        checkPlayerAtExit(currentPlayer);
-    }
-}
-
-// 广播玩家移动
-function broadcastPlayerMove(playerId) {
-    const player = gameState.multiplayer.players[playerId];
-    if (player) {
-        broadcast({
-            type: 'player-move',
-            playerId: playerId,
-            x: player.x,
-            y: player.y
-        });
-    }
-}
-
-
-// =============== 键盘事件处理 ===============
 
 function handleSinglePlayerKeyDown(e) {
-    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        return;
+    // 检查按键是否是我们关心的方向键
+    const key = e.key;
+    if(!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) {
+        return; // 不是方向键，不处理
     }
-    // 阻止默认滚动行为
-    e.preventDefault();
-    movePlayer(e.key);
+    
+    // 【重要】不再阻止默认行为，避免影响页面滚动
+    // if (typeof e.preventDefault === 'function') {
+    //     e.preventDefault();
+    // }
+    movePlayer(key);
 }
 
 
@@ -7140,208 +5354,98 @@ function checkSinglePlayerExit() {
     }
 }
 
-async function connectToMultiplayerGame() {
-    const playerName = document.getElementById('playerName').value.trim() || '玩家';
-    const roomCodeInput = document.getElementById('roomCode').value.trim();
-    const maxPlayers = parseInt(document.getElementById('maxPlayers').value) || 4;
-    
-    // 设置最大玩家数
-    gameState.multiplayer.maxPlayers = maxPlayers;
-    
-    if (roomCodeInput) {
-        try {
-            // 先检查房间是否存在
-            const response = await fetch(`http://${roomManager.serverUrl}/api/rooms`, {
-                timeout: 5000
-            });
+        // =============== 多人游戏P2P功能 ===============
+        function connectToMultiplayerGame() {
+            console.log("触发连接至多人联机游戏函数")
+            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
             
-            if (response.ok) {
-                const data = await response.json();
-                const room = data.rooms.find(r => r.id === roomCodeInput);
-                
-                if (room) {
-                    gameState.playerName = playerName;
-                    gameState.roomCode = roomCodeInput;
-                    
-                    // 尝试加入房间 - 使用新的函数名
-                    await joinRoom(roomCodeInput);
-                } else {
-                    showNotification('房间不存在', 'error');
-                }
-            } else {
-                throw new Error('无法查询房间列表');
+            gameState.playerName = document.getElementById('playerName').value.trim() || '玩家';
+            const roomCodeInput = document.getElementById('roomCode').value.trim();
+            
+            // 设置最大玩家数
+            if (roomCodeInput === '') {
+                gameState.multiplayer.maxPlayers = parseInt(document.getElementById('maxPlayers').value);
             }
-        } catch (error) {
-            showNotification(`加入房间失败: ${error.message}`, 'error');
-        }
-        return;
-    }
-
-    try {
-        // 使用新的房间创建API
-        const roomId = await roomManager.createRoom({
-            playerName: playerName,
-            maxPlayers: maxPlayers,
-            roomName: `房间_${Math.floor(Math.random() * 1000)}`,
-            isPrivate: false
-        });
-        
-        if (roomId) {
-            // 创建成功，继续使用原有的P2P逻辑
-            gameState.playerName = playerName;
-            gameState.multiplayer.isHost = true;
-            gameState.multiplayer.roomCode = roomId;
             
             // 初始化Peer连接
-            gameState.multiplayer.peer = new Peer(roomId, {
-                debug: 2,
-                config: {
-                    'iceServers': [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
+            try {
+                if (roomCodeInput) {
+                    // 加入现有房间
+                    console.log("加入现有房间")
+                    gameState.multiplayer.isHost = false;
+                    gameState.multiplayer.roomCode = roomCodeInput;
+                    gameState.multiplayer.peer = new Peer({
+                        debug: 2,
+                        config: {
+                            'iceServers': [
+                                { urls: 'stun:stun.l.google.com:19302' },
+                                { urls: 'stun:stun1.l.google.com:19302' }
+                            ]
+                        }
+                    });
+                } else {
+                    // 创建新房间
+                    console.log("创建新房间")
+                    gameState.multiplayer.isHost = true;
+                    
+                    // 使用时间戳和随机数生成更唯一的ID
+                    const timestamp = new Date().getTime().toString(36);
+                    const randomStr = Math.random().toString(36).substring(2, 10);
+                    // const roomCode = `room_${timestamp}_${randomStr}`;
+                    const roomCode = generateShortRoomCode();
+
+                    gameState.multiplayer.roomCode = roomCode;
+                    gameState.multiplayer.peer = new Peer(roomCode, {
+                        debug: 2,
+                        config: {
+                            'iceServers': [
+                                { urls: 'stun:stun.l.google.com:19302' },
+                                { urls: 'stun:stun1.l.google.com:19302' }
+                            ]
+                        }
+                    });
                 }
-            });
-            
-            // 设置Peer事件处理
-            gameState.multiplayer.peer.on('open', (id) => {
-                console.log('Peer连接建立，ID:', id);
-                gameState.multiplayer.currentPlayerId = id;
-                setupAsHost(id);
-            });
-            
-            gameState.multiplayer.peer.on('connection', (conn) => {
-                console.log('收到连接请求:', conn.peer);
-                setupConnection(conn);
-            });
-            
-            gameState.multiplayer.peer.on('error', (err) => {
-                console.error('Peer错误:', err);
-                alert('连接错误: ' + err);
-                showScreen('multiplayerSetup');
-            });
-        }
-    } catch (error) {
-        showNotification(`创建房间失败: ${error.message}`, 'error');
-    }
-}
-async function testServerConnection() {
-    const serverUrl = document.getElementById('serverUrl').value.trim();
-    if (!serverUrl) {
-        showNotification('请先输入服务器地址', 'error');
-        return;
-    }
-
-    // 更新房间管理器的服务器地址
-    roomManager.serverUrl = serverUrl;
-    localStorage.setItem('serverUrl', serverUrl);
-
-    const testBtn = document.getElementById('testServerBtn');
-    const originalText = testBtn.textContent;
-    testBtn.textContent = '测试中...';
-    testBtn.disabled = true;
-
-    try {
-        showNotification('正在测试连接...', 'info');
-        
-        // 测试基本连接
-        const response = await fetch(roomManager.getApiUrl('/api/server-status'), {
-            timeout: 5000
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            showNotification(`✅ 连接成功！服务器版本: ${data.version || '未知'}`, 'success');
-            roomManager.checkServerConnection();
-        } else {
-            throw new Error(`HTTP ${response.status}`);
-        }
-    } catch (error) {
-        console.error('连接测试失败:', error);
-        showNotification(`✗ 连接失败: ${error.message}`, 'error');
-    } finally {
-        testBtn.textContent = originalText;
-        testBtn.disabled = false;
-    }
-}
-function createLocalRoom() {
-    const roomData = {
-        playerName: document.getElementById('playerName').value.trim() || '玩家',
-        maxPlayers: parseInt(document.getElementById('maxPlayers').value) || 4,
-        roomName: `本地房间_${Math.floor(Math.random() * 1000)}`,
-        isPrivate: false
-    };
-
-    // 生成简单的房间信息
-    const roomId = `OFF-${Math.floor(10000 + Math.random() * 90000)}`;
-    
-    showNotification(`本地房间创建成功！房间码: ${roomId}`, 'success');
-    
-    // 立即加入房间
-    gameState.playerName = roomData.playerName;
-    gameState.roomCode = roomId;
-    
-    // 模拟加入房间的过程
-    showScreen('multiplayerGame');
-    startMultiplayerGame();
-}
-async function joinRoom(roomId) {
-    const room = roomManager.rooms.get(roomId);
-    if (!room || room.players >= room.maxPlayers) {
-        return;
-    }
-    
-    const playerName = document.getElementById('playerName').value.trim() || '玩家';
-    if (!confirm(`确定要加入房间 "${room.name}" 吗？`)) {
-        return;
-    }
-    
-    // 使用新连接逻辑
-    try {
-        showNotification('正在连接...', 'info');
-        
-        // 初始化Peer连接
-        gameState.multiplayer.peer = new Peer(null, {
-            debug: 2,
-            config: {
-                'iceServers': [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ]
-            }
-        });
-        
-        gameState.multiplayer.peer.on('open', (id) => {
-            gameState.multiplayer.currentPlayerId = id;
-            
-            // 连接到房间
-            const conn = gameState.multiplayer.peer.connect(roomId, {
-                reliable: true
-            });
-            
-            setupConnection(conn);
-            
-            conn.on('open', () => {
-                // 发送加入请求
-                conn.send({
-                    type: 'player-join',
-                    player: {
-                        id: id,
-                        name: playerName,
-                        color: getRandomColor()
+                
+                // 设置Peer事件处理
+                gameState.multiplayer.peer.on('open', (id) => {
+                    console.log('Peer连接建立，ID:', id);
+                    gameState.multiplayer.currentPlayerId = id;
+                    
+                    if (gameState.multiplayer.isHost) {
+                        // 主机逻辑
+                        setupAsHost(id);
+                    } else {
+                        // 连接到主机
+                        connectToHost(roomCodeInput);
                     }
                 });
                 
-                showNotification('连接成功！', 'success');
-                showScreen('multiplayerGame');
-            });
-        });
-        
-    } catch (error) {
-        console.error('加入房间失败:', error);
-        showNotification(`加入房间失败: ${error.message}`, 'error');
-    }
-}
+                gameState.multiplayer.peer.on('connection', (conn) => {
+                    console.log('收到连接请求:', conn.peer);
+                    setupConnection(conn);
+                });
+                
+                gameState.multiplayer.peer.on('error', (err) => {
+                    console.error('Peer错误:', err);
+                    
+                    // 处理ID被占用的情况
+                    if (err.type === 'peer-unavailable' || err.type === 'unavailable-id') {
+                        alert('连接出错',err);
+                    } else {
+                        alert('连接错误: ' + err);
+                    }
+                    
+                    showScreen('multiplayerSetup');
+                });
+                
+                // 更新UI显示连接状态
+                updateConnectionStatus('connecting');
+                
+            } catch (err) {
+                console.error('初始化Peer失败:', err);
+                alert('连接初始化失败: ' + err);
+            }
+        }
 
         function setupAsHost(peerId) {
             // 生成多人游戏迷宫
@@ -7599,7 +5703,7 @@ function showAchievementUnlocked(title, description) {
     
     setTimeout(() => {
         notification.remove();
-    }, 5000);
+    }, 3000);
 }
 
 // 存档系统
@@ -7691,7 +5795,7 @@ function loadGame(slot = gameState.currentSaveSlot) {
 
 
 // 添加通知显示功能
-function showNotification(message, duration = 5000) {
+function showNotification(message, duration = 2000) {
     // 移除现有的通知
     const existingNotification = document.getElementById('gameNotification');
     if (existingNotification) {
@@ -7720,7 +5824,7 @@ function showNotification(message, duration = 5000) {
     // 自动消失
     setTimeout(() => {
         notification.style.animation = 'fadeOut 0.3s ease-out';
-        setTimeout(() => notification.remove(), 5000);
+        setTimeout(() => notification.remove(), 300);
     }, duration);
 
     // 添加动画关键帧
@@ -8068,7 +6172,6 @@ function broadcast(data, excludePlayerId = null) {
                     connection.send(data);
                 } catch (err) {
                     console.error('广播错误:', err);
-                    showNotification(`❌ 广播错误: ${err.message}`, 'error');
                     // 如果发送失败，处理连接失效的情况
                     removePlayer(connId);
                 }
@@ -8293,48 +6396,44 @@ function checkPlayerAtExit(player) {
     }
 }
 
-function initMultiplayerCanvas() {
-    const canvas = document.getElementById('multiplayerCanvas');
-    if (!canvas) {
-        console.error('多人游戏画布未找到');
-        return;
-    }
-    
-    const ctx = canvas.getContext('2d');
-    
-    // 调整画布大小
-    const maxWidth = window.innerWidth - 40;
-    const maxHeight = window.innerHeight - 180;
-    
-    // 确保迷宫已初始化
-    if (!gameState.multiplayer.maze || gameState.multiplayer.maze.length === 0) {
-        console.error("多人游戏迷宫未初始化");
-        canvas.width = 300;
-        canvas.height = 300;
-        return;
-    }
-    
-    const mazeWidth = gameState.multiplayer.maze[0].length;
-    const mazeHeight = gameState.multiplayer.maze.length;
-    
-    const cellSize = Math.min(30, Math.floor(maxWidth / mazeWidth), 
-                             Math.floor(maxHeight / mazeHeight));
-    
-    canvas.width = mazeWidth * cellSize;
-    canvas.height = mazeHeight * cellSize;
-    
-    // 保存单元格大小供后续使用
-    gameState.multiplayer.cellSize = cellSize;
-    
-    // 绘制初始迷宫
-    drawMultiplayerMaze();
-    
-    // 更新玩家列表
-    updatePlayerList();
-    
-    // 添加键盘事件监听
-    window.addEventListener('keydown', handleMultiplayerKeyDown);
-}
+        function initMultiplayerCanvas() {
+            const canvas = document.getElementById('multiplayerCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // 调整画布大小
+            console.log("初始化画布")
+            const maxWidth = window.innerWidth - 40;
+            const maxHeight = window.innerHeight - 180;
+            
+            // 确保迷宫已初始化
+            if (!gameState.multiplayer.maze || gameState.multiplayer.maze.length === 0) {
+                console.error("多人游戏迷宫未初始化");
+                canvas.width = 300;
+                canvas.height = 300;
+                return;
+            }
+            
+            const mazeWidth = gameState.multiplayer.maze[0].length;
+            const mazeHeight = gameState.multiplayer.maze.length;
+            
+            const cellSize = Math.min(30, Math.floor(maxWidth / mazeWidth), 
+                                     Math.floor(maxHeight / mazeHeight));
+            
+            canvas.width = mazeWidth * cellSize;
+            canvas.height = mazeHeight * cellSize;
+            
+            // 保存单元格大小供后续使用
+            gameState.multiplayer.cellSize = cellSize;
+            
+            // 绘制初始迷宫
+            drawMultiplayerMaze();
+            
+            // 更新玩家列表
+            updatePlayerList();
+            
+            // 添加键盘事件监听
+            window.addEventListener('keydown', handleMultiplayerKeyDown);
+        }
 
         function handleMultiplayerKeyDown(e) {
             if (!gameState.multiplayer.connected) return;
