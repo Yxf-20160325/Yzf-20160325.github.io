@@ -5188,9 +5188,9 @@ function movePlayer(rawKey, isFromSystem = false) {
     if (gameState.currentScreen === 'singlePlayerGame') {
         handleSinglePlayerMoveLogic(newX, newY);
     }
-    //} else if (gameState.currentScreen === 'multiplayerGame') {
-    //    handleMultiplayerMoveLogic(newX, newY);
-    //}
+    else if (gameState.currentScreen === 'multiplayerGame') {
+        handleMultiplayerMoveLogic(newX, newY);
+    }
 }
 
 function handleSinglePlayerMoveLogic(dx, dy) {
