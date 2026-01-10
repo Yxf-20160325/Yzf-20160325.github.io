@@ -8,13 +8,40 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-app.use(cors());
+// 配置CORS以支持跨网络连接
+app.use(cors({
+    origin: '*', // 允许所有来源
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], // 支持所有必要的HTTP方法
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'], // 允许必要的头信息
+    credentials: true // 允许发送凭证信息
+}));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
+
+// 添加安全头中间件
+app.use((req, res, next) => {
+    // 防止浏览器对响应内容进行MIME类型嗅探
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    
+    // 移除Express默认添加的X-Powered-By头
+    res.removeHeader('X-Powered-By');
+    
+    // 使用Cache-Control替代Expires头
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    
+    // 限制Server头只包含服务器名称
+    res.setHeader('Server', 'MazeGameServer');
+    
+    // 设置Content-Type charset为utf-8
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    
+    next();
+});
+
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.8.3";
+const SERVER_VERSION = "1.13.7";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -125,6 +152,47 @@ app.get('/api/rooms', (req, res) => {
     console.log(`收到获取公开房间列表请求，当前有 ${rooms.size} 个房间。`);
     const publicRooms = getAllRoomsList().filter(room => !room.private);
     res.json({ success: true, rooms: publicRooms });
+});
+
+// API: 搜索房间
+app.get('/api/rooms/search', (req, res) => {
+    try {
+        const { q, status, hostName } = req.query;
+        console.log(`收到房间搜索请求: 查询=${q}, 状态=${status}, 房主=${hostName}`);
+        
+        let searchResults = getAllRoomsList();
+        
+        // 过滤公开房间
+        searchResults = searchResults.filter(room => !room.private);
+        
+        // 按关键词搜索（房间名或房主名）
+        if (q) {
+            const query = q.toLowerCase();
+            searchResults = searchResults.filter(room => 
+                room.name.toLowerCase().includes(query) || 
+                room.hostName.toLowerCase().includes(query)
+            );
+        }
+        
+        // 按状态过滤
+        if (status) {
+            searchResults = searchResults.filter(room => room.status === status);
+        }
+        
+        // 按房主名过滤
+        if (hostName) {
+            const hostQuery = hostName.toLowerCase();
+            searchResults = searchResults.filter(room => 
+                room.hostName.toLowerCase().includes(hostQuery)
+            );
+        }
+        
+        console.log(`搜索完成，找到 ${searchResults.length} 个匹配的房间`);
+        res.json({ success: true, rooms: searchResults });
+    } catch (error) {
+        console.error('[API] 房间搜索失败:', error);
+        res.status(500).json({ success: false, message: '搜索失败' });
+    }
 });
 
 // API: 获取所有房间的信息 (管理员专用) - 更新以显示玩家数量
@@ -433,18 +501,19 @@ app.post('/api/create-room', express.json(), (req, res) => {
         };
 
         const newRoom = {
-            id: roomId,
-            name: roomName,
-            host: hostPlayer.id,
-            players: new Map([[hostPlayer.id, hostPlayer]]),
-            maxPlayers,
-            status: 'waiting',
-            hostName: playerName,
-            private: isPrivate,
-            password: password, // 存储房间密码
-            createdAt: Date.now(),
-            actualHost: null, // 存储实际的Socket ID
-            waitingSocket: false, // 等待房主连接
+                id: roomId,
+                name: roomName,
+                host: hostPlayer.id,
+                players: new Map([[hostPlayer.id, hostPlayer]]),
+                maxPlayers,
+                status: 'waiting',
+                hostName: playerName,
+                private: isPrivate,
+                password: password, // 存储房间密码
+                createdAt: Date.now(),
+                lastActivity: Date.now(), // 添加最后活动时间戳
+                actualHost: null, // 存储实际的Socket ID
+                waitingSocket: false, // 等待房主连接
         };
 
         rooms.set(roomId, newRoom);
@@ -496,7 +565,9 @@ const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
         origin: "*",
-        methods: ["GET", "POST"]
+        methods: ["GET", "POST"],
+        credentials: true,
+        allowedHeaders: ["Content-Type", "Authorization"]
     }
 });
 
@@ -562,7 +633,8 @@ io.on('connection', (socket) => {
                 private: isPrivate,
                 password: password,
                 inviteCode: inviteCode,
-                createdAt: Date.now()
+                createdAt: Date.now(),
+                lastActivity: Date.now() // 添加最后活动时间戳
             };
             
             rooms.set(roomId, newRoom);
@@ -622,6 +694,7 @@ io.on('connection', (socket) => {
         room.players.set(playerId, newPlayer);
         players.set(realSocketId, newPlayer);
         socket.join(roomId);
+        room.lastActivity = Date.now(); // 更新房间最后活动时间
         console.log(`玩家 ${newPlayer.name} (ID: ${playerId}) 成功加入房间 ${roomId}`);
         
         io.on('player-join', (data, callback) => {
@@ -658,6 +731,7 @@ io.on('connection', (socket) => {
                 const conn = socket.join(roomId);
                 players.set(realSocketId, { id: playerId, name: playerName, roomId, socketId: realSocketId });
                 room.players.set(playerId, { id: playerId, name: playerName, socketId: realSocketId }); // Add to actual room player count
+                room.lastActivity = Date.now(); // 更新房间最后活动时间
 
                 const newPlayer = { id: playerId, name: playerName, color: getRandomColor() };
                 
@@ -734,6 +808,7 @@ io.on('connection', (socket) => {
         const room = rooms.get(roomId);
         if(room && room.actualHost === socket.id) {
             room.status = 'playing';
+            room.lastActivity = Date.now(); // 更新房间最后活动时间
             io.to(roomId).emit('game-started', {
                 roomId: roomId,
                 status: 'playing'
@@ -1026,9 +1101,9 @@ setInterval(() => {
     const ROOM_IDLE_TIME = 5 * 60 * 1000; // 例如：5分钟无人活动才清理
 
     for (const [roomId, room] of rooms.entries()) {
-        // 【修复】判断条件必须是：房间内没有玩家，并且创建时间已超过阈值
-        if (room.players.size === 0 && (now - room.createdAt > ROOM_IDLE_TIME)) {
-            console.log(`[自动清理] 找到空闲房间 ${roomId} (${room.name})，正在删除...`);
+        // 【修复】判断条件：房间内没有玩家，并且最后活动时间已超过阈值
+        if (room.players.size === 0 && (now - (room.lastActivity || room.createdAt) > ROOM_IDLE_TIME)) {
+            console.log(`[自动清理] 找到空闲房间 ${roomId} (${room.name})，最后活动时间: ${new Date(room.lastActivity).toLocaleString()}，正在删除...`);
             
             // 通知一下（虽然没人）
             io.to(roomId).emit('room-kicked', { message: '房间因长时间空闲被系统关闭。' });
