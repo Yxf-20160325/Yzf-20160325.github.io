@@ -820,6 +820,30 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         handleDisconnect(socket.id);
     });
+
+    // 聊天消息处理
+    socket.on('chat-message', (data) => {
+        console.log('收到聊天消息:', data);
+        // 获取房间ID
+        const player = players.get(socket.id);
+        if (player && player.roomId) {
+            // 转发消息到房间内所有玩家
+            io.to(player.roomId).emit('chat-message', data);
+            console.log(`转发消息到房间 ${player.roomId} 来自 ${player.name}: ${data.message}`);
+        } else {
+            console.log('无法转发消息: 玩家未在房间内');
+        }
+    });
+
+    // 消息撤回处理
+    socket.on('message-recall', (messageId) => {
+        console.log('收到消息撤回请求:', messageId);
+        const player = players.get(socket.id);
+        if (player && player.roomId) {
+            io.to(player.roomId).emit('message-recalled', messageId);
+            console.log(`${player.name} 撤回了消息 ${messageId}`);
+        }
+    });
 });
 // 在 server.cjs 中找到 kick-all API
 app.post('/api/admin/rooms/:roomId/kick-all', requireAdminAuth, (req, res) => {
