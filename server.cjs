@@ -547,7 +547,10 @@ io.on('connection', (socket) => {
                 joinedAt: Date.now()
             };
             
-            const newRoom = {
+            // 生成邀请码
+        const inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+        
+        const newRoom = {
                 id: roomId,
                 name: roomName,
                 host: socket.id,
@@ -558,6 +561,7 @@ io.on('connection', (socket) => {
                 hostName: playerName,
                 private: isPrivate,
                 password: password,
+                inviteCode: inviteCode,
                 createdAt: Date.now()
             };
             
@@ -565,7 +569,7 @@ io.on('connection', (socket) => {
             socket.join(roomId);
             players.set(socket.id, hostPlayer);
 
-            callback({ success: true, roomId, playerId: hostPlayer.id, color: hostPlayer.color, isHost: true });
+            callback({ success: true, roomId, playerId: hostPlayer.id, color: hostPlayer.color, isHost: true, inviteCode: newRoom.inviteCode });
             broadcastRoomList();
 
         } catch (err) {
@@ -574,7 +578,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinRoom', (data, callback) => {
-        const { roomId, playerName, password } = data;
+        const { roomId, playerName, password, inviteCode } = data;
         const realSocketId = socket.id;
         const playerId = `socket_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
         const room = rooms.get(roomId);
@@ -588,6 +592,12 @@ io.on('connection', (socket) => {
         if (room.private && room.password !== password) {
             console.log(`玩家 ${playerName} 尝试加入私密房间 ${roomId}，密码错误`);
             return callback({ success: false, message: '房间密码错误' });
+        }
+        
+        // 检查邀请码
+        if (inviteCode && room.inviteCode !== inviteCode) {
+            console.log(`玩家 ${playerName} 尝试加入房间 ${roomId}，邀请码错误`);
+            return callback({ success: false, message: '邀请码错误' });
         }
         
         if (room.status !== 'waiting') {
