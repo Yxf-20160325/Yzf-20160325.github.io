@@ -3,6 +3,7 @@
 <head>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>迷宫冒险 - 1.13.7</title>
@@ -1979,6 +1980,515 @@
     .room-browser-list::-webkit-scrollbar-thumb:hover {
         background: rgba(76, 175, 80, 0.8);
     }
+    
+    /* 回放模态框样式 */
+    .modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.85);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 2000;
+    }
+    
+    .modal-content {
+        background: linear-gradient(135deg, #1a1a2e, #16213e);
+        border: 2px solid #4CAF50;
+        border-radius: 15px;
+        padding: 20px;
+        width: 90%;
+        max-height: 90vh;
+        overflow-y: auto;
+        box-shadow: 0 0 40px rgba(76, 175, 80, 0.5);
+    }
+    
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #4CAF50;
+    }
+    
+    .modal-header h2 {
+        color: #4CAF50;
+        margin: 0;
+    }
+    
+    .close-btn {
+        background: none;
+        border: none;
+        color: #f44336;
+        font-size: 24px;
+        cursor: pointer;
+        padding: 5px;
+        border-radius: 5px;
+        transition: all 0.3s ease;
+    }
+    
+    .close-btn:hover {
+        background: rgba(244, 67, 54, 0.2);
+        transform: scale(1.1);
+    }
+    
+    .replay-controls {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+    
+    .filter-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    
+    .filter-group select {
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid #4CAF50;
+        color: white;
+        border-radius: 5px;
+        cursor: pointer;
+    }
+    
+    .replay-list {
+        max-height: 400px;
+        overflow-y: auto;
+        margin: 20px 0;
+        border: 1px solid #4CAF50;
+        border-radius: 10px;
+        padding: 10px;
+    }
+    
+    .replay-item {
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid #4CAF50;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 10px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    
+    .replay-item:hover {
+        background: rgba(76, 175, 80, 0.2);
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+    
+    .replay-item-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 5px;
+    }
+    
+    .replay-item-title {
+        font-weight: bold;
+        color: #4CAF50;
+    }
+    
+    .replay-item-meta {
+        display: flex;
+        gap: 15px;
+        font-size: 14px;
+        color: #ccc;
+        margin-top: 5px;
+    }
+    
+    .player-container {
+        margin-top: 20px;
+    }
+    
+    .player-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+    }
+    
+    .player-header h3 {
+        color: #4CAF50;
+        margin: 0;
+    }
+    
+    .video-container {
+        background: rgba(0, 0, 0, 0.7);
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    
+    #replayCanvas {
+        display: block;
+        margin: 0 auto 15px;
+        background: #111;
+        border: 1px solid #4CAF50;
+        border-radius: 5px;
+    }
+    
+    .player-controls {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 15px;
+        margin-bottom: 15px;
+        flex-wrap: wrap;
+    }
+    
+    .player-controls button {
+        padding: 10px 15px;
+        background: linear-gradient(135deg, #4CAF50, #2E7D32);
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-size: 16px;
+    }
+    
+    .player-controls button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+    
+    .player-controls span {
+        color: white;
+        font-family: monospace;
+        min-width: 120px;
+        text-align: center;
+    }
+    
+    .progress-container {
+        margin: 15px 0;
+    }
+    
+    #replayProgress {
+        width: 100%;
+        height: 8px;
+        background: rgba(255, 255, 255, 0.2);
+        border: none;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    
+    #replayProgress::-webkit-progress-bar {
+        background: rgba(255, 255, 255, 0.2);
+    }
+    
+    #replayProgress::-webkit-progress-value {
+        background: linear-gradient(90deg, #4CAF50, #8BC34A);
+    }
+    
+    /* 可视化脚本编辑器样式 */
+    .script-editor-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.9);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 2000;
+    }
+    
+    .script-editor-content {
+        background: linear-gradient(135deg, #1a1a2e, #16213e);
+        border: 2px solid #4CAF50;
+        border-radius: 15px;
+        padding: 20px;
+        width: 95%;
+        height: 95%;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        box-shadow: 0 0 40px rgba(76, 175, 80, 0.5);
+    }
+    
+    .script-editor-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #4CAF50;
+    }
+    
+    .script-editor-header h2 {
+        color: #4CAF50;
+        margin: 0;
+    }
+    
+    .script-editor-body {
+        display: flex;
+        flex: 1;
+        overflow: hidden;
+        gap: 15px;
+    }
+    
+    .sidebar {
+        width: 200px;
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid #4CAF50;
+        border-radius: 10px;
+        padding: 15px;
+        overflow-y: auto;
+    }
+    
+    .sidebar h3 {
+        color: #4CAF50;
+        margin-top: 0;
+        margin-bottom: 15px;
+        font-size: 16px;
+    }
+    
+    .node-palette {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .palette-node {
+        background: rgba(76, 175, 80, 0.2);
+        border: 1px solid #4CAF50;
+        border-radius: 5px;
+        padding: 10px;
+        cursor: grab;
+        transition: all 0.3s ease;
+        user-select: none;
+    }
+    
+    .palette-node:hover {
+        background: rgba(76, 175, 80, 0.4);
+        transform: translateY(-2px);
+    }
+    
+    .palette-node:active {
+        cursor: grabbing;
+    }
+    
+    .editor-workspace {
+        flex: 1;
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid #4CAF50;
+        border-radius: 10px;
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .workspace-canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+    }
+    
+    .properties-panel {
+        width: 300px;
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid #4CAF50;
+        border-radius: 10px;
+        padding: 15px;
+        overflow-y: auto;
+    }
+    
+    .properties-panel h3 {
+        color: #4CAF50;
+        margin-top: 0;
+        margin-bottom: 15px;
+        font-size: 16px;
+    }
+    
+    .property-group {
+        margin-bottom: 15px;
+    }
+    
+    .property-group label {
+        display: block;
+        color: white;
+        margin-bottom: 5px;
+        font-size: 14px;
+    }
+    
+    .property-group input, .property-group select {
+        width: 100%;
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid #4CAF50;
+        color: white;
+        border-radius: 5px;
+        box-sizing: border-box;
+    }
+    
+    .property-group textarea {
+        width: 100%;
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid #4CAF50;
+        color: white;
+        border-radius: 5px;
+        box-sizing: border-box;
+        resize: vertical;
+        min-height: 80px;
+    }
+    
+    .editor-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 15px;
+        padding-top: 10px;
+        border-top: 1px solid #4CAF50;
+    }
+    
+    .editor-buttons {
+        display: flex;
+        gap: 10px;
+    }
+    
+    .editor-buttons button {
+        padding: 10px 20px;
+        background: linear-gradient(135deg, #4CAF50, #2E7D32);
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-size: 14px;
+    }
+    
+    .editor-buttons button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+    
+    .editor-buttons button.secondary {
+        background: linear-gradient(135deg, #2196F3, #0D47A1);
+    }
+    
+    .editor-buttons button.danger {
+        background: linear-gradient(135deg, #f44336, #d32f2f);
+    }
+    
+    /* 节点样式 */
+    .node {
+        position: absolute;
+        background: rgba(30, 30, 50, 0.9);
+        border: 2px solid #4CAF50;
+        border-radius: 10px;
+        padding: 15px;
+        cursor: grab;
+        min-width: 180px;
+        transition: all 0.3s ease;
+        user-select: none;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+    
+    .node:hover {
+        border-color: #8BC34A;
+        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.5);
+    }
+    
+    .node:active {
+        cursor: grabbing;
+    }
+    
+    .node-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    
+    .node-title {
+        font-weight: bold;
+        color: #4CAF50;
+        font-size: 16px;
+    }
+    
+    .node-type {
+        font-size: 12px;
+        color: #888;
+        background: rgba(255, 255, 255, 0.1);
+        padding: 2px 6px;
+        border-radius: 10px;
+    }
+    
+    .node-ports {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    
+    .port {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+    }
+    
+    .port.in {
+        justify-content: flex-start;
+    }
+    
+    .port.out {
+        justify-content: flex-end;
+    }
+    
+    .port-dot {
+        width: 12px;
+        height: 12px;
+        background: #4CAF50;
+        border: 2px solid white;
+        border-radius: 50%;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        position: relative;
+        z-index: 10;
+    }
+    
+    .port-dot:hover {
+        transform: scale(1.2);
+        box-shadow: 0 0 10px rgba(76, 175, 80, 0.8);
+    }
+    
+    .port-label {
+        color: white;
+        font-size: 12px;
+    }
+    
+    /* 连接样式 */
+    .connection {
+        position: absolute;
+        pointer-events: none;
+        z-index: 5;
+    }
+    
+    .connection-path {
+        fill: none;
+        stroke: #4CAF50;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+    }
+    
+    .connection.selected .connection-path {
+        stroke: #FFD700;
+        stroke-width: 4;
+    }
     </style>
 </head>
 
@@ -2269,6 +2779,8 @@
         <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">控制台</button>
         <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">每日挑战</button>
         <button class="menu-button" onclick="showScreen('historyUpdates')">历史更新</button>
+        <button class="menu-button" onclick="openReplayModal()">游戏回放</button>
+        <button class="menu-button" onclick="openVisualScriptEditor()">可视化脚本编辑器</button>
         
         <!-- 新增玩家工坊按钮
         <button id="workshopBtn" class="menu-btn highlight">
@@ -2614,6 +3126,8 @@
             <!-- <button class="level-control-button exit" onclick="showExitConfirmation()">退出关卡</button> -->
             <button class="level-control-button exit" onclick="showScreen('mainMenu')">退出关卡</button>
             <button class="level-control-button shop-trigger" onclick="openShop()">🛒 商店</button>
+            <button class="level-control-button record" onclick="toggleRecording()" id="recordButton">📹 录制</button>
+            <button class="level-control-button save-record" onclick="saveRecording()" id="saveRecordButton" style="display:none;">💾 保存回放</button>
         </div>
         <!-- 方向键控制面板 -->
         <div class="controls-panel hidden" id="singlePlayerControls">
@@ -2721,12 +3235,13 @@
         <div id="chatContainer" class="chat-container" style="display: none;">
             <div id="chatMessages" class="chat-messages" style="flex: 1; overflow-y: auto; padding: 10px; font-size: 14px; font-family: monospace;"></div>
             <div style="display: flex; padding: 5px;">
-                <textarea id="chatInput" class="chat-input" placeholder="输入消息..." style="flex: 1; padding: 8px; border: 1px solid #4CAF50; border-radius: 5px; background: rgba(255, 255, 255, 0.1); color: white; outline: none; resize: none; min-height: 36px; max-height: 100px;"></textarea>
+                <textarea id="chatInput" class="chat-input" placeholder="输入消息..." style="flex: 1.5; padding: 8px; border: 1px solid #4CAF50; border-radius: 5px; background: rgba(255, 255, 255, 0.1); color: white; outline: none; resize: none; min-height: 36px; max-height: 100px;"></textarea>
                 <input type="file" id="imageInput" accept="image/*" style="display: none;" onchange="handleImageSelect(event)">
                 <button id="imageButton" class="image-button" onclick="document.getElementById('imageInput').click()" style="margin-left: 5px; padding: 8px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">🖼️</button>
                 <button id="emojiButton" class="emoji-button" onclick="toggleEmojiPicker()" style="margin-left: 5px; padding: 8px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">😊</button>
                 <button id="voiceButton" class="voice-button" onclick="toggleVoiceRecording()" style="margin-left: 5px; padding: 8px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">🎤</button>
-                <button id="transcribeButton" class="transcribe-button" onclick="toggleSpeechTranscription()" style="margin-left: 5px; padding: 6px; background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 12px; white-space: nowrap;">🗣️</button>
+
+
                 <button id="sendButton" class="send-button" onclick="sendChatMessage()" style="margin-left: 5px; padding: 8px 12px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer;">发送</button>
             </div>
         </div>
@@ -2755,12 +3270,13 @@
             
             <!-- 聊天输入区域 -->
             <div class="chat-input-area" style="padding: 20px; border-top: 1px solid #4CAF50; display: flex; gap: 10px; background: rgba(0, 0, 0, 0.8);">
-                <textarea id="chatInputModal" class="chat-input" placeholder="输入消息..." style="flex: 1; padding: 12px; border: 1px solid #4CAF50; border-radius: 5px; background: rgba(255, 255, 255, 0.1); color: white; outline: none; font-size: 16px; resize: none; min-height: 40px; max-height: 150px;"></textarea>
+                <textarea id="chatInputModal" class="chat-input" placeholder="输入消息..." style="flex: 1.5; padding: 12px; border: 1px solid #4CAF50; border-radius: 5px; background: rgba(255, 255, 255, 0.1); color: white; outline: none; font-size: 16px; resize: none; min-height: 40px; max-height: 150px;"></textarea>
                 <input type="file" id="imageInputModal" accept="image/*" style="display: none;" onchange="handleImageSelect(event)">
                 <button id="imageButtonModal" class="image-button" onclick="document.getElementById('imageInputModal').click()" style="padding: 12px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 18px;">🖼️</button>
                 <button id="emojiButtonModal" class="emoji-button" onclick="toggleEmojiPicker()" style="padding: 12px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 18px;">😊</button>
                 <button id="voiceButtonModal" class="voice-button" onclick="toggleVoiceRecording()" style="padding: 12px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 18px;">🎤</button>
-                <button id="transcribeButtonModal" class="transcribe-button" onclick="toggleSpeechTranscription()" style="padding: 12px; background: linear-gradient(135deg, #2196F3, #1976D2); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; white-space: nowrap;">🗣️</button>
+
+
                 <button id="sendButtonModal" class="send-button" onclick="sendChatMessage()" style="padding: 12px 20px; background: linear-gradient(135deg, #4CAF50, #2E7D32); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">发送</button>
             </div>
         </div>
@@ -3098,6 +3614,47 @@
     
     <!-- 版本信息显示 -->
     <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.13.7</div>
+    
+    <!-- 可视化脚本编辑器 -->
+    <div id="visualScriptEditor" class="script-editor-modal hidden">
+        <div class="script-editor-content">
+            <div class="script-editor-header">
+                <h2>可视化脚本编辑器</h2>
+                <button class="close-btn" onclick="closeVisualScriptEditor()">×</button>
+            </div>
+            <div class="script-editor-body">
+                <div class="sidebar">
+                    <h3>节点库</h3>
+                    <div class="node-palette">
+                        <div class="palette-node" draggable="true" data-node-type="start">开始节点</div>
+                        <div class="palette-node" draggable="true" data-node-type="move">移动节点</div>
+                        <div class="palette-node" draggable="true" data-node-type="condition">条件节点</div>
+                        <div class="palette-node" draggable="true" data-node-type="wait">等待节点</div>
+                        <div class="palette-node" draggable="true" data-node-type="end">结束节点</div>
+                    </div>
+                </div>
+                <div class="editor-workspace">
+                    <canvas id="scriptCanvas" class="workspace-canvas"></canvas>
+                    <div id="nodesContainer"></div>
+                </div>
+                <div class="properties-panel">
+                    <h3>节点属性</h3>
+                    <div id="nodeProperties"></div>
+                </div>
+            </div>
+            <div class="editor-footer">
+                <div class="editor-buttons">
+                    <button onclick="newScript()">新建</button>
+                    <button class="secondary" onclick="saveScript()">保存</button>
+                    <button class="secondary" onclick="loadScript()">加载</button>
+                    <button class="danger" onclick="clearWorkspace()">清空</button>
+                </div>
+                <div class="script-info">
+                    <span id="scriptInfo">未保存</span>
+                </div>
+            </div>
+        </div>
+    </div>
     <script>
 const CLIENT_VERSION = "1.13.7";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com'; // 服务器URL，根据实际情况修改
@@ -3361,9 +3918,44 @@ let gameState = {
         isClaimed: false,
         progress: 0,
         history: []
-    }
+    },
     
+    // 回放相关属性
+    replayEvents: [], // 游戏事件记录
+    isRecording: false, // 是否正在记录
+    
+    // 回放系统
+    replaySystem: {
+        recordings: [], // 保存的回放记录
+        currentRecording: null, // 当前正在播放的回放
+        isPlaying: false, // 是否正在播放
+        playbackSpeed: 1, // 播放速度
+        currentFrame: 0, // 当前播放帧
+        playbackInterval: null // 播放定时器
+    }
     };
+
+// 初始化回放系统
+function initReplaySystem() {
+    try {
+        const savedRecordings = localStorage.getItem('gameRecordings');
+        if (savedRecordings) {
+            const parsedRecordings = JSON.parse(savedRecordings);
+            if (Array.isArray(parsedRecordings)) {
+                gameState.replaySystem.recordings = parsedRecordings;
+            } else {
+                // 数据格式不正确，重置为默认值
+                gameState.replaySystem.recordings = [];
+                localStorage.setItem('gameRecordings', JSON.stringify([]));
+            }
+        }
+    } catch (error) {
+        console.error('加载回放记录失败:', error);
+        // 加载失败，重置为默认值
+        gameState.replaySystem.recordings = [];
+        localStorage.setItem('gameRecordings', JSON.stringify([]));
+    }
+}
 
 // 自动保存功能
 function startAutoSave() {
@@ -4038,6 +4630,941 @@ const EventSystem = {
 }
 // 初始化
 EventSystem.init();
+
+// 游戏回放功能
+// 记录游戏事件
+function recordGameEvent(eventType, data) {
+    if (!gameState.isRecording) return;
+    
+    const event = {
+        type: eventType,
+        data: data,
+        timestamp: Date.now(),
+        frame: gameState.replayEvents.length
+    };
+    
+    gameState.replayEvents.push(event);
+}
+
+// 开始录制
+function startRecording() {
+    gameState.isRecording = true;
+    gameState.replayEvents = [];
+    showNotification('开始录制游戏回放');
+    
+    // 记录游戏开始事件
+    recordGameEvent('game_start', {
+        level: gameState.currentLevel,
+        timestamp: Date.now(),
+        playerName: gameState.playerName
+    });
+}
+
+// 停止录制
+function stopRecording() {
+    if (!gameState.isRecording) return;
+    
+    gameState.isRecording = false;
+    
+    // 记录游戏结束事件
+    recordGameEvent('game_end', {
+        level: gameState.currentLevel,
+        moveCount: singlePlayerGame.moveCount,
+        timestamp: Date.now()
+    });
+    
+    showNotification('停止录制游戏回放');
+}
+
+// 保存录制
+function saveRecording() {
+    if (gameState.replayEvents.length === 0) {
+        showNotification('没有可保存的录制内容');
+        return;
+    }
+    
+    const recording = {
+        id: Date.now(),
+        level: gameState.currentLevel,
+        timestamp: Date.now(),
+        duration: gameState.replayEvents[gameState.replayEvents.length - 1].timestamp - gameState.replayEvents[0].timestamp,
+        moveCount: singlePlayerGame.moveCount,
+        events: [...gameState.replayEvents],
+        playerName: gameState.playerName
+    };
+    
+    gameState.replaySystem.recordings.unshift(recording);
+    localStorage.setItem('gameRecordings', JSON.stringify(gameState.replaySystem.recordings));
+    
+    showNotification('游戏回放已保存');
+}
+
+// 切换录制状态
+function toggleRecording() {
+    if (gameState.isRecording) {
+        // 停止录制
+        stopRecording();
+        document.getElementById('recordButton').textContent = '📹 录制';
+        document.getElementById('saveRecordButton').style.display = 'inline-block';
+    } else {
+        // 开始录制
+        startRecording();
+        document.getElementById('recordButton').textContent = '⏹️ 停止录制';
+        document.getElementById('saveRecordButton').style.display = 'none';
+    }
+}
+
+// 播放回放
+function playRecording(recordingId) {
+    const recording = gameState.replaySystem.recordings.find(r => r.id === recordingId);
+    if (!recording) return;
+    
+    gameState.replaySystem.currentRecording = recording;
+    gameState.replaySystem.isPlaying = true;
+    gameState.replaySystem.currentFrame = 0;
+    
+    // 显示回放播放器
+    document.getElementById('replayList').classList.add('hidden');
+    document.getElementById('playerContainer').classList.remove('hidden');
+    document.getElementById('replayTitle').textContent = `关卡 ${recording.level} - ${new Date(recording.timestamp).toLocaleString()}`;
+    
+    // 初始化回放环境
+    gameState.currentLevel = recording.level;
+    generateMaze(recording.level);
+    singlePlayerGame.player.x = 0;
+    singlePlayerGame.player.y = 0;
+    singlePlayerGame.moveCount = 0;
+    singlePlayerGame.hasKey = false;
+    singlePlayerGame.gameCompleted = false;
+    singlePlayerGame.gameFailed = false;
+    draw();
+    
+    // 开始播放
+    if (gameState.replaySystem.playbackInterval) {
+        clearInterval(gameState.replaySystem.playbackInterval);
+    }
+    
+    gameState.replaySystem.playbackInterval = setInterval(() => {
+        if (!gameState.replaySystem.isPlaying) return;
+        
+        const currentFrame = gameState.replaySystem.currentFrame;
+        const events = recording.events;
+        
+        if (currentFrame >= events.length) {
+            clearInterval(gameState.replaySystem.playbackInterval);
+            gameState.replaySystem.playbackInterval = null;
+            gameState.replaySystem.isPlaying = false;
+            document.getElementById('playBtn').textContent = '▶️ 播放';
+            showNotification('回放播放完毕');
+            return;
+        }
+        
+        // 处理当前帧事件
+        const event = events[currentFrame];
+        if (event.type === 'move') {
+            const direction = event.data.direction;
+            const newX = singlePlayerGame.player.x + (direction === 'right' ? 1 : direction === 'left' ? -1 : 0);
+            const newY = singlePlayerGame.player.y + (direction === 'down' ? 1 : direction === 'up' ? -1 : 0);
+            
+            if (isValidMove(newX, newY)) {
+                singlePlayerGame.player.x = newX;
+                singlePlayerGame.player.y = newY;
+                singlePlayerGame.moveCount++;
+                
+                if (singlePlayerGame.player.x === singlePlayerGame.maze[0].length - 1 && singlePlayerGame.player.y === singlePlayerGame.maze.length - 1) {
+                    singlePlayerGame.gameCompleted = true;
+                }
+            }
+        }
+        
+        gameState.replaySystem.currentFrame++;
+        draw();
+    }, 1000 / gameState.replaySystem.playbackSpeed);
+    
+    showNotification('开始播放回放');
+}
+
+// 打开回放模态框
+function openReplayModal() {
+    // 加载回放列表
+    loadReplayList();
+    
+    // 显示模态框
+    document.getElementById('replayModal').classList.remove('hidden');
+    document.getElementById('replayModal').style.display = 'flex';
+}
+
+// 关闭回放模态框
+function closeReplayModal() {
+    document.getElementById('replayModal').classList.add('hidden');
+    document.getElementById('replayModal').style.display = 'none';
+}
+
+// 加载回放列表
+function loadReplayList() {
+    const replayList = document.getElementById('replayList');
+    replayList.innerHTML = '';
+    
+    if (gameState.replaySystem.recordings.length === 0) {
+        replayList.innerHTML = '<div style="color: #888; text-align: center; padding: 20px;">暂无保存的回放记录</div>';
+        return;
+    }
+    
+    gameState.replaySystem.recordings.forEach(recording => {
+        const replayItem = document.createElement('div');
+        replayItem.className = 'replay-item';
+        replayItem.onclick = () => playRecording(recording.id);
+        
+        replayItem.innerHTML = `
+            <div class="replay-item-header">
+                <span class="replay-item-title">关卡 ${recording.level}</span>
+                <span style="color: #888; font-size: 12px;">${Math.floor(recording.duration / 1000)}秒</span>
+            </div>
+            <div class="replay-item-meta">
+                <span>移动次数: ${recording.moveCount}</span>
+                <span>${new Date(recording.timestamp).toLocaleString()}</span>
+                <span>${recording.playerName}</span>
+            </div>
+        `;
+        
+        replayList.appendChild(replayItem);
+    });
+}
+
+// 退出播放器
+function exitPlayer() {
+    document.getElementById('playerContainer').classList.add('hidden');
+    document.getElementById('replayList').classList.remove('hidden');
+    
+    // 停止回放
+    if (gameState.replaySystem.isPlaying) {
+        togglePlay();
+    }
+    
+    // 清除播放间隔
+    if (gameState.replaySystem.playbackInterval) {
+        clearInterval(gameState.replaySystem.playbackInterval);
+        gameState.replaySystem.playbackInterval = null;
+    }
+}
+
+// 开始回放播放
+function startReplayPlayback() {
+    if (gameState.replaySystem.playbackInterval) {
+        clearInterval(gameState.replaySystem.playbackInterval);
+    }
+    
+    const recording = gameState.replaySystem.currentRecording;
+    if (!recording) return;
+    
+    const events = recording.events;
+    
+    gameState.replaySystem.playbackInterval = setInterval(() => {
+        if (!gameState.replaySystem.isPlaying) return;
+        
+        const currentFrame = gameState.replaySystem.currentFrame;
+        
+        if (currentFrame >= events.length) {
+            clearInterval(gameState.replaySystem.playbackInterval);
+            gameState.replaySystem.playbackInterval = null;
+            gameState.replaySystem.isPlaying = false;
+            document.getElementById('playBtn').textContent = '▶️ 播放';
+            showNotification('回放播放完毕');
+            return;
+        }
+        
+        // 处理当前帧事件
+        const event = events[currentFrame];
+        if (event.type === 'move') {
+            const direction = event.data.direction;
+            const newX = singlePlayerGame.player.x + (direction === 'right' ? 1 : direction === 'left' ? -1 : 0);
+            const newY = singlePlayerGame.player.y + (direction === 'down' ? 1 : direction === 'up' ? -1 : 0);
+            
+            if (isValidMove(newX, newY)) {
+                singlePlayerGame.player.x = newX;
+                singlePlayerGame.player.y = newY;
+                singlePlayerGame.moveCount++;
+                
+                if (singlePlayerGame.player.x === singlePlayerGame.maze[0].length - 1 && singlePlayerGame.player.y === singlePlayerGame.maze.length - 1) {
+                    singlePlayerGame.gameCompleted = true;
+                }
+            }
+        }
+        
+        gameState.replaySystem.currentFrame++;
+        draw();
+    }, 1000 / gameState.replaySystem.playbackSpeed);
+}
+
+// 回放控制函数
+function seekBack() {
+    // 实现向后快进5秒的逻辑
+    showNotification('向后快进5秒');
+}
+
+function seekForward() {
+    // 实现向前快进5秒的逻辑
+    showNotification('向前快进5秒');
+}
+
+function togglePlay() {
+    gameState.replaySystem.isPlaying = !gameState.replaySystem.isPlaying;
+    const playBtn = document.getElementById('playBtn');
+    
+    if (gameState.replaySystem.isPlaying) {
+        playBtn.textContent = '⏸️ 暂停';
+        showNotification('继续播放回放');
+        // 如果没有播放间隔，重新开始播放
+        if (!gameState.replaySystem.playbackInterval) {
+            const recording = gameState.replaySystem.currentRecording;
+            if (recording) {
+                startReplayPlayback();
+            }
+        }
+    } else {
+        playBtn.textContent = '▶️ 播放';
+        showNotification('暂停播放回放');
+    }
+}
+
+// 可视化脚本编辑器函数
+// 打开可视化脚本编辑器
+function openVisualScriptEditor() {
+    document.getElementById('visualScriptEditor').classList.remove('hidden');
+    document.getElementById('visualScriptEditor').style.display = 'flex';
+    
+    // 初始化画布
+    initScriptCanvas();
+}
+
+// 关闭可视化脚本编辑器
+function closeVisualScriptEditor() {
+    document.getElementById('visualScriptEditor').classList.add('hidden');
+    document.getElementById('visualScriptEditor').style.display = 'none';
+}
+
+// 初始化脚本画布
+function initScriptCanvas() {
+    const canvas = document.getElementById('scriptCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // 设置画布大小
+    canvas.width = canvas.offsetWidth;
+    canvas.height = canvas.offsetHeight;
+    
+    // 清空画布
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // 绘制网格线
+    ctx.strokeStyle = 'rgba(76, 175, 80, 0.2)';
+    ctx.lineWidth = 1;
+    
+    const gridSize = 20;
+    for (let x = 0; x < canvas.width; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+    }
+    
+    for (let y = 0; y < canvas.height; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+    }
+    
+    // 绘制所有连接
+    drawAllConnections();
+}
+
+// 新建脚本
+function newScript() {
+    if (confirm('确定要新建脚本吗？当前未保存的内容将丢失。')) {
+        clearWorkspace();
+        document.getElementById('scriptInfo').textContent = '未保存';
+    }
+}
+
+// 保存脚本
+function saveScript() {
+    // 收集节点和连接数据
+    const nodes = collectNodesData();
+    const connections = collectConnectionsData();
+    
+    const script = {
+        id: Date.now(),
+        name: prompt('请输入脚本名称:', '新脚本'),
+        nodes: nodes,
+        connections: connections,
+        timestamp: Date.now()
+    };
+    
+    // 保存到localStorage
+    const savedScripts = JSON.parse(localStorage.getItem('visualScripts')) || [];
+    savedScripts.unshift(script);
+    localStorage.setItem('visualScripts', JSON.stringify(savedScripts));
+    
+    showNotification('脚本已保存');
+    document.getElementById('scriptInfo').textContent = script.name;
+}
+
+// 加载脚本
+function loadScript() {
+    const savedScripts = JSON.parse(localStorage.getItem('visualScripts')) || [];
+    if (savedScripts.length === 0) {
+        showNotification('没有保存的脚本');
+        return;
+    }
+    
+    const scriptName = prompt('请输入要加载的脚本名称:');
+    if (!scriptName) return;
+    
+    const script = savedScripts.find(s => s.name === scriptName);
+    if (!script) {
+        showNotification('找不到指定脚本');
+        return;
+    }
+    
+    // 清空当前工作区
+    clearWorkspace();
+    
+    // 加载节点和连接
+    loadNodesData(script.nodes);
+    loadConnectionsData(script.connections);
+    
+    document.getElementById('scriptInfo').textContent = script.name;
+    showNotification('脚本已加载');
+}
+
+// 清空工作区
+function clearWorkspace() {
+    // 清空节点容器
+    document.getElementById('nodesContainer').innerHTML = '';
+    
+    // 清空连接列表
+    connections = [];
+    
+    // 清空画布
+    initScriptCanvas();
+    
+    // 清空属性面板
+    document.getElementById('nodeProperties').innerHTML = '';
+    
+    document.getElementById('scriptInfo').textContent = '未保存';
+    showNotification('工作区已清空');
+}
+
+// 收集节点数据
+function collectNodesData() {
+    const nodes = [];
+    const nodeElements = document.querySelectorAll('.node');
+    
+    nodeElements.forEach(element => {
+        const node = {
+            id: element.dataset.nodeId,
+            type: element.dataset.nodeType,
+            x: parseInt(element.style.left),
+            y: parseInt(element.style.top),
+            title: element.querySelector('.node-title').textContent,
+            properties: {}
+        };
+        nodes.push(node);
+    });
+    
+    return nodes;
+}
+
+// 收集连接数据
+function collectConnectionsData() {
+    return connections;
+}
+
+// 加载节点数据
+function loadNodesData(nodes) {
+    // 简化处理，实际项目中需要根据节点数据创建节点元素
+    nodes.forEach(nodeData => {
+        createNode(nodeData.type, nodeData.x, nodeData.y, nodeData.id);
+    });
+}
+
+// 加载连接数据
+function loadConnectionsData(loadedConnections) {
+    connections = loadedConnections;
+    drawAllConnections();
+}
+
+// 节点连接功能
+let connecting = false;
+let startPort = null;
+let currentConnection = null;
+let connections = [];
+let longPressTimer = null;
+let longPressThreshold = 500; // 长按阈值（毫秒）
+let dragStart = false;
+
+// 绘制连接
+function drawConnection(ctx, startX, startY, endX, endY) {
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.bezierCurveTo(startX + 50, startY, endX - 50, endY, endX, endY);
+    ctx.strokeStyle = '#4CAF50';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+}
+
+// 绘制所有连接
+function drawAllConnections() {
+    const canvas = document.getElementById('scriptCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // 清空画布
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // 绘制网格线
+    ctx.strokeStyle = 'rgba(76, 175, 80, 0.2)';
+    ctx.lineWidth = 1;
+    
+    const gridSize = 20;
+    for (let x = 0; x < canvas.width; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+    }
+    
+    for (let y = 0; y < canvas.height; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+    }
+    
+    // 绘制所有连接
+    connections.forEach(conn => {
+        drawConnection(ctx, conn.startX, conn.startY, conn.endX, conn.endY);
+    });
+    
+    // 绘制当前正在创建的连接
+    if (connecting && startPort && currentConnection) {
+        drawConnection(ctx, startPort.x, startPort.y, currentConnection.endX, currentConnection.endY);
+    }
+}
+
+// 获取端口的位置
+function getPortPosition(portElement) {
+    const portRect = portElement.getBoundingClientRect();
+    const canvasRect = document.getElementById('scriptCanvas').getBoundingClientRect();
+    
+    return {
+        x: portRect.left - canvasRect.left + portRect.width / 2,
+        y: portRect.top - canvasRect.top + portRect.height / 2
+    };
+}
+
+// 处理端口鼠标按下事件 - 用于开始连接
+function handlePortMouseDown(e) {
+    e.stopPropagation();
+    if (connecting) return;
+    const portElement = e.target;
+    const portType = portElement.dataset.portType;
+    
+    if (portType === 'out') {
+        longPressTimer = setTimeout(() => {
+            startConnection(e);
+        }, longPressThreshold);
+    }
+}
+
+// 处理端口鼠标释放事件
+function handlePortMouseUp(e) {
+    e.stopPropagation();
+    if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+    }
+}
+
+// 处理端口鼠标离开事件
+function handlePortMouseLeave(e) {
+    e.stopPropagation();
+    if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+    }
+}
+
+// 开始连接
+function startConnection(e) {
+    const portElement = e.target;
+    const portType = portElement.dataset.portType;
+    const portId = portElement.dataset.portId;
+    const nodeElement = portElement.closest('.node');
+    const nodeId = nodeElement.dataset.nodeId;
+    
+    connecting = true;
+    startPort = {
+        element: portElement,
+        nodeId: nodeId,
+        portId: portId,
+        type: portType,
+        ...getPortPosition(portElement)
+    };
+    
+    currentConnection = {
+        startNodeId: nodeId,
+        startPortId: portId,
+        startX: startPort.x,
+        startY: startPort.y,
+        endX: startPort.x,
+        endY: startPort.y
+    };
+    
+    // 添加鼠标移动事件
+    document.addEventListener('mousemove', handleMouseMove);
+    // 添加鼠标点击事件
+    document.addEventListener('click', handleMouseClick);
+}
+
+// 处理端口点击事件
+function handlePortClick(e) {
+    e.stopPropagation();
+    const portElement = e.target;
+    const portType = portElement.dataset.portType;
+    const portId = portElement.dataset.portId;
+    const nodeElement = portElement.closest('.node');
+    const nodeId = nodeElement.dataset.nodeId;
+    
+    if (!connecting) {
+        // 开始连接
+        if (portType === 'out') {
+            connecting = true;
+            startPort = {
+                element: portElement,
+                nodeId: nodeId,
+                portId: portId,
+                type: portType,
+                ...getPortPosition(portElement)
+            };
+            
+            currentConnection = {
+                startNodeId: nodeId,
+                startPortId: portId,
+                startX: startPort.x,
+                startY: startPort.y,
+                endX: startPort.x,
+                endY: startPort.y
+            };
+            
+            // 添加鼠标移动事件
+            document.addEventListener('mousemove', handleMouseMove);
+            // 添加鼠标点击事件
+            document.addEventListener('click', handleMouseClick);
+        }
+    } else {
+        // 结束连接
+        if (portType === 'in') {
+            // 检查是否连接到同一个节点
+            if (nodeId === startPort.nodeId) {
+                cancelConnection();
+                return;
+            }
+            
+            // 创建连接
+            const endPort = {
+                element: portElement,
+                nodeId: nodeId,
+                portId: portId,
+                type: portType,
+                ...getPortPosition(portElement)
+            };
+            
+            // 添加到连接列表
+            const connection = {
+                id: Date.now(),
+                startNodeId: startPort.nodeId,
+                startPortId: startPort.portId,
+                endNodeId: endPort.nodeId,
+                endPortId: endPort.portId,
+                startX: startPort.x,
+                startY: startPort.y,
+                endX: endPort.x,
+                endY: endPort.y
+            };
+            
+            connections.push(connection);
+            
+            // 绘制连接
+            drawAllConnections();
+            
+            cancelConnection();
+        }
+    }
+}
+
+// 处理鼠标移动
+function handleMouseMove(e) {
+    if (connecting && startPort) {
+        const canvasRect = document.getElementById('scriptCanvas').getBoundingClientRect();
+        currentConnection.endX = e.clientX - canvasRect.left;
+        currentConnection.endY = e.clientY - canvasRect.top;
+        
+        // 重新绘制连接
+        drawAllConnections();
+    }
+}
+
+// 处理鼠标点击
+function handleMouseClick(e) {
+    // 检查是否点击了画布
+    if (e.target.id === 'scriptCanvas') {
+        cancelConnection();
+    }
+}
+
+// 取消连接
+function cancelConnection() {
+    connecting = false;
+    startPort = null;
+    currentConnection = null;
+    
+    // 移除事件监听器
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('click', handleMouseClick);
+    
+    // 重新绘制连接
+    drawAllConnections();
+}
+
+// 创建节点
+function createNode(type, x, y, id = null) {
+    const nodeId = id || Date.now();
+    const nodeContainer = document.getElementById('nodesContainer');
+    
+    const node = document.createElement('div');
+    node.className = 'node';
+    node.dataset.nodeId = nodeId;
+    node.dataset.nodeType = type;
+    node.style.left = x + 'px';
+    node.style.top = y + 'px';
+    
+    // 设置节点标题
+    const typeTitles = {
+        'start': '开始',
+        'move': '移动',
+        'condition': '条件',
+        'wait': '等待',
+        'end': '结束'
+    };
+    
+    node.innerHTML = `
+        <div class="node-header">
+            <div class="node-title">${typeTitles[type]}</div>
+            <div class="node-type">${type}</div>
+        </div>
+        <div class="node-ports">
+            ${type !== 'start' ? '<div class="port in"><div class="port-dot" data-port-id="in" data-port-type="in"></div><div class="port-label">输入</div></div>' : ''}
+            ${type !== 'end' ? '<div class="port out"><div class="port-label">输出</div><div class="port-dot" data-port-id="out" data-port-type="out"></div></div>' : ''}
+        </div>
+    `;
+    
+    // 添加端口事件
+    const portDots = node.querySelectorAll('.port-dot');
+    portDots.forEach(dot => {
+        dot.addEventListener('click', handlePortClick);
+        dot.addEventListener('mousedown', handlePortMouseDown);
+        dot.addEventListener('mouseup', handlePortMouseUp);
+        dot.addEventListener('mouseleave', handlePortMouseLeave);
+    });
+    
+    // 添加拖拽功能
+    makeNodeDraggable(node);
+    
+    // 添加点击事件
+    node.addEventListener('click', () => selectNode(nodeId));
+    
+    nodeContainer.appendChild(node);
+    
+    return node;
+}
+
+// 使节点可拖拽
+function makeNodeDraggable(node) {
+    let isDragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+    
+    node.addEventListener('mousedown', (e) => {
+        // 如果点击的是端口，不触发拖拽
+        if (e.target.classList.contains('port-dot')) {
+            return;
+        }
+        isDragging = true;
+        offsetX = e.clientX - parseInt(node.style.left);
+        offsetY = e.clientY - parseInt(node.style.top);
+        node.style.zIndex = 100;
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        
+        const container = document.querySelector('.editor-workspace');
+        const rect = container.getBoundingClientRect();
+        
+        let x = e.clientX - rect.left - offsetX;
+        let y = e.clientY - rect.top - offsetY;
+        
+        // 限制节点在容器内
+        x = Math.max(0, Math.min(x, rect.width - node.offsetWidth));
+        y = Math.max(0, Math.min(y, rect.height - node.offsetHeight));
+        
+        node.style.left = x + 'px';
+        node.style.top = y + 'px';
+    });
+    
+    document.addEventListener('mouseup', () => {
+        if (isDragging) {
+            isDragging = false;
+            node.style.zIndex = 10;
+        }
+    });
+}
+
+// 选择节点
+function selectNode(nodeId) {
+    // 移除所有节点的选中状态
+    document.querySelectorAll('.node').forEach(n => {
+        n.style.borderColor = '#4CAF50';
+    });
+    
+    // 选中当前节点
+    const selectedNode = document.querySelector(`[data-node-id="${nodeId}"]`);
+    if (selectedNode) {
+        selectedNode.style.borderColor = '#FFD700';
+        
+        // 显示节点属性
+        showNodeProperties(nodeId, selectedNode.dataset.nodeType);
+    }
+}
+
+// 显示节点属性
+function showNodeProperties(nodeId, nodeType) {
+    const propertiesPanel = document.getElementById('nodeProperties');
+    
+    // 根据节点类型显示不同的属性
+    let propertiesHTML = '';
+    
+    switch (nodeType) {
+        case 'start':
+            propertiesHTML = `
+                <div class="property-group">
+                    <label for="nodeTitle">节点名称:</label>
+                    <input type="text" id="nodeTitle" value="开始">
+                </div>
+                <div class="property-group">
+                    <label for="startDelay">延迟时间 (毫秒):</label>
+                    <input type="number" id="startDelay" value="0">
+                </div>
+            `;
+            break;
+        case 'move':
+            propertiesHTML = `
+                <div class="property-group">
+                    <label for="nodeTitle">节点名称:</label>
+                    <input type="text" id="nodeTitle" value="移动">
+                </div>
+                <div class="property-group">
+                    <label for="moveDirection">方向:</label>
+                    <select id="moveDirection">
+                        <option value="up">上</option>
+                        <option value="down">下</option>
+                        <option value="left">左</option>
+                        <option value="right">右</option>
+                    </select>
+                </div>
+                <div class="property-group">
+                    <label for="moveDistance">距离:</label>
+                    <input type="number" id="moveDistance" value="1">
+                </div>
+            `;
+            break;
+        case 'condition':
+            propertiesHTML = `
+                <div class="property-group">
+                    <label for="nodeTitle">节点名称:</label>
+                    <input type="text" id="nodeTitle" value="条件">
+                </div>
+                <div class="property-group">
+                    <label for="conditionType">条件类型:</label>
+                    <select id="conditionType">
+                        <option value="wall">前方有墙</option>
+                        <option value="trap">前方有陷阱</option>
+                        <option value="exit">前方有出口</option>
+                    </select>
+                </div>
+            `;
+            break;
+        case 'wait':
+            propertiesHTML = `
+                <div class="property-group">
+                    <label for="nodeTitle">节点名称:</label>
+                    <input type="text" id="nodeTitle" value="等待">
+                </div>
+                <div class="property-group">
+                    <label for="waitTime">等待时间 (毫秒):</label>
+                    <input type="number" id="waitTime" value="1000">
+                </div>
+            `;
+            break;
+        case 'end':
+            propertiesHTML = `
+                <div class="property-group">
+                    <label for="nodeTitle">节点名称:</label>
+                    <input type="text" id="nodeTitle" value="结束">
+                </div>
+            `;
+            break;
+    }
+    
+    propertiesPanel.innerHTML = propertiesHTML;
+}
+
+// 初始化节点拖拽功能
+function initNodeDrag() {
+    const paletteNodes = document.querySelectorAll('.palette-node');
+    
+    paletteNodes.forEach(node => {
+        node.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('nodeType', node.dataset.nodeType);
+        });
+    });
+    
+    const workspace = document.querySelector('.editor-workspace');
+    workspace.addEventListener('dragover', (e) => {
+        e.preventDefault();
+    });
+    
+    workspace.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const nodeType = e.dataTransfer.getData('nodeType');
+        
+        if (nodeType) {
+            const rect = workspace.getBoundingClientRect();
+            const x = e.clientX - rect.left - 100; // 居中放置
+            const y = e.clientY - rect.top - 50;  // 居中放置
+            
+            createNode(nodeType, x, y);
+        }
+    });
+}
+
+// 页面加载完成后初始化
+window.addEventListener('load', () => {
+    initNodeDrag();
+});
+
 // 控制反转事件
 // 修改后的反转控制事件
 EventSystem.register({
@@ -5435,12 +6962,6 @@ function drawSinglePlayerMaze() {
         let isPlaying = false;
         let playbackTimer = null; // 播放进度定时器
         
-        // 语音转文字相关变量
-        let speechRecognition = null;
-        let isTranscribing = false;
-        let transcriptionText = '';
-        let recognitionTimer = null;
-        
         // 音乐播放确认相关变量
         let musicPlayTimer = null;
         let musicPlayCountdown = 10;
@@ -5577,18 +7098,6 @@ function drawSinglePlayerMaze() {
                 document.getElementById('transcribeButton'),
                 document.getElementById('transcribeButtonModal')
             ];
-
-            buttons.forEach(button => {
-                if (button) {
-                    if (isTranscribing) {
-                        button.innerHTML = '🛑 停止语音转文字';
-                        button.style.background = 'linear-gradient(135deg, #f44336, #d32f2f)';
-                    } else {
-                        button.innerHTML = '🗣️ 语音转文字';
-                        button.style.background = 'linear-gradient(135deg, #2196F3, #1976D2)';
-                    }
-                }
-            });
         }
 
         // 开始语音录制
@@ -6619,6 +8128,8 @@ function drawSinglePlayerMaze() {
         
         // 添加回车键发送消息
         document.addEventListener('DOMContentLoaded', function() {
+            // 初始化回放系统
+            initReplaySystem();
             // 为常规聊天输入框添加回车键监听
             const chatInput = document.getElementById('chatInput');
             if (chatInput) {
@@ -10254,6 +11765,21 @@ function handleSinglePlayerMoveLogic(dx, dy) {
     document.getElementById('moveCount').textContent = `移动: ${singlePlayerGame.moveCount}`;
     drawSinglePlayerMaze();
     checkSinglePlayerExit();
+    
+    // 记录移动事件
+    let direction = '';
+    if (dx === 0 && dy === -1) direction = 'up';
+    if (dx === 0 && dy === 1) direction = 'down';
+    if (dx === -1 && dy === 0) direction = 'left';
+    if (dx === 1 && dy === 0) direction = 'right';
+    
+    recordGameEvent('move', {
+        direction: direction,
+        playerX: singlePlayerGame.player.x,
+        playerY: singlePlayerGame.player.y,
+        moveCount: singlePlayerGame.moveCount,
+        timestamp: Date.now()
+    });
 }
 
 
@@ -10331,683 +11857,153 @@ function checkSinglePlayerExit() {
 
         // =============== 多人游戏P2P功能 ===============
         function connectToMultiplayerGame() {
-            console.log("触发连接至多人联机游戏函数")
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-            
-            // 显示状态提示并禁用按钮
-            const statusElement = document.getElementById('roomStatus');
-            const startBtn = document.getElementById('multiplayerStartBtn');
-            const roomCodeInput = document.getElementById('roomCode').value.trim();
+    console.log("触发连接至多人联机游戏函数")
+    
+    // 显示状态提示并禁用按钮
+    const statusElement = document.getElementById('roomStatus');
+    const startBtn = document.getElementById('multiplayerStartBtn');
+    const roomCodeInput = document.getElementById('roomCode').value.trim();
+    
+    if (roomCodeInput) {
+        statusElement.textContent = '加入房间中...';
+    } else {
+        statusElement.textContent = '创建房间中...';
+    }
+    startBtn.disabled = true;
+    
+    gameState.playerName = document.getElementById('playerName').value.trim() || '玩家';
+    
+    // 获取房间密码
+    const roomPassword = document.getElementById('roomPassword').value.trim();
+    
+    // 设置最大玩家数和密码
+    if (roomCodeInput === '') {
+        gameState.multiplayer.maxPlayers = parseInt(document.getElementById('maxPlayers').value);
+        gameState.multiplayer.roomPassword = roomPassword;
+    }
+    
+    // 初始化Socket.IO连接
+    try {
+        // 连接到Socket.IO服务器
+        const socket = io();
+        gameState.multiplayer.socket = socket;
+        
+        // 更新UI显示连接状态
+        updateConnectionStatus('connecting');
+        
+        // 设置Socket.IO事件处理
+        socket.on('connect', () => {
+            console.log('Socket.IO连接建立，ID:', socket.id);
+            gameState.multiplayer.currentPlayerId = socket.id;
             
             if (roomCodeInput) {
-                statusElement.textContent = '加入房间中...';
-            } else {
-                statusElement.textContent = '创建房间中...';
-            }
-            startBtn.disabled = true;
-            
-            gameState.playerName = document.getElementById('playerName').value.trim() || '玩家';
-            
-            // 获取房间密码
-            const roomPassword = document.getElementById('roomPassword').value.trim();
-            
-            // 设置最大玩家数和密码
-            if (roomCodeInput === '') {
-                gameState.multiplayer.maxPlayers = parseInt(document.getElementById('maxPlayers').value);
-                gameState.multiplayer.roomPassword = roomPassword;
-            }
-            
-            // 初始化Peer连接
-            try {
-                if (roomCodeInput) {
                 // 加入现有房间
                 console.log("加入现有房间")
                 gameState.multiplayer.isHost = false;
-                // 确保房间号格式正确，添加room_前缀
-                gameState.multiplayer.roomCode = roomCodeInput.startsWith('room_') ? roomCodeInput : `room_${roomCodeInput}`;
-                gameState.multiplayer.peer = new Peer({
-                    debug: 2,
-                    config: {
-                        'iceServers': [
-                            { urls: 'stun:stun.l.google.com:19302' },
-                            { urls: 'stun:stun1.l.google.com:19302' },
-                            // 添加TURN服务器支持跨网段连接
-                            { urls: 'turn:turn.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' }
-                        ]
+                gameState.multiplayer.roomCode = roomCodeInput;
+                
+                socket.emit('joinRoom', {
+                    roomId: roomCodeInput,
+                    playerName: gameState.playerName,
+                    password: roomPassword
+                }, (response) => {
+                    if (response.success) {
+                                statusElement.textContent = '房间加入成功！';
+                                gameState.multiplayer.roomCode = response.roomId;
+                                if (gameState.multiplayer.isHost) {
+                                    setupAsHost(response.roomId); // 只在房主时调用，使用真正的房间ID
+                                }
+                                startBtn.disabled = false;
+                            } else {
+                        statusElement.textContent = `加入失败: ${response.message}`;
+                        statusElement.style.color = '#FF5252';
+                        startBtn.disabled = false;
+                        playSound("error");
+                        showScreen('multiplayerSetup');
                     }
                 });
             } else {
-                    // 创建新房间
-                    console.log("创建新房间")
-                    gameState.multiplayer.isHost = true;
-                    
-                    // 使用时间戳和随机数生成更唯一的ID
-                    const timestamp = new Date().getTime().toString(36);
-                    const randomStr = Math.random().toString(36).substring(2, 10);
-                    // const roomCode = `room_${timestamp}_${randomStr}`;
-                    const roomCode = generateShortRoomCode();
-
-                    gameState.multiplayer.roomCode = roomCode;
-                    gameState.multiplayer.peer = new Peer(roomCode, {
-                        debug: 2,
-                        config: {
-                            'iceServers': [
-                                { urls: 'stun:stun.l.google.com:19302' },
-                                { urls: 'stun:stun1.l.google.com:19302' },
-                                // 添加TURN服务器支持跨网段连接
-                                { urls: 'turn:turn.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' }
-                            ]
-                        }
-                    });
-                }
+                // 创建新房间
+                console.log("创建新房间")
+                gameState.multiplayer.isHost = true;
                 
-                // 设置Peer事件处理
-                gameState.multiplayer.peer.on('open', (id) => {
-                    console.log('Peer连接建立，ID:', id);
-                    gameState.multiplayer.currentPlayerId = id;
-                    
-                    // 连接成功，更新状态
-                    const statusElement = document.getElementById('roomStatus');
-                    const startBtn = document.getElementById('multiplayerStartBtn');
-                    
-                    if (gameState.multiplayer.isHost) {
-                        statusElement.textContent = '房间创建成功！';
-                        // 主机逻辑
-                        setupAsHost(id);
-                    } else {
-                        statusElement.textContent = '正在连接到主机...';
-                        // 连接到主机，使用处理后的房间号
-                        connectToHost(gameState.multiplayer.roomCode);
+                socket.emit('createRoom', {
+                    playerName: gameState.playerName,
+                    maxPlayers: gameState.multiplayer.maxPlayers,
+                    roomName: `${gameState.playerName}的房间`,
+                    isPrivate: !!roomPassword,
+                    password: roomPassword
+                }, (response) => {
+                    if (response.success) {
+                                statusElement.textContent = '房间创建成功！';
+                                gameState.multiplayer.roomCode = response.roomId;
+                                setupAsHost(response.roomId); // 使用真正的房间ID
+                                startBtn.disabled = false;
+                            } else {
+                        statusElement.textContent = `创建失败: ${response.message}`;
+                        statusElement.style.color = '#FF5252';
+                        startBtn.disabled = false;
+                        playSound("error");
+                        showScreen('multiplayerSetup');
                     }
                 });
-                
-                gameState.multiplayer.peer.on('connection', (conn) => {
-                    console.log('收到连接请求:', conn.peer);
-                    setupConnection(conn);
-                });
-                
-                gameState.multiplayer.peer.on('error', (err) => {
-                    console.error('Peer错误:', err);
-                    
-                    // 恢复按钮状态
-                    const statusElement = document.getElementById('roomStatus');
-                    const startBtn = document.getElementById('multiplayerStartBtn');
-                    statusElement.textContent = '连接失败，请重试';
-                    statusElement.style.color = '#FF5252';
-                    startBtn.disabled = false;
-                    
-                    // 处理ID被占用的情况
-                    if (err.type === 'peer-unavailable' || err.type === 'unavailable-id') {
-                        alert('连接出错',err);
-                    } else {
-                        alert('连接错误: ' + err);
-                    }
-                    
-                    showScreen('multiplayerSetup');
-                });
-                
-                // 更新UI显示连接状态
-                updateConnectionStatus('connecting');
-                
-            } catch (err) {
-                console.error('初始化Peer失败:', err);
-                
-                // 恢复按钮状态
-                const statusElement = document.getElementById('roomStatus');
-                const startBtn = document.getElementById('multiplayerStartBtn');
-                statusElement.textContent = '连接初始化失败，请重试';
-                statusElement.style.color = '#FF5252';
-                startBtn.disabled = false;
-                
-                alert('连接初始化失败: ' + err);
             }
-        }
-
-        function setupAsHost(peerId) {
-            // 生成多人游戏迷宫
-            console.log("生成多人游戏迷宫")
-            gameState.multiplayer.maze = generateMultiplayerMaze();
-            
-            // 获取用户选择的颜色
-            const playerColor = document.getElementById('playerColor').value;
-            
-            // 添加自己作为玩家
-            gameState.multiplayer.players[peerId] = {
-                id: peerId,
-                name: gameState.playerName,
-                x: 1,
-                y: 1,
-                color: playerColor,
-                reachedExit: false,
-                isHost: true
-            };
-            
-            // 设置房间代码显示
-            document.getElementById('multiplayerRoomCode').textContent = 
-                `房间: ${peerId}`;
-            
-            // 向API服务器发送房间创建请求
-            async function registerRoomWithServer() {
-                try {
-                    const roomData = {
-                        playerName: gameState.playerName,
-                        maxPlayers: gameState.multiplayer.maxPlayers,
-                        roomName: `${gameState.playerName}的房间`,
-                        isPrivate: !!gameState.multiplayer.roomPassword,
-                        password: gameState.multiplayer.roomPassword
-                    };
-                    
-                    console.log('发送房间创建请求到API服务器:', roomData);
-                    
-                    const response = await fetch(GAME_SERVER_URL + '/api/create-room', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(roomData)
-                    });
-                    
-                    if (response.ok) {
-                        const result = await response.json();
-                        console.log('房间创建请求成功:', result);
-                    } else {
-                        const error = await response.json();
-                        console.error('房间创建请求失败:', error);
-                    }
-                } catch (err) {
-                    console.error('发送房间创建请求时发生错误:', err);
-                }
-            }
-            
-            // 注册房间到服务器
-            registerRoomWithServer();
-            
-            // 开始多人游戏
-            console.log("开始多人游戏")
-            startMultiplayerGame();
-        }
-
-        function connectToHost(hostId) {
-            try {
-                // 确保hostId带有room_前缀
-                const formattedHostId = hostId.startsWith('room_') ? hostId : `room_${hostId}`;
-                
-                // 连接到主机
-                console.log("连接至主机", formattedHostId)
-                const conn = gameState.multiplayer.peer.connect(formattedHostId, {
-                    reliable: true
-                });
-                
-                if (!conn) {
-                    console.error("无法建立连接")
-                    throw new Error('无法建立连接');
-                }
-                
-                console.log('连接对象已创建，等待连接打开...');
-                
-                setupConnection(conn);
-                
-                // 添加连接超时处理
-                const connectionTimeout = setTimeout(() => {
-                    console.error('连接超时');
-                    alert('连接主机超时，请检查网络或房间号是否正确\n\n调试信息：\n- 房间号：' + formattedHostId + '\n- 你的ID：' + gameState.multiplayer.currentPlayerId);
-                    updateConnectionStatus('disconnected');
-                    disconnectMultiplayer();
-                    showScreen('multiplayerSetup');
-                }, 10000); // 10秒超时
-                
-                conn.on('open', () => {
-                    console.log('已连接到主机');
-                    clearTimeout(connectionTimeout); // 清除超时
-                    // 获取用户选择的颜色和密码
-                    const playerColor = document.getElementById('playerColor').value;
-                    const roomPassword = document.getElementById('roomPassword').value.trim();
-                    
-                    // 发送加入请求
-                    conn.send({
-                        type: 'player-join',
-                        player: {
-                            id: gameState.multiplayer.currentPlayerId,
-                            name: gameState.playerName,
-                            color: playerColor
-                        },
-                        password: roomPassword
-                    });
-                    
-                    updateConnectionStatus('connected');
-                });
-                
-                conn.on('error', (err) => {
-                    console.error('连接错误:', err);
-                    clearTimeout(connectionTimeout); // 清除超时
-                    alert('连接主机失败: ' + err + '\n\n调试信息：\n- 房间号：' + formattedHostId + '\n- 错误类型：' + err.type + '\n- 错误详情：' + JSON.stringify(err));
-                    updateConnectionStatus('disconnected');
-                    disconnectMultiplayer();
-                    showScreen('multiplayerSetup');
-                });
-                
-                // 添加连接关闭事件监听
-                conn.on('close', () => {
-                    console.error('连接意外关闭');
-                    clearTimeout(connectionTimeout); // 清除超时
-                    alert('与主机的连接已关闭\n\n调试信息：\n- 房间号：' + formattedHostId);
-                    updateConnectionStatus('disconnected');
-                    disconnectMultiplayer();
-                    showScreen('multiplayerSetup');
-                });
-                
-            } catch (err) {
-                console.error('连接异常:', err);
-                alert('连接异常: ' + err.message);
-                updateConnectionStatus('disconnected');
-                disconnectMultiplayer();
-            }
-        }
-
-        function setupConnection(conn) {
-            // 检查是否达到最大玩家数
-            if (gameState.multiplayer.isHost && 
-                Object.keys(gameState.multiplayer.players).length >= gameState.multiplayer.maxPlayers) {
-                console.log('房间已满，拒绝连接:', conn.peer);
-                conn.send({
-                    type: 'room-full',
-                    message: '房间已满，无法加入'
-                });
-                conn.close();
-                return;
-            }
-            
-            // 存储连接
-            gameState.multiplayer.connections[conn.peer] = conn;
-            
-            // 处理收到的消息
-            conn.on('data', (data) => {
-                handleMultiplayerData(data, conn.peer);
-            });
-            
-            conn.on('close', () => {
-                console.log('连接关闭:', conn.peer);
-                removePlayer(conn.peer);
-            });
-            
-            conn.on('error', (err) => {
-                console.error('连接错误:', conn.peer, err);
-                removePlayer(conn.peer);
-            });
-        }
-// 生成简短房间号（5位数字）
-function generateShortRoomCode() {
-    // 生成5位随机数字
-    const code = Math.floor(10000 + Math.random() * 90000).toString();
-    return `room_${code}`;
-}
-// 时间挑战模式
-function startTimeChallenge() {
-    gameState.currentChallenge = 'time';
-    gameState.currentLevel = 1;
-    showScreen('singlePlayerGame');
-    
-    // 添加时间挑战UI
-    const timeChallengeInfo = document.createElement('div');
-    timeChallengeInfo.className = 'time-challenge-info';
-    timeChallengeInfo.id = 'timeChallengeInfo';
-    timeChallengeInfo.innerHTML = '⏱️ 时间挑战模式<br>剩余时间: <span id="challengeTimeLeft">60</span>秒';
-    document.getElementById('singlePlayerGame').appendChild(timeChallengeInfo);
-    
-    // 启动时间挑战计时器
-    startTimeChallengeTimer();
-}
-
-function startTimeChallengeTimer() {
-    let timeLeft = 60; // 60秒挑战
-    const timerElement = document.getElementById('challengeTimeLeft');
-    
-    const challengeTimer = setInterval(() => {
-        timeLeft--;
-        timerElement.textContent = timeLeft;
+        });
         
-        if (timeLeft <= 0) {
-            clearInterval(challengeTimer);
-            alert('时间到！挑战失败！');
-            showScreen('moreChallenges');
-            document.getElementById('timeChallengeInfo').remove();
-        }
+        // 监听断开连接事件
+        socket.on('disconnect', () => {
+            console.log('Socket.IO连接断开');
+            updateConnectionStatus('disconnected');
+            const statusElement = document.getElementById('roomStatus');
+            statusElement.textContent = '连接已断开';
+            statusElement.style.color = '#FF5252';
+            startBtn.disabled = false;
+        });
         
-        // 时间警告
-        if (timeLeft <= 10) {
-            timerElement.style.color = '#ff4444';
-            timerElement.style.animation = 'pulse 0.5s infinite';
-        }
-    }, 1000);
-    
-    // 保存计时器引用以便清理
-    gameState.challengeTimer = challengeTimer;
-}
-
-// 解谜模式
-function startPuzzleMode() {
-    gameState.currentChallenge = 'puzzle';
-    gameState.currentLevel = 1;
-    showScreen('singlePlayerGame');
-    
-    // 这里可以添加特殊的解谜关卡逻辑
-    // 例如：需要按照特定顺序踩踏按钮等
-}
-
-// 成就系统函数
-function updateAchievementProgress() {
-    // 更新成就1：通关所有关卡
-    const totalLevels = 80;
-    const progress1 = (gameState.achievements.allLevelsCompleted ? totalLevels : gameState.gameStats.totalLevelsCompleted) / totalLevels * 100;
-    document.getElementById('progress1').style.width = progress1 + '%';
-    document.getElementById('progressText1').textContent = 
-        gameState.achievements.allLevelsCompleted ? '80/80' : gameState.gameStats.totalLevelsCompleted + '/80';
-    
-    if (gameState.achievements.allLevelsCompleted) {
-        document.getElementById('achievement1').classList.add('completed');
-        document.getElementById('status1').textContent = '已完成';
-    }
-    
-    // 更新成就2：多人游戏胜利
-    const progress2 = Math.min(gameState.achievements.multiplayerWins / 10 * 100, 100);
-    document.getElementById('progress2').style.width = progress2 + '%';
-    document.getElementById('progressText2').textContent = gameState.achievements.multiplayerWins + '/10';
-    
-    if (gameState.achievements.multiplayerWins >= 10) {
-        document.getElementById('achievement2').classList.add('completed');
-        document.getElementById('status2').textContent = '已完成';
-    }
-    
-    // 更新成就3：陷阱次数
-    const progress3 = Math.min(gameState.achievements.trapHits / 30 * 100, 100);
-    document.getElementById('progress3').style.width = progress3 + '%';
-    document.getElementById('progressText3').textContent = gameState.achievements.trapHits + '/30';
-    
-    if (gameState.achievements.trapHits >= 30) {
-        document.getElementById('achievement3').classList.add('completed');
-        document.getElementById('status3').textContent = '已完成';
-    }
-    
-    // 更新成就4：使用中国国旗表情包
-    const progress4 = gameState.achievements.chineseEmojiUsed ? 100 : 0;
-    document.getElementById('progress4').style.width = progress4 + '%';
-    document.getElementById('progressText4').textContent = gameState.achievements.chineseEmojiUsed ? '1/1' : '0/1';
-    
-    if (gameState.achievements.chineseEmojiUsed) {
-        const achievement4 = document.getElementById('achievement4');
-        achievement4.classList.add('completed');
-        achievement4.classList.remove('hidden');
-        document.getElementById('status4').textContent = '已完成';
-    }
-}
-
-// 更新统计数据面板
-// 更新统计数据面板
-function updateStatistics() {
-    // 获取统计数据，确保有默认值
-    const stats = gameState.gameStats || {
-        timeChallengeBest: 0,
-        puzzleLevelsCompleted: 0,
-        totalLevelsCompleted: 0,
-        totalPlayTime: 0,
-        totalMoves: 0,
-        totalTrapsTriggered: 0,
-        totalCoinsCollected: 0,
-        averageMovesPerLevel: 0,
-        completionRate: 0
-    };
-    
-    // 更新总游戏时间（转换为分钟）
-    const totalPlayTimeMinutes = Math.floor((gameState.totalPlayTime || 0) / 60000);
-    document.getElementById('totalPlayTime').textContent = totalPlayTimeMinutes + ' 分钟';
-    
-    // 更新总移动次数
-    document.getElementById('totalMoves').textContent = stats.totalMoves || 0;
-    
-    // 更新通关总关卡数
-    document.getElementById('totalLevelsCompleted').textContent = stats.totalLevelsCompleted || 0;
-    
-    // 更新触发陷阱次数
-    document.getElementById('totalTrapsTriggered').textContent = stats.totalTrapsTriggered || 0;
-    
-    // 更新收集金币总数
-    document.getElementById('totalCoinsCollected').textContent = stats.totalCoinsCollected || 0;
-    
-    // 更新解谜关卡完成数
-    document.getElementById('puzzleLevelsCompleted').textContent = stats.puzzleLevelsCompleted || 0;
-    
-    // 更新最快通关时间
-    document.getElementById('timeChallengeBest').textContent = (stats.timeChallengeBest || 0) + ' 秒';
-    
-    // 更新平均每关移动次数（保留一位小数）
-    const totalLevels = stats.totalLevelsCompleted || 0;
-    const totalMoves = stats.totalMoves || 0;
-    const avgMoves = totalLevels > 0 ? (totalMoves / totalLevels).toFixed(1) : 0;
-    document.getElementById('averageMovesPerLevel').textContent = avgMoves;
-    
-    // 更新通关率（百分比）
-    const completionRate = (stats.completionRate || 0).toFixed(1);
-    document.getElementById('completionRate').textContent = completionRate + '%';
-} {
-    // 获取统计数据
-    const stats = gameState.gameStats;
-    
-    // 更新总游戏时间（转换为分钟）
-    const totalPlayTimeMinutes = Math.floor((gameState.totalPlayTime || 0) / 60000);
-    document.getElementById('totalPlayTime').textContent = totalPlayTimeMinutes + ' 分钟';
-    
-    // 更新总移动次数
-    document.getElementById('totalMoves').textContent = stats.totalMoves;
-    
-    // 更新通关总关卡数
-    document.getElementById('totalLevelsCompleted').textContent = stats.totalLevelsCompleted;
-    
-    // 更新触发陷阱次数
-    document.getElementById('totalTrapsTriggered').textContent = stats.totalTrapsTriggered;
-    
-    // 更新收集金币总数
-    document.getElementById('totalCoinsCollected').textContent = stats.totalCoinsCollected;
-    
-    // 更新解谜关卡完成数
-    document.getElementById('puzzleLevelsCompleted').textContent = stats.puzzleLevelsCompleted;
-    
-    // 更新最快通关时间
-    document.getElementById('timeChallengeBest').textContent = stats.timeChallengeBest + ' 秒';
-    
-    // 更新平均每关移动次数（保留一位小数）
-    const avgMoves = stats.totalLevelsCompleted > 0 ? 
-        (stats.totalMoves / stats.totalLevelsCompleted).toFixed(1) : 0;
-    document.getElementById('averageMovesPerLevel').textContent = avgMoves;
-    
-    // 更新通关率（百分比）
-    const completionRate = stats.completionRate.toFixed(1);
-    document.getElementById('completionRate').textContent = completionRate + '%';
-}
-
-// 重置统计数据
-function resetStatistics() {
-    if (confirm('确定要重置所有统计数据吗？此操作不可恢复！')) {
-        // 重置gameStats对象
-        gameState.gameStats = {
-            timeChallengeBest: 0,
-            puzzleLevelsCompleted: 0,
-            totalLevelsCompleted: 0,
-            totalPlayTime: 0,
-            totalMoves: 0,
-            totalTrapsTriggered: 0,
-            totalCoinsCollected: 0,
-            averageMovesPerLevel: 0,
-            completionRate: 0
-        };
+        // 监听错误事件
+        socket.on('connect_error', (err) => {
+            console.error('Socket.IO连接错误:', err);
+            const statusElement = document.getElementById('roomStatus');
+            statusElement.textContent = `连接失败: ${err.message}`;
+            statusElement.style.color = '#FF5252';
+            startBtn.disabled = false;
+            playSound("error");
+            showScreen('multiplayerSetup');
+        });
         
-        // 保存到localStorage
-        localStorage.setItem('gameStats', JSON.stringify(gameState.gameStats));
+        // 监听玩家加入事件
+        socket.on('player-join', (playerData) => {
+            console.log('玩家加入:', playerData);
+            // 处理新玩家加入逻辑
+            if (gameState.multiplayer.connections) {
+                gameState.multiplayer.connections[playerData.id] = { playerName: playerData.name };
+            }
+            updatePlayerList();
+        });
         
-        // 更新统计面板显示
-        updateStatistics();
+        // 监听玩家离开事件
+        socket.on('player-leave', (playerId) => {
+            console.log('玩家离开:', playerId);
+            // 处理玩家离开逻辑
+            if (gameState.multiplayer.connections && gameState.multiplayer.connections[playerId]) {
+                delete gameState.multiplayer.connections[playerId];
+            }
+            updatePlayerList();
+        });
+    } catch (err) {
+        console.error('初始化Socket.IO失败:', err);
         
-        // 显示提示
-        alert('统计数据已重置！');
-    }
-}
-
-// 记录成就进度
-function recordAchievement(type, value = 1) {
-    switch(type) {
-        case 'levelComplete':
-            gameState.gameStats.totalLevelsCompleted += value;
-            
-            // 检查是否完成所有关卡
-            if (gameState.gameStats.totalLevelsCompleted == 80) {
-                gameState.achievements.allLevelsCompleted = true;
-                showAchievementUnlocked('迷宫大师', '恭喜你通关所有关卡！');
-            }
-            break;
-            
-        case 'multiplayerWin':
-            gameState.achievements.multiplayerWins += value;
-            
-            if (gameState.achievements.multiplayerWins == 10) {
-                showAchievementUnlocked('社交达人', '完成10次多人联机挑战！');
-            }
-            break;
-            
-        case 'trapHit':
-            gameState.achievements.trapHits += value;
-            
-            if (gameState.achievements.trapHits == 30) {
-                showAchievementUnlocked('陷阱专家', '成功踩中陷阱30次！');
-            }
-            
-            // 更新UI显示
-            const trapHitElement = document.getElementById('trapHit');
-            if (trapHitElement) {
-                trapHitElement.textContent = `陷阱触发: ${gameState.achievements.trapHits}`;
-            }
-            break;
-    }
-    
-    saveGameData();
-    updateAchievementProgress();
-}
-
-// 显示成就解锁提示
-function showAchievementUnlocked(title, description) {
-    const notification = document.createElement('div');
-    notification.style.cssText = `
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: rgba(0, 0, 0, 0.9);
-        border: 3px solid #FFD700;
-        border-radius: 15px;
-        padding: 20px;
-        text-align: center;
-        z-index: 10000;
-        animation: popIn 0.5s ease-out;
-    `;
-    
-    notification.innerHTML = `
-        <h3 style="color: #FFD700; margin: 0 0 10px 0;">🏆 成就解锁！</h3>
-        <h4 style="color: white; margin: 0 0 10px 0;">${title}</h4>
-        <p style="color: #ccc; margin: 0;">${description}</p>
-    `;
-    
-    document.body.appendChild(notification);
-    
-    setTimeout(() => {
-        notification.remove();
-    }, 3000);
-}
-
-// 存档系统
-// 新增删除存档功能
-function deleteSave(slot) {
-    gameState.saveSlots[slot] = {};
-    localStorage.setItem('saveSlots', JSON.stringify(gameState.saveSlots));
-    showNotification(`存档位置 ${slot + 1} 已删除`);
-}
-
-// 修改保存游戏函数 - 确保保存玩家位置
-function saveGame() {
-    const slot = 0; // 默认使用第一个存档槽位
-    // 保存核心进度数据和当前玩家位置
-    const saveData = {
-        unlockedLevel: gameState.unlockedLevel,
-        completedLevels: gameState.completedLevels,
-        achievements: gameState.achievements,
-        gameStats: gameState.gameStats,
-        currentLevel: gameState.currentLevel,
-        playerData: {
-            x: singlePlayerGame.player.x,
-            y: singlePlayerGame.player.y,
-            hasKey: singlePlayerGame.hasKey
-        },
-        mazeState: JSON.parse(JSON.stringify(singlePlayerGame.maze)), // 保存迷宫状态
-        timestamp: new Date().getTime() // 添加时间戳用于查找最近存档
-    };
-    
-    gameState.saveSlots[slot] = saveData;
-    localStorage.setItem('saveSlots', JSON.stringify(gameState.saveSlots));
-    // 移除通知，自动存档无需用户反馈
-}
-
-// 正确加载玩家位置
-function loadGame() {
-    const slot = 0; // 默认使用第一个存档槽位
-    const saveData = gameState.saveSlots[slot];
-    if (!saveData) return false;
-    
-    // 设置加载存档标志
-    gameState.isLoadingSave = true;
-    
-    // 恢复游戏状态
-    gameState.unlockedLevel = saveData.unlockedLevel;
-    gameState.completedLevels = saveData.completedLevels;
-    gameState.achievements = saveData.achievements;
-    gameState.gameStats = saveData.gameStats;
-    gameState.currentLevel = saveData.currentLevel;
-    
-    // 恢复玩家位置和状态
-    if (saveData.playerData) {
-        singlePlayerGame.player.x = saveData.playerData.x;
-        singlePlayerGame.player.y = saveData.playerData.y;
-        singlePlayerGame.hasKey = saveData.playerData.hasKey || false;
-    } else {
-        // 兼容旧存档
-        singlePlayerGame.player.x = 1;
-        singlePlayerGame.player.y = 1;
-        singlePlayerGame.hasKey = false;
-    }
-    
-    // 恢复迷宫状态
-    if (saveData.mazeState) {
-        singlePlayerGame.maze = saveData.mazeState;
+        // 恢复按钮状态
+        const statusElement = document.getElementById('roomStatus');
+        const startBtn = document.getElementById('multiplayerStartBtn');
+        statusElement.textContent = '连接初始化失败，请重试';
+        statusElement.style.color = '#FF5252';
+        startBtn.disabled = false;
         
-        // 恢复钥匙和门的位置（如果需要）
-        if (saveData.playerData && saveData.playerData.hasKey) {
-            // 查找钥匙位置（如果存在）
-            for (let y = 0; y < singlePlayerGame.maze.length; y++) {
-                for (let x = 0; x < singlePlayerGame.maze[y].length; x++) {
-                    if (singlePlayerGame.maze[y][x] === 8) {
-                        singlePlayerGame.keyPosition = {x, y};
-                        break;
-                    }
-                }
-            }
-            
-            // 查找门位置（如果存在）
-            for (let y = 0; y < singlePlayerGame.maze.length; y++) {
-                for (let x = 0; x < singlePlayerGame.maze[y].length; x++) {
-                    if (singlePlayerGame.maze[y][x] === 9) {
-                        singlePlayerGame.doorPosition = {x, y};
-                        break;
-                    }
-                }
-            }
-        }
+        alert('连接初始化失败: ' + err);
     }
+
+    
     
     // 移除通知，自动加载无需用户反馈
     
