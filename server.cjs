@@ -120,16 +120,15 @@ function getAllRoomsList() {
         const playerCount = room.players ? room.players.size : 0;
         
         roomList.push({
-            id: room.id,
+            id: roomId, // 修复: 使用Map的键作为房间ID，确保一致性
             name: room.name,
-            players: playerCount, // 修复: 使用实际的玩家数量
+            players: playerCount,
             maxPlayers: room.maxPlayers,
             status: room.status,
             hostName: room.hostName,
             private: room.private || false,
             created: room.createdAt,
             hasPassword: room.password !== undefined
-            // 如果需要，可以在这里添加更多字段
         });
     }
     // 按创建时间倒序排列
