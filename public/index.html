@@ -4292,7 +4292,7 @@ function activateItem(itemKey) {
             if (gameState.currentScreen === 'singlePlayerGame' || (gameState.currentScreen === 'multiplayerGame' && gameState.developerMode)) {
                 // 寻找从当前位置到出口的路径
                 const maze = gameState.currentScreen === 'singlePlayerGame' ? singlePlayerGame.maze : multiplayerGame.maze;
-                const player = gameState.currentScreen === 'singlePlayerGame' ? singlePlayerGame.player : multiplayerGame.players[gameState.multiplayer.peerId];
+                const player = gameState.currentScreen === 'singlePlayerGame' ? singlePlayerGame.player : multiplayerGame.players[gameState.multiplayer.currentPlayerId];
                 const exit = gameState.currentScreen === 'singlePlayerGame' ? singlePlayerGame.exit : multiplayerGame.exit;
                 
                 const path = findPathToExit(maze, 
@@ -13075,8 +13075,8 @@ function initializeNewFeatures() {
 window.addEventListener('load', initializeNewFeatures);
 
         function disconnectMultiplayer() {
-            if (gameState.multiplayer.peer) {
-                gameState.multiplayer.peer.destroy();
+            if (gameState.multiplayer.socket) {
+                gameState.multiplayer.socket.disconnect();
             }
             
             gameState.multiplayer.connected = false;
@@ -13741,7 +13741,7 @@ function getCellWalls(x, y, maze) {
             for (const playerId in gameState.multiplayer.players) {
                 const player = gameState.multiplayer.players[playerId];
                 
-                if (playerId === gameState.multiplayer.peer.id) {
+                if (playerId === gameState.multiplayer.currentPlayerId) {
                     // 绘制本地玩家使用皮肤系统
                     drawPlayerWithSkin(
                         ctx,
