@@ -11966,8 +11966,12 @@ function checkSinglePlayerExit() {
                         statusElement.textContent = `加入失败: ${response.message}`;
                         statusElement.style.color = '#FF5252';
                         startBtn.disabled = false;
-                        playSound("error");
-                        showScreen('multiplayerSetup');
+                        // playSound函数未定义，注释掉
+                        // // playSound函数未定义，注释掉
+                        // // playSound函数未定义，注释掉
+                        // // playSound函数未定义，注释掉
+            // playSound("error");
+            showScreen('multiplayerSetup');
                     }
                 });
             } else {
@@ -11992,8 +11996,9 @@ function checkSinglePlayerExit() {
                         statusElement.textContent = `创建失败: ${response.message}`;
                         statusElement.style.color = '#FF5252';
                         startBtn.disabled = false;
-                        playSound("error");
-                        showScreen('multiplayerSetup');
+                        // playSound函数未定义，注释掉
+            // playSound("error");
+            showScreen('multiplayerSetup');
                     }
                 });
             }
@@ -12016,7 +12021,8 @@ function checkSinglePlayerExit() {
             statusElement.textContent = `连接失败: ${err.message}`;
             statusElement.style.color = '#FF5252';
             startBtn.disabled = false;
-            playSound("error");
+            // playSound函数未定义，注释掉
+            // playSound("error");
             showScreen('multiplayerSetup');
         });
         
