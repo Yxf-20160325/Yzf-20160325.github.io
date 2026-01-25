@@ -11944,8 +11944,23 @@ function checkSinglePlayerExit() {
                     if (response.success) {
                                 statusElement.textContent = '房间加入成功！';
                                 gameState.multiplayer.roomCode = response.roomId;
-                                // 调用setupAsHost函数，确保能进入游戏地图
-                                setupAsHost(response.roomId);
+                                // 加入房间成功，初始化玩家状态
+                                gameState.multiplayer.players = {};
+                                response.players.forEach(player => {
+                                    gameState.multiplayer.players[player.id] = {
+                                        id: player.id,
+                                        name: player.name,
+                                        x: player.x || 1,
+                                        y: player.y || 1,
+                                        color: player.color,
+                                        reachedExit: player.reachedExit || false,
+                                        isHost: player.isHost
+                                    };
+                                });
+                                // 设置房间代码显示
+                                document.getElementById('multiplayerRoomCode').textContent = `房间: ${response.roomId}`;
+                                // 开始多人游戏
+                                startMultiplayerGame();
                                 startBtn.disabled = false;
                             } else {
                         statusElement.textContent = `加入失败: ${response.message}`;
