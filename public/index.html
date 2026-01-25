@@ -11855,7 +11855,41 @@ function checkSinglePlayerExit() {
     }
 }
 
-        // =============== 多人游戏P2P功能 ===============
+        // =============== 多人游戏Socket.IO功能 ===============
+        // 定义setupAsHost函数
+        function setupAsHost(roomId) {
+            // 生成多人游戏迷宫
+            console.log("生成多人游戏迷宫")
+            gameState.multiplayer.maze = generateMultiplayerMaze();
+            
+            // 获取用户选择的颜色
+            const playerColor = document.getElementById('playerColor').value;
+            
+            // 初始化玩家对象
+            if (!gameState.multiplayer.players) {
+                gameState.multiplayer.players = {};
+            }
+            
+            // 添加自己作为玩家
+            gameState.multiplayer.players[gameState.multiplayer.currentPlayerId] = {
+                id: gameState.multiplayer.currentPlayerId,
+                name: gameState.playerName,
+                x: 1,
+                y: 1,
+                color: playerColor,
+                reachedExit: false,
+                isHost: gameState.multiplayer.isHost
+            };
+            
+            // 设置房间代码显示
+            document.getElementById('multiplayerRoomCode').textContent = 
+                `房间: ${roomId}`;
+            
+            // 开始多人游戏
+            console.log("开始多人游戏")
+            startMultiplayerGame();
+        }
+
         function connectToMultiplayerGame() {
     console.log("触发连接至多人联机游戏函数")
     
@@ -11910,7 +11944,8 @@ function checkSinglePlayerExit() {
                     if (response.success) {
                                 statusElement.textContent = '房间加入成功！';
                                 gameState.multiplayer.roomCode = response.roomId;
-                                // 不再调用未定义的setupAsHost函数
+                                // 调用setupAsHost函数，确保能进入游戏地图
+                                setupAsHost(response.roomId);
                                 startBtn.disabled = false;
                             } else {
                         statusElement.textContent = `加入失败: ${response.message}`;
@@ -11935,7 +11970,8 @@ function checkSinglePlayerExit() {
                     if (response.success) {
                                 statusElement.textContent = '房间创建成功！';
                                 gameState.multiplayer.roomCode = response.roomId;
-                                // 不再调用未定义的setupAsHost函数
+                                // 调用setupAsHost函数，确保能进入游戏地图
+                                setupAsHost(response.roomId);
                                 startBtn.disabled = false;
                             } else {
                         statusElement.textContent = `创建失败: ${response.message}`;
@@ -12000,12 +12036,6 @@ function checkSinglePlayerExit() {
         
         alert('连接初始化失败: ' + err);
     }
-
-    
-    
-    // 移除通知，自动加载无需用户反馈
-    
-    return true;
 }
 
 
