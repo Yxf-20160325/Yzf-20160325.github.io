@@ -11910,9 +11910,7 @@ function checkSinglePlayerExit() {
                     if (response.success) {
                                 statusElement.textContent = '房间加入成功！';
                                 gameState.multiplayer.roomCode = response.roomId;
-                                if (gameState.multiplayer.isHost) {
-                                    setupAsHost(response.roomId); // 只在房主时调用，使用真正的房间ID
-                                }
+                                // 不再调用未定义的setupAsHost函数
                                 startBtn.disabled = false;
                             } else {
                         statusElement.textContent = `加入失败: ${response.message}`;
@@ -11937,7 +11935,7 @@ function checkSinglePlayerExit() {
                     if (response.success) {
                                 statusElement.textContent = '房间创建成功！';
                                 gameState.multiplayer.roomCode = response.roomId;
-                                setupAsHost(response.roomId); // 使用真正的房间ID
+                                // 不再调用未定义的setupAsHost函数
                                 startBtn.disabled = false;
                             } else {
                         statusElement.textContent = `创建失败: ${response.message}`;
