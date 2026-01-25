@@ -54,7 +54,8 @@ const adminTokens = new Map(); // 存储管理员令牌
 
 // 辅助函数
 function generateRoomId() {
-    return Math.random().toString(36).substring(2, 8).toUpperCase();
+    // 生成5位纯数字房间ID
+    return Math.floor(10000 + Math.random() * 90000).toString();
 }
 
 function getRandomColor() {
@@ -649,70 +650,91 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinRoom', (data, callback) => {
-        const { roomId, playerName, password, inviteCode } = data;
-        const realSocketId = socket.id;
-        const playerId = `socket_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-        const room = rooms.get(roomId);
-        
-        if (!room) {
-            console.log(`玩家 ${playerName} 尝试加入不存在的房间 ${roomId}`);
-            return callback({ success: false, message: '房间不存在' });
+        try {
+            const { roomId, playerName, password, inviteCode } = data;
+            const realSocketId = socket.id;
+            const playerId = `socket_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            const room = rooms.get(roomId);
+            
+            if (!room) {
+                console.log(`玩家 ${playerName} 尝试加入不存在的房间 ${roomId}`);
+                return callback({ success: false, message: '房间不存在' });
+            }
+            
+            // 检查房间密码
+            if (room.private && room.password !== password) {
+                console.log(`玩家 ${playerName} 尝试加入私密房间 ${roomId}，密码错误`);
+                return callback({ success: false, message: '房间密码错误' });
+            }
+            
+            // 检查邀请码
+            if (inviteCode && room.inviteCode !== inviteCode) {
+                console.log(`玩家 ${playerName} 尝试加入房间 ${roomId}，邀请码错误`);
+                return callback({ success: false, message: '邀请码错误' });
+            }
+            
+            if (room.status !== 'waiting') {
+                console.log(`玩家 ${playerName} 尝试加入已开始游戏的房间 ${roomId}`);
+                return callback({ success: false, message: '游戏已开始' });
+            }
+            if (room.waitingSocket) {
+                console.log(`玩家 ${playerName} 尝试加入正在等待房主连接的房间 ${roomId}`);
+                return callback({ success: false, message: '房间正在等待房主连接，请稍后再试' });
+            }
+            if (room.players.size >= room.maxPlayers) {
+                console.log(`房间 ${roomId} 已满，玩家 ${playerName} 加入失败`);
+                return callback({ success: false, message: '房间已满' });
+            }
+            
+            // 检查房主是否已连接
+            if (!room.actualHost || room.actualHost === null) {
+                console.log(`玩家 ${playerName} 尝试加入没有房主的房间 ${roomId}`);
+                return callback({ success: false, message: '房间房主未连接，请稍后再试' });
+            }
+            
+            const newPlayer = {
+                id: playerId,
+                name: playerName,
+                socketId: realSocketId,
+                color: getRandomColor(),
+                isHost: false,
+                isReady: false,
+                joinedAt: Date.now()
+            };
+            
+            room.players.set(playerId, newPlayer);
+            players.set(realSocketId, newPlayer);
+            socket.join(roomId);
+            room.lastActivity = Date.now(); // 更新房间最后活动时间
+            console.log(`玩家 ${newPlayer.name} (ID: ${playerId}) 成功加入房间 ${roomId}`);
+            
+            // 向房间内所有玩家广播新玩家加入消息
+            io.to(roomId).emit('player-joined', {
+                player: newPlayer,
+                players: Array.from(room.players.values())
+            });
+            
+            // 向新玩家发送房间信息
+            const roomInfo = {
+                type: 'room-joined',
+                roomId: room.id,
+                name: room.name,
+                players: Array.from(room.players.values()),
+                maxPlayers: room.maxPlayers,
+                status: room.status,
+                hostName: room.hostName,
+                private: room.private,
+                isHost: false
+            };
+            
+            socket.emit('room-info', roomInfo);
+            
+            callback({ success: true, ...roomInfo });
+            broadcastRoomList();
+        } catch (error) {
+            console.error('处理joinRoom事件时发生错误:', error);
+            callback({ success: false, message: '服务器内部错误，请稍后再试' });
         }
-        
-        // 检查房间密码
-        if (room.private && room.password !== password) {
-            console.log(`玩家 ${playerName} 尝试加入私密房间 ${roomId}，密码错误`);
-            return callback({ success: false, message: '房间密码错误' });
-        }
-        
-        // 检查邀请码
-        if (inviteCode && room.inviteCode !== inviteCode) {
-            console.log(`玩家 ${playerName} 尝试加入房间 ${roomId}，邀请码错误`);
-            return callback({ success: false, message: '邀请码错误' });
-        }
-        
-        if (room.status !== 'waiting') {
-            console.log(`玩家 ${playerName} 尝试加入已开始游戏的房间 ${roomId}`);
-            return callback({ success: false, message: '游戏已开始' });
-        }
-        if (room.players.size >= room.maxPlayers) {
-            console.log(`房间 ${roomId} 已满，玩家 ${playerName} 加入失败`);
-            return callback({ success: false, message: '房间已满' });
-        }
-        
-        const newPlayer = {
-            id: playerId,
-            name: playerName,
-            socketId: realSocketId,
-            color: getRandomColor(),
-            isHost: false,
-            isReady: false,
-            joinedAt: Date.now()
-        };
-        
-        room.players.set(playerId, newPlayer);
-        players.set(realSocketId, newPlayer);
-        socket.join(roomId);
-        room.lastActivity = Date.now(); // 更新房间最后活动时间
-        console.log(`玩家 ${newPlayer.name} (ID: ${playerId}) 成功加入房间 ${roomId}`);
-        
-        // 向新玩家发送房间信息
-        const roomInfo = {
-            type: 'room-joined',
-            roomId: room.id,
-            name: room.name,
-            players: Array.from(room.players.values()),
-            maxPlayers: room.maxPlayers,
-            status: room.status,
-            hostName: room.hostName,
-            private: room.private,
-            isHost: false
-        };
-        
-        socket.emit('room-info', roomInfo);
-        
-        callback({ success: true, ...roomInfo });
-        broadcastRoomList();
     });
 
     // 处理玩家加入房间的请求
