@@ -1,4 +1,4 @@
-    <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -24,6 +24,20 @@
             min-height: 100vh;
             -webkit-overflow-scrolling: touch;
             position: relative;
+            touch-action: auto;
+        }
+        
+        /* 全局滚动优化 */
+        * {
+            touch-action: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        
+        /* 确保所有容器都允许滚动 */
+        .main-menu, .level-select, .workshop-container, #workshopMain, #mazeEditor, #myMazes, #browseMazes, #popularMazes {
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            touch-action: pan-y;
         }
         
         /* 主菜单样式 */
@@ -3638,11 +3652,11 @@ window.addEventListener('load', function() {
         // 防止在顶部下拉或底部上拉
         if ((scrollTop <= 0 && y > startY) || 
             (scrollTop >= scrollerHeight - containerHeight && y < startY)) {
-            e.preventDefault();
+
         }
         
         startY = y;
-    }, { passive: false });
+    }, { passive: true });
     // 触摸结束事件
     levelContainer.addEventListener('touchend', function() {
         isScrolling = false;
