@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+    <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -8329,8 +8329,10 @@ function makeDraggable(element, handle) {
     }, { passive: false });
 
     document.addEventListener('touchmove', (e) => {
-        if (isDragging) moveDrag(e.touches[0].clientX, e.touches[0].clientY);
-        e.preventDefault();
+        if (isDragging) {
+            moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+            e.preventDefault();
+        }
     }, { passive: false });
 
     document.addEventListener('touchend', endDrag);
