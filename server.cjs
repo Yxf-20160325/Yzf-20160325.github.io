@@ -634,7 +634,8 @@ io.on('connection', (socket) => {
                 password: password,
                 inviteCode: inviteCode,
                 createdAt: Date.now(),
-                lastActivity: Date.now() // 添加最后活动时间戳
+                lastActivity: Date.now(), // 添加最后活动时间戳
+                maze: null // 保存迷宫数据
             };
             
             rooms.set(roomId, newRoom);
@@ -714,7 +715,7 @@ io.on('connection', (socket) => {
                 players: Array.from(room.players.values())
             });
             
-            // 向新玩家发送房间信息
+            // 向新玩家发送房间信息，包含迷宫数据
             const roomInfo = {
                 type: 'room-joined',
                 roomId: room.id,
@@ -724,16 +725,39 @@ io.on('connection', (socket) => {
                 status: room.status,
                 hostName: room.hostName,
                 private: room.private,
-                isHost: false
+                isHost: false,
+                maze: room.maze // 发送迷宫数据
             };
-            
+        
             socket.emit('room-info', roomInfo);
-            
+        
             callback({ success: true, ...roomInfo });
             broadcastRoomList();
         } catch (error) {
             console.error('处理joinRoom事件时发生错误:', error);
             callback({ success: false, message: '服务器内部错误，请稍后再试' });
+        }
+    });
+
+    // 处理房主发送的迷宫数据
+    socket.on('maze-generated', (data) => {
+        try {
+            const { roomId, maze } = data;
+            const room = rooms.get(roomId);
+            
+            if (room && socket.id === room.actualHost) {
+                // 更新房间的迷宫数据
+                room.maze = maze;
+                room.lastActivity = Date.now();
+                console.log(`房主 ${socket.id} 更新了房间 ${roomId} 的迷宫数据`);
+                
+                // 向房间内所有玩家广播迷宫数据
+                io.to(roomId).emit('maze-updated', {
+                    maze: maze
+                });
+            }
+        } catch (error) {
+            console.error('处理maze-generated事件时发生错误:', error);
         }
     });
 
