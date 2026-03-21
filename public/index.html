@@ -2601,6 +2601,7 @@
                     <button class="menu-button" onclick="saveMaze()">保存到本地</button>
                     <button class="menu-button" onclick="publishMaze()">发布</button>
                     <button class="menu-button" onclick="previewMaze()">预览</button>
+                    <button class="menu-button" onclick="validateMazeWithFeedback()">验证迷宫</button>
                 </div>
             </div>
             
@@ -3755,7 +3756,8 @@ let editorState = {
     selectedColor: '#4CAF50',
     isDrawing: false,
     lastCell: null,
-    teleporters: []
+    teleporters: [],
+    editingIndex: -1  // -1 表示新建，>=0 表示正在编辑 localStorage 中的第 editingIndex 个迷宫
 };
 
 let singlePlayerGame = {
@@ -9825,8 +9827,9 @@ function updatePlatformPosition(platform) {
                     
                     // 检查是否在边界内
                     if (nx >= 0 && nx < maze[0].length && ny >= 0 && ny < maze.length) {
-                        // 检查是否是墙或未被访问
-                        if (maze[ny][nx] !== 1 && !visited[ny][nx]) {
+                        // 只走值为0的空地（与玩家实际行走标准一致），以及出口格本身
+                        const isPassable = maze[ny][nx] === 0 || (nx === exit.x && ny === exit.y);
+                        if (isPassable && !visited[ny][nx]) {
                             visited[ny][nx] = true;
                             queue.push({x: nx, y: ny});
                         }
@@ -9841,6 +9844,7 @@ function updatePlatformPosition(platform) {
         window.validateMaze = validateMaze;
         window.findExitPosition = findExitPosition;
         window.findCriticalPath = findCriticalPath;
+        window.generateBackupMaze = generateBackupMaze;
         
         // 备用迷宫生成（确保有解）
         function generateBackupMaze(size) {
@@ -9865,39 +9869,61 @@ function updatePlatformPosition(platform) {
 
 function generateDifficultMaze(level, settings) {
     const size = settings.size;
-    const seed = level;
-    const random = new Random(seed);
     
-    // 创建迷宫 (1=墙, 0=路, 2=陷阱, 3=传送门, 4=移动陷阱, 5=单向通道, 8=钥匙, 9=门)
-    const maze = Array(size).fill().map(() => Array(size).fill(1));
-    
-    // 使用改进的随机Prim算法生成迷宫
-    const walls = [];
-    maze[1][1] = 0;
-    walls.push(...getCellWalls(1, 1, maze));
-    
-    while (walls.length > 0) {
-        const wallIndex = Math.floor(random.next() * walls.length);
-        const wall = walls[wallIndex];
-        walls.splice(wallIndex, 1);
-        
-        const opposite = getOppositeCell(wall, maze);
-        
-        if (opposite.x >= 0 && opposite.x < size && 
-            opposite.y >= 0 && opposite.y < size && 
-            maze[opposite.y][opposite.x] === 1) {
-            
-            maze[wall.y][wall.x] = 0;
-            maze[opposite.y][opposite.x] = 0;
-            walls.push(...getCellWalls(opposite.x, opposite.y, maze));
+    // 内部函数：用指定随机数生成器跑一次 Prim，返回迷宫
+    function runPrim(rng) {
+        const m = Array(size).fill().map(() => Array(size).fill(1));
+        const walls = [];
+        m[1][1] = 0;
+        walls.push(...getCellWalls(1, 1, m));
+        while (walls.length > 0) {
+            const idx = Math.floor(rng.next() * walls.length);
+            const wall = walls[idx];
+            walls.splice(idx, 1);
+            const opposite = getOppositeCell(wall, m);
+            if (opposite.x >= 0 && opposite.x < size &&
+                opposite.y >= 0 && opposite.y < size &&
+                m[opposite.y][opposite.x] === 1) {
+                m[wall.y][wall.x] = 0;
+                m[opposite.y][opposite.x] = 0;
+                walls.push(...getCellWalls(opposite.x, opposite.y, m));
+            }
+        }
+        return m;
+    }
+
+    // 尝试生成有解迷宫，最多重试 15 次（含 addMazeComplexity 后的二次验证）
+    let maze = null;
+    let random = null;
+    const MAX_ATTEMPTS = 15;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // 第一次用关卡固定种子保持确定性，后续用随机种子
+        const seed = attempt === 0 ? level : level * 1000 + attempt;
+        random = new Random(seed);
+        const candidate = runPrim(random);
+        // 第一次验证：Prim 生成后检查基础连通性
+        if (!window.validateMaze(candidate)) continue;
+        // 添加迷宫复杂度（可能加墙，破坏路径）
+        addMazeComplexity(candidate, new Random(seed + 999), size);
+        // 第二次验证：addMazeComplexity 后确保路径仍可达
+        if (window.validateMaze(candidate)) {
+            maze = candidate;
+            break;
         }
     }
+
+    // 全部重试失败，使用备用迷宫（必有解的十字形迷宫）兜底
+    if (!maze) {
+        console.warn(`generateDifficultMaze: 关卡 ${level} 经 ${MAX_ATTEMPTS} 次重试仍无解，使用备用迷宫`);
+        maze = window.generateBackupMaze(size);
+        random = new Random(level);
+        addMazeComplexity(maze, random, size);
+    }
     
-    // 确保出口可达
-    ensureExitPath(maze, random);
+    // 找到关键路径（用于后续避开）
+    const criticalPath = findCriticalPath(maze);
     
     // 添加陷阱（避开关键路径）
-    const criticalPath = findCriticalPath(maze);
     for (let i = 0; i < settings.traps; i++) {
         let x, y;
         let attempts = 0;
@@ -9955,24 +9981,8 @@ function generateDifficultMaze(level, settings) {
         }
     }
     
-    // 禁用金币的生成
-    // const coinCount = Math.max(1, Math.floor(size / 3)); // 根据迷宫大小设置金币数量
-    // for (let i = 0; i < coinCount; i++) {
-    let x, y;
-    let attempts = 0;
-    
-    x = Math.floor(random.next() * (size-2)) + 1;
-    y = Math.floor(random.next() * (size-2)) + 1;
-    attempts++;
-    
-
-
     // 禁用移动敌人的生成（保留紫色方块移动敌人）
     singlePlayerGame.movingEnemies = [];
- 
-
-    
-    // 用户自定义关卡系统，所有关卡都是可解的
     
     // 确保最右边一列有墙
     for (let y = 0; y < size; y++) {
@@ -10102,7 +10112,8 @@ function generateDifficultMaze(level, settings) {
             const start = {x: 1, y: 1};
             const exit = findExitPosition(maze);
             
-            // BFS寻找最短路径
+            // BFS寻找最短路径（只考虑纯粹路径，值为0的格子）
+            // 排除：1=墙, 2=陷阱, 3=传送门, 4=移动陷阱, 5=单向通道, 8=钥匙, 9=门, 50-54=单向通道具体方向
             const visited = Array(maze.length).fill().map(() => Array(maze[0].length).fill(false));
             const queue = [{...start, path: []}];
             visited[start.y][start.x] = true;
@@ -10124,9 +10135,10 @@ function generateDifficultMaze(level, settings) {
                     const nx = cell.x + dir.dx;
                     const ny = cell.y + dir.dy;
                     
+                    // 只在值为0的空路径上搜索，排除所有特殊元素
                     if (nx >= 0 && nx < maze[0].length && 
                         ny >= 0 && ny < maze.length && 
-                        !visited[ny][nx] && maze[ny][nx] !== 1) {
+                        !visited[ny][nx] && maze[ny][nx] === 0) {
                         visited[ny][nx] = true;
                         queue.push({x: nx, y: ny, path: newPath});
                     }
@@ -10203,17 +10215,8 @@ function generateDifficultMaze(level, settings) {
         }
 
         function findStartPosition(maze) {
-            // 在迷宫中搜索起点（值为2的单元格）
-            for (let y = 0; y < maze.length; y++) {
-                for (let x = 0; x < maze[y].length; x++) {
-                    if (maze[y][x] === 2) {
-                        // 将起点转换为路径，避免被当作陷阱
-                        maze[y][x] = 0;
-                        return { x, y };
-                    }
-                }
-            }
-            // 如果没有找到起点，使用默认位置
+            // 起点固定为 (1,1)，不再搜索值为2的格子
+            // 原逻辑错误：陷阱的格子值也是2，会把第一个陷阱误判为起点并清除
             return { x: 1, y: 1 };
         }
 
@@ -11063,18 +11066,18 @@ let editorInitialized = false;
 function initMazeEditor() {
     console.log('初始化迷宫编辑器');
     
-    // 只在第一次初始化时创建新迷宫，避免重置用户编辑的内容
+    // 只在第一次初始化时创建新迷宫并设置事件监听，避免重置用户编辑的内容或重复绑定事件
     if (!editorInitialized) {
         newMaze();
+        setupEditorEventListeners();
         editorInitialized = true;
-    }
-    
-    setupEditorEventListeners();
-    
-    // 确保编辑器状态正确
-    if (editorState.maze && editorState.maze.length > 0) {
+    } else {
+        // 已初始化过：重新绘制当前迷宫内容（canvas 可能被重新插入 DOM）
         const canvas = document.getElementById('editorCanvas');
-        if (canvas) {
+        if (!canvas) {
+            // canvas 丢失时重新创建（例如 innerHTML 被清空）
+            setupEditorEventListeners();
+        } else {
             const ctx = canvas.getContext('2d');
             drawMazeGrid(ctx);
         }
@@ -11723,7 +11726,7 @@ function publishMaze() {
     }
     
     // 验证迷宫
-    if (!validateMaze()) {
+    if (!validateMazeLayout()) {
         return;
     }
     
@@ -12139,10 +12142,11 @@ function showMyMazes() {
         return;
     }
     
-    // 按更新时间排序，最新的在前面
-    savedMazes.sort((a, b) => b.updatedAt - a.updatedAt);
+    // 保留原始索引后再排序，避免排序后 index 与 localStorage 中的实际位置不匹配
+    const indexedMazes = savedMazes.map((maze, originalIndex) => ({ maze, originalIndex }));
+    indexedMazes.sort((a, b) => b.maze.updatedAt - a.maze.updatedAt);
     
-    savedMazes.forEach((maze, index) => {
+    indexedMazes.forEach(({ maze, originalIndex }) => {
         const mazeItem = document.createElement('div');
         mazeItem.className = 'maze-item';
         mazeItem.style.cssText = `
@@ -12168,13 +12172,13 @@ function showMyMazes() {
                     </span>
                 </div>
                 <div>
-                    <button onclick="playMazeByIndex(${index})" style="margin-right: 10px; padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                    <button onclick="playMazeByIndex(${originalIndex})" style="margin-right: 10px; padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
                         游玩
                     </button>
-                    <button onclick="loadMazeForEditing(${index})" style="margin-right: 10px; padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                    <button onclick="loadMazeForEditing(${originalIndex})" style="margin-right: 10px; padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
                         编辑
                     </button>
-                    <button onclick="deleteMaze(${index})" style="padding: 5px 10px; background: #FF5252; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                    <button onclick="deleteMaze(${originalIndex})" style="padding: 5px 10px; background: #FF5252; color: white; border: none; border-radius: 4px; cursor: pointer;">
                         删除
                     </button>
                 </div>
@@ -12223,11 +12227,10 @@ function deleteMaze(index) {
     }
 }
 
-// 实现迷宫验证功能
-function validateMaze() {
-    // 检查迷宫是否有起点
+// 迷宫布局验证（静默版，供 saveMaze / publishMaze 内部调用）
+// 出错时弹框提示原因，通过时静默返回 true，不弹多余弹框
+function validateMazeLayout() {
     let hasStart = false;
-    // 检查迷宫是否有终点
     let hasEnd = false;
     
     for (let y = 0; y < editorState.mazeSize.height; y++) {
@@ -12241,18 +12244,25 @@ function validateMaze() {
     }
     
     if (!hasStart) {
-        alert('迷宫缺少起点！');
+        alert('迷宫缺少起点！请放置一个起点（蓝色格子）后再试。');
         return false;
     }
     
     if (!hasEnd) {
-        alert('迷宫缺少终点！');
+        alert('迷宫缺少终点！请放置一个终点（红色格子）后再试。');
         return false;
     }
     
-    // 这里可以添加更多验证逻辑，例如检查迷宫是否有解
-    alert('迷宫验证通过！');
     return true;
+}
+
+// 带完整反馈的验证（供编辑器工具栏"验证迷宫"按钮直接调用）
+function validateMazeWithFeedback() {
+    const ok = validateMazeLayout();
+    if (ok) {
+        alert('迷宫验证通过！起点和终点均已设置。');
+    }
+    return ok;
 }
 
 // 当显示我的迷宫屏幕时，自动加载迷宫列表
@@ -15971,6 +15981,9 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             }
         }, 100);
     }
+    // 将需要全局访问的工坊函数挂载到 window
+    window.importMazeFromFile = importMazeFromFile;
+    window.downloadMazeByData = downloadMazeByData;
     </script>
 </body>
 </html>
