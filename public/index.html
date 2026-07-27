@@ -2977,7 +2977,7 @@
     <div id="mainMenu" class="main-menu">
         <h1 class="menu-title">迷宫冒险</h1>
         <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
-        <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 局域网多人游戏</button>
+        <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
         <button class="menu-button" onclick="showInstructions()">📖 游戏说明</button>
         <div id="playTimeDisplay" class="game-info" style="margin: 15px auto; display: inline-block;"></div>
         <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
@@ -3526,7 +3526,6 @@
         <canvas id="multiplayerCanvas"></canvas>
         <div class="level-controls" style="position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; z-index: 10; background: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 25px; border: 1px solid #4CAF50;">
             <button class="level-control-button reset" onclick="resetMultiplayerPlayer()">重置位置</button>
-            <button class="level-control-button shop-trigger" onclick="openShop()">🛒 商店</button>
             <button class="level-control-button exit" onclick="disconnectMultiplayer()">退出游戏</button>
         </div>
         <!-- 方向键控制面板 -->
@@ -4036,6 +4035,18 @@ function connectNotificationSocket() {
         notificationSocket.on('room-kicked', (data) => {
             console.log('[通知] 收到房间清空事件:', data);
             showAdminPopup('房间已被清空', (data && data.message) ? data.message : '房间被管理员清空，所有人被请出。');
+            if (typeof disconnectMultiplayer === 'function') {
+                try { disconnectMultiplayer(); } catch (e) { /* 忽略 */ }
+            }
+        });
+
+        // 所有玩家到达终点 → 服务器删除房间，本房间客户端收到后退出
+        notificationSocket.on('room-completed', (data) => {
+            console.log('[通知] 收到房间完成(全员到达终点)事件:', data);
+            // 仅当事件属于自己当前所在的房间才处理，避免误伤其他房间
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || (data.roomId && myRoom && data.roomId !== myRoom)) return;
+            showAdminPopup('游戏胜利 🎉', (data && data.message) ? data.message : '所有玩家都已到达终点，房间已关闭。');
             if (typeof disconnectMultiplayer === 'function') {
                 try { disconnectMultiplayer(); } catch (e) { /* 忽略 */ }
             }
@@ -16524,10 +16535,19 @@ function updateUnlockTimer() {
 function checkAllPlayersReachedExit() {
     const allReached = Object.values(gameState.multiplayer.players).every(p => p.reachedExit);
     if (allReached) {
-        alert('所有玩家都到达了出口！游戏胜利！');
-        
         // 记录多人游戏成就
         recordAchievement('multiplayerWin', 1);
+
+        // 主机负责通知服务器删除房间（所有人到达终点即删）
+        if (gameState.multiplayer.isHost) {
+            const roomId = gameState.multiplayer.roomCode;
+            if (roomId && typeof GAME_SERVER_URL !== 'undefined' && GAME_SERVER_URL) {
+                fetch(GAME_SERVER_URL + '/api/rooms/' + encodeURIComponent(roomId) + '/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                }).catch(err => console.warn('[房间完成] 通知服务器删除房间失败（可忽略）:', err && err.message));
+            }
+        }
     }
 }
 
