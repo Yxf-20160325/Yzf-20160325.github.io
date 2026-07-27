@@ -1106,6 +1106,44 @@ app.post('/api/admin/rooms/:roomId/clear-room', requireAdminAuth, (req, res) => 
     }
 });
 
+// 所有玩家到达终点 → 删除房间（由房主客户端在检测到全员到达时调用）
+app.post('/api/rooms/:roomId/complete', (req, res) => {
+    try {
+        const roomId = req.params.roomId;
+        const room = rooms.get(roomId);
+
+        if (!room) {
+            return res.status(404).json({ success: false, message: '房间不存在' });
+        }
+
+        const playerCount = room.players.size;
+
+        // 通知所有客户端：该房间全员已到达终点（携带 roomId，客户端按自己当前房间号过滤，避免误伤其他房间）
+        io.emit('room-completed', {
+            roomId: roomId,
+            message: '所有玩家都已到达终点，房间已关闭。'
+        });
+
+        // 同步清理全局 players 映射
+        for (const p of room.players.values()) {
+            if (p.socketId) players.delete(p.socketId);
+            players.delete(p.id);
+        }
+
+        rooms.delete(roomId);
+        totalRoomsCleaned++;
+        broadcastRoomList();
+
+        console.log(`[房间完成] 房间 ${roomId} (${room.name}) 因所有玩家到达终点而被删除，共 ${playerCount} 名玩家。`);
+        res.json({ success: true, message: `房间已因全员到达终点而关闭`, players: playerCount });
+
+    } catch (error) {
+        console.error('[API] 房间完成处理失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+
 
 function handleDisconnect(socketId) {
     console.log(`[Server] 用户断开连接: ${socketId}`);
