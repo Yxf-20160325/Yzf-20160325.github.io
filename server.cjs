@@ -531,7 +531,12 @@ app.post('/api/create-room', express.json(), (req, res) => {
             });
         }
 
-        const roomId = generateRoomId();
+        // 优先采用客户端传来的真实 Peer 房间号，确保服务器房间 ID 与 P2P 连接房间号一致；否则回退生成唯一 ID
+        let roomId = (req.body.roomCode && typeof req.body.roomCode === 'string' && req.body.roomCode.trim()) ? req.body.roomCode.trim() : null;
+        if (!roomId || rooms.has(roomId)) {
+            roomId = generateRoomId();
+            while (rooms.has(roomId)) roomId = generateRoomId();
+        }
         const playerColor = getRandomColor();
         
         const hostPlayer = {
@@ -650,7 +655,12 @@ io.on('connection', (socket) => {
     socket.on('createRoom', (data, callback) => {
         try {
             const { playerName, maxPlayers = 4, roomName, isPrivate = false, password } = data;
-            const roomId = generateRoomId();
+            // 优先采用客户端传来的真实 Peer 房间号，确保服务器房间 ID 与 P2P 连接房间号一致；否则回退生成唯一 ID
+            let roomId = (data.roomCode && typeof data.roomCode === 'string' && data.roomCode.trim()) ? data.roomCode.trim() : null;
+            if (!roomId || rooms.has(roomId)) {
+                roomId = generateRoomId();
+                while (rooms.has(roomId)) roomId = generateRoomId();
+            }
             
             const hostPlayer = {
                 id: `player_${Date.now()}`,
@@ -1191,26 +1201,78 @@ function broadcastRoomList() {
     io.emit('rooms-updated', roomList);
 }
 
-// 正确的自动清理逻辑
-setInterval(() => {
-    const now = Date.now();
-    const ROOM_IDLE_TIME = 5 * 60 * 1000; // 例如：5分钟无人活动才清理
+// ===== 房间自动清理（升级版）=====
+// 清理策略集中配置，支持环境变量覆盖（单位：秒），便于不同部署环境调整
+const ROOM_CLEANUP_CONFIG = {
+    checkInterval: (parseInt(process.env.CLEANUP_CHECK_INTERVAL, 10) || 30) * 1000,          // 检查周期，默认 30s
+    emptyIdleTime: (parseInt(process.env.CLEANUP_EMPTY_IDLE, 10) || 5 * 60) * 1000,           // 空房间空闲上限，默认 5min
+    maxLifetime:   (parseInt(process.env.CLEANUP_MAX_LIFETIME, 10) || 24 * 60 * 60) * 1000,   // 房间最大存活时间，默认 24h
+};
 
-    for (const [roomId, room] of rooms.entries()) {
-        // 【修复】判断条件：房间内没有玩家，并且最后活动时间已超过阈值
-        if (room.players.size === 0 && (now - (room.lastActivity || room.createdAt) > ROOM_IDLE_TIME)) {
-            console.log(`[自动清理] 找到空闲房间 ${roomId} (${room.name})，最后活动时间: ${new Date(room.lastActivity).toLocaleString()}，正在删除...`);
-            
-            // 通知一下（虽然没人）
-            io.to(roomId).emit('room-kicked', { message: '房间因长时间空闲被系统关闭。' });
-            
-            // 删除房间
-            rooms.delete(roomId);
+let totalRoomsCleaned = 0; // 累计清理房间数，便于监控
+
+// 移除房间内「socket 已断开」的僵尸玩家
+// 作用：兜底处理异常断线（未触发 handleDisconnect）导致 room.players 残留死连接、房间永不空的情况
+function purgeZombiePlayers(room) {
+    let purged = 0;
+    for (const [pid, p] of room.players.entries()) {
+        const sock = io.sockets.sockets.get(p.socketId);
+        if (!sock || !sock.connected) {
+            room.players.delete(pid);
+            players.delete(p.socketId); // 同步清理全局 players 映射
+            purged++;
         }
     }
-    // 广播更新后的房间列表
-    broadcastRoomList();
-}, 30000); // 每30秒检查一次
+    return purged;
+}
+
+// 主清理定时器
+setInterval(() => {
+    const now = Date.now();
+    const cfg = ROOM_CLEANUP_CONFIG;
+    let cleanedThisRound = 0;
+    let purgedTotal = 0;
+
+    for (const [roomId, room] of rooms.entries()) {
+        // 1) 先清理房间内的僵尸玩家
+        const purged = purgeZombiePlayers(room);
+        if (purged > 0) {
+            purgedTotal += purged;
+            console.log(`[自动清理] 房间 ${roomId} (${room.name}) 移除 ${purged} 个僵尸玩家，剩余 ${room.players.size}`);
+        }
+
+        const lastAct = room.lastActivity || room.createdAt || now;
+        const age = now - (room.createdAt || now);
+        const idle = now - lastAct;
+        const isEmpty = room.players.size === 0;
+
+        // 2) 删除条件：
+        //    a) 空房间且空闲超过阈值
+        //    b) 超过最大存活时间（即便仍有活人，防止房间无限堆积）
+        const idleTooLong = isEmpty && idle > cfg.emptyIdleTime;
+        const tooOld = age > cfg.maxLifetime;
+
+        if (idleTooLong || tooOld) {
+            const reason = tooOld ? '超过最大存活时间' : '空房间空闲超时';
+            console.log(`[自动清理] 删除房间 ${roomId} (${room.name})，原因: ${reason}（存活 ${Math.round(age / 60000)} 分钟，空闲 ${Math.round(idle / 60000)} 分钟）`);
+
+            // 仅当房间还有活人时才发通知，避免给空房间发无意义消息
+            if (room.players.size > 0) {
+                io.to(roomId).emit('room-kicked', { message: '房间因长时间未活动被系统关闭。' });
+                for (const p of room.players.values()) players.delete(p.socketId);
+            }
+            rooms.delete(roomId);
+            cleanedThisRound++;
+            totalRoomsCleaned++;
+        }
+    }
+
+    // 3) 仅在有变化时才广播，减少无谓的房间列表刷新
+    if (cleanedThisRound > 0 || purgedTotal > 0) {
+        broadcastRoomList();
+        console.log(`[自动清理] 本轮删除 ${cleanedThisRound} 个房间（累计 ${totalRoomsCleaned}），移除僵尸 ${purgedTotal} 个，当前剩余 ${rooms.size} 个`);
+    }
+}, ROOM_CLEANUP_CONFIG.checkInterval);
 
 
 // 在服务器启动时初始化管理员密码
