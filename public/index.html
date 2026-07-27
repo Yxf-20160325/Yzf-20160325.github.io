@@ -17058,21 +17058,22 @@ function addMultiplayerTeleporters(maze, size) {
 
 function getOppositeCell(wall, maze) {
     const directions = [
-        {dx: 1, dy: 0}, {dx: -1, dy: 0}, 
+        {dx: 1, dy: 0}, {dx: -1, dy: 0},
         {dx: 0, dy: 1}, {dx: 0, dy: -1}
     ];
-    
+
     for (const dir of directions) {
         const nx = wall.x + dir.dx;
         const ny = wall.y + dir.dy;
-        
-        if (nx >= 0 && nx < maze[0].length && 
-            ny >= 0 && ny < maze.length && 
+
+        if (nx >= 0 && nx < maze[0].length &&
+            ny >= 0 && ny < maze.length &&
             maze[ny][nx] === 0) {
-            return {x: nx, y: ny};
+            // 返回墙另一侧的未挖通格子（与单人游戏版逻辑一致）
+            return {x: wall.x - dir.dx, y: wall.y - dir.dy};
         }
     }
-    
+
     return {x: -1, y: -1};
 }
 
