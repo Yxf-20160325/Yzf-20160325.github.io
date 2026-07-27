@@ -12,7 +12,7 @@ const app = express();
 app.use(cors({
     origin: '*', // 允许所有来源
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], // 支持所有必要的HTTP方法
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'], // 允许必要的头信息
+    allowedHeaders: '*', // 允许客户端自定义头（如 Client-Version、Admin-Auto-Connect），避免预检被拦
     credentials: true // 允许发送凭证信息
 }));
 app.use(express.static(path.join(__dirname, 'public')));
