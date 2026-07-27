@@ -15669,6 +15669,9 @@ function handleMultiplayerData(data, peerId) {
                             players: gameState.multiplayer.players,
                             exit: gameState.multiplayer.exit,
                             teleporters: gameState.multiplayer.teleporters,
+                            movingEnemies: gameState.multiplayer.movingEnemies || [],
+                            keyPosition: gameState.multiplayer.keyPosition || null,
+                            doorPosition: gameState.multiplayer.doorPosition || null,
                             maxPlayers: gameState.multiplayer.maxPlayers,
                             protectedPlayers: gameState.multiplayer.protectedPlayers
                         });
@@ -16048,7 +16051,10 @@ function broadcast(data, excludePlayerId = null) {
             window.addEventListener('keydown', handleMultiplayerKeyDown);
 
             function gameLoop() {
-                // updateMultiplayerGame();
+                // 仅主机驱动敌人移动并广播，避免客户端重复移动造成抖动
+                if (gameState.multiplayer.isHost) {
+                    updateMultiplayerGame();
+                }
                 EventSystem.update();
                 requestAnimationFrame(gameLoop);
             }
@@ -16951,10 +16957,12 @@ function generateMultiplayerMaze() {
     let validMaze = false;
     let attempts = 0;
     
-    // 10%概率生成螺旋迷宫(应敌人无法渲染，暂时关闭)
-    const isSpiralMaze = false;
-    // const isSpiralMaze = Math.random() < 0.1;
-    // %100生成
+    // 先清空敌人，避免上一局螺旋迷宫的敌人残留在普通迷宫中
+    gameState.multiplayer.movingEnemies = [];
+    
+    // 10%概率生成螺旋迷宫（含移动敌人）
+    const isSpiralMaze = Math.random() < 0.1;
+    // %100生成（调试用）
     // const isSpiralMaze = true;
     if (isSpiralMaze) {
         maze = generateSpiralMaze(size);
@@ -16965,6 +16973,27 @@ function generateMultiplayerMaze() {
         
         // 添加钥匙和门
         addKeyAndDoormultiplayer(size, maze);
+        
+        // 添加移动敌人（螺旋迷宫专属怪物）
+        gameState.multiplayer.movingEnemies = [];
+        const mpEnemyCount = 3;
+        for (let i = 0; i < mpEnemyCount; i++) {
+            let ex, ey;
+            do {
+                ex = Math.floor(Math.random() * (size - 4)) + 2;
+                ey = Math.floor(Math.random() * (size - 4)) + 2;
+            } while (maze[ey][ex] === 1 ||
+                     (ex === 1 && ey === 1) ||
+                     (ex === Math.floor(size/2) && ey === Math.floor(size/2)));
+            gameState.multiplayer.movingEnemies.push({
+                x: ex, y: ey,
+                dx: Math.random() > 0.5 ? 1 : -1,
+                dy: Math.random() > 0.5 ? 1 : -1,
+                speed: 0.3 + Math.random() * 0.4,
+                color: `hsl(${Math.random() * 360}, 80%, 60%)`,
+                lastMove: 0
+            });
+        }
     } else {
         // 普通迷宫
         while (!validMaze && attempts < 5) {
@@ -17260,9 +17289,10 @@ function updateMultiplayerGame() {
     const now = Date.now();
     const size = gameState.multiplayer.maze.length; // 获取迷宫大小
     
-    if (gameState.multiplayer.movingEnemies) {
+    if (gameState.multiplayer.movingEnemies && gameState.multiplayer.movingEnemies.length) {
         // 记录当前每个敌人占据的格子，避免多个敌人叠在同一格（否则看起来会"聚成一个敌人"）
         const enemyCells = new Set(gameState.multiplayer.movingEnemies.map(e => e.x + ',' + e.y));
+        let anyMoved = false;
         gameState.multiplayer.movingEnemies.forEach(enemy => {
             // 根据时间间隔移动
             if (now - enemy.lastMove < 500 / enemy.speed) return;
@@ -17303,6 +17333,7 @@ function updateMultiplayerGame() {
                     enemy.x = newX;
                     enemy.y = newY;
                     enemyCells.add(cellKey);
+                    anyMoved = true;
                     
                     // 检查是否碰到玩家
                     for (const playerId in gameState.multiplayer.players) {
@@ -17327,11 +17358,13 @@ function updateMultiplayerGame() {
             }
         });
         
-        // 广播敌人移动
-        broadcast({
-            type: 'enemy-move',
-            enemies: gameState.multiplayer.movingEnemies
-        });
+        // 仅当至少有一个敌人真正移动时才广播，减少网络开销
+        if (anyMoved) {
+            broadcast({
+                type: 'enemy-move',
+                enemies: gameState.multiplayer.movingEnemies
+            });
+        }
         
         drawMultiplayerMaze();
     }
