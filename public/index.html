@@ -220,6 +220,15 @@
             box-shadow: 0 0 30px rgba(0,0,0,0.7);
         }
         
+        /* 多人游戏画布 */
+        #multiplayerCanvas {
+            display: block;
+            margin: 8px auto;
+            background-color: #2D3748;
+            border-radius: 10px;
+            box-shadow: 0 0 30px rgba(0,0,0,0.7);
+        }
+        
         /* 单人游戏容器：底部留出控制栏空间 */
         #singlePlayerGame {
             padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
@@ -3942,9 +3951,97 @@ async function autoConnectToServer() {
             console.log('管理员登录成功:', adminSession);
         }
 
+        // 版本检查通过即建立实时通知 socket，接收管理员弹窗等广播
+        connectNotificationSocket();
+
     } catch (error) {
         console.error('自动连接服务器失败:', error);
         // 按照要求，无法连接时只在控制台报错，不提示用户
+    }
+}
+
+// ========== 服务器实时通知 socket（接收管理员弹窗 / 房间清空等广播） ==========
+// 客户端此前只用 fetch 调 HTTP 接口，socket.io 库虽已加载但从未建连，
+// 导致服务器广播的 admin-popup / room-kicked 事件无人接收。这里建立一条
+// 独立的通知 socket（与多人游戏的 PeerJS 连接互不干扰，单人模式也能收）。
+let notificationSocket = null;
+
+function showAdminPopup(title, message) {
+    // 已存在则先移除，避免重复堆叠
+    const existing = document.getElementById('adminBroadcastModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'adminBroadcastModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:20000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.97);border:2px solid #4CAF50;border-radius:15px;padding:30px;max-width:420px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:54px;margin-bottom:15px;';
+    icon.textContent = '📢';
+    box.appendChild(icon);
+
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:#4CAF50;margin:0 0 12px 0;font-size:22px;word-break:break-word;';
+    h.textContent = (title && String(title).trim()) ? title : '系统通知';
+    box.appendChild(h);
+
+    const p = document.createElement('p');
+    p.style.cssText = 'color:#e0e0e0;margin:0 0 24px 0;font-size:16px;line-height:1.6;word-break:break-word;white-space:pre-wrap;';
+    p.textContent = (message != null) ? String(message) : '';
+    box.appendChild(p);
+
+    const btn = document.createElement('button');
+    btn.textContent = '我知道了';
+    btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#4CAF50,#2E7D32);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    box.appendChild(btn);
+
+    overlay.appendChild(box);
+    // 点击遮罩空白处关闭
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
+
+function connectNotificationSocket() {
+    // 已连接则直接返回，避免重复建连
+    if (notificationSocket && (notificationSocket.connected || notificationSocket.connecting)) return;
+    // 服务器未配置（仍是占位值）时不连接
+    if (!GAME_SERVER_URL || GAME_SERVER_URL === 'http://' || GAME_SERVER_URL === 'http://localhost') {
+        console.log('[通知] 服务器未配置，跳过通知 socket 连接');
+        return;
+    }
+    try {
+        notificationSocket = io(GAME_SERVER_URL, {
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionDelay: 3000,
+            reconnectionAttempts: Infinity
+        });
+        notificationSocket.on('connect', () => console.log('[通知] 实时通知 socket 已连接'));
+        notificationSocket.on('connect_error', (err) => console.warn('[通知] socket 连接失败(可忽略，会重试):', err && err.message));
+        notificationSocket.on('disconnect', (reason) => console.log('[通知] socket 断开:', reason));
+
+        // 管理员发送的全局弹窗
+        notificationSocket.on('admin-popup', (data) => {
+            console.log('[通知] 收到管理员弹窗:', data);
+            const title = (data && data.title) ? data.title : '系统通知';
+            const message = (data && data.message) ? data.message : '';
+            showAdminPopup(title, message);
+        });
+
+        // 房间被管理员清空（同样无人处理的事件，顺带补上）
+        notificationSocket.on('room-kicked', (data) => {
+            console.log('[通知] 收到房间清空事件:', data);
+            showAdminPopup('房间已被清空', (data && data.message) ? data.message : '房间被管理员清空，所有人被请出。');
+            if (typeof disconnectMultiplayer === 'function') {
+                try { disconnectMultiplayer(); } catch (e) { /* 忽略 */ }
+            }
+        });
+    } catch (e) {
+        console.warn('[通知] 建立 socket 失败(可忽略):', e);
     }
 }
 
@@ -14521,8 +14618,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // =============== 多人游戏P2P功能 ===============
 function connectToMultiplayerGame() {
-            console.log("触发连接至多人联机游戏函数")
-            
+            console.log("触发连接至多人联机游戏函数");
+
             (async () => {
                 if (!await checkServerBeforeConnect()) {
                     const startBtn = document.getElementById('multiplayerStartBtn');
@@ -17017,7 +17114,7 @@ function getCellWalls(x, y, maze) {
                     
                     switch(cellValue) {
                         case 1: // 墙
-                            ctx.fillStyle = '#333';
+                            ctx.fillStyle = '#4A5568';
                             break;
                         case 2: // 陷阱
                             ctx.fillStyle = '#FF0';
@@ -17026,7 +17123,7 @@ function getCellWalls(x, y, maze) {
                             ctx.fillStyle = '#0FF';
                             break;
                         default: // 路
-                            ctx.fillStyle = '#111';
+                            ctx.fillStyle = '#F7FAFC';
                     }
                     
                     ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
