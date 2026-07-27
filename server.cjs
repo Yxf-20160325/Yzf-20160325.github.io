@@ -51,6 +51,8 @@ const rooms = new Map(); // 存储所有房间信息 {roomId: roomData}
 const players = new Map(); // 存储所有玩家信息 {socketId: playerData}
 const pendingRooms = new Map(); // 存储等待连接的房间
 const adminTokens = new Map(); // 存储管理员令牌
+const userCoins = new Map(); // 用户金币余额（按 userId 存储，供管理员金币管理）
+const userLevels = new Map(); // 用户等级（按 userId 存储）
 
 // 辅助函数
 function generateRoomId() {
@@ -195,38 +197,17 @@ app.get('/api/rooms/search', (req, res) => {
     }
 });
 
-// API: 获取所有房间的信息 (管理员专用) - 更新以显示玩家数量
+// API: 获取所有房间的信息 (管理员专用)
+// 返回格式与 admin.html 的 fetchRooms 渲染保持一致：
+// 每个房间包含 {id, name, hostName, players(人数), maxPlayers, status, created, private, hasPassword}
 app.get('/api/admin/rooms', requireAdminAuth, (req, res) => {
     try {
         console.log(`管理员请求获取所有房间列表，当前有 ${rooms.size} 个房间。`);
-        
-        // 1. 先获取所有房间对象（这些对象中的 players 是 Map）
-        const allRoomObjects = Array.from(rooms.values());
-        
-        // 2. 创建一个新的房间列表数组，其中每个房间的 players 都被转换成了数组
-        // 同时添加玩家数量
-        const formattedRoomsForAdmin = allRoomObjects.map(room => {
-            // 将 Map 转换成 Array of Objects 的形式
-            const playersArray = Array.from(room.players ? room.players.values() : []);
-            return {
-                id: room.id,
-                name: room.name,
-                hostName: room.hostName,
-                created: room.createdAt,
-                private: room.private || false,
-                maxPlayers: room.maxPlayers,
-                status: room.status,
-                players: playersArray, // <-- 关键修改：这里提供的是数组
-                playersCount: playersArray.length, // 新增：提供总数
-                totalPlayers: room.players ? room.players.size : 0
-            };
-        });
-        
-        // 3. 发送格式化后的房间列表
-        res.json({ 
-            success: true, 
-            rooms: formattedRoomsForAdmin, 
-            totalRooms: formattedRoomsForAdmin.length 
+        const roomList = getAllRoomsList();
+        res.json({
+            success: true,
+            rooms: roomList,
+            totalRooms: roomList.length
         });
     } catch (error) {
         console.error('[API] 获取房间列表失败:', error);
@@ -337,6 +318,67 @@ app.get('/api/admin/stats', requireAdminAuth, (req, res) => {
     }
 });
 
+// 聚合所有房间内的玩家，生成用户列表（服务器无独立账号系统，以在线玩家为准）
+function getAllUsersList() {
+    const userMap = new Map();
+    for (const room of rooms.values()) {
+        if (!room.players) continue;
+        for (const player of room.players.values()) {
+            if (!player || !player.id) continue;
+            userMap.set(player.id, {
+                id: player.id,
+                username: player.name || '未知用户',
+                coins: userCoins.get(player.id) || 0,
+                level: userLevels.get(player.id) || 1,
+                roomId: room.id,
+                roomName: room.name,
+                online: true
+            });
+        }
+    }
+    return Array.from(userMap.values());
+}
+
+// API: 获取用户列表（管理员专用）
+app.get('/api/users', requireAdminAuth, (req, res) => {
+    try {
+        const users = getAllUsersList();
+        console.log(`[Admin] 获取用户列表，共 ${users.length} 名在线用户`);
+        res.json({ success: true, users });
+    } catch (error) {
+        console.error('[API] 获取用户列表失败:', error);
+        res.status(500).json({ success: false, message: '获取用户列表失败' });
+    }
+});
+
+// API: 为用户增减金币（管理员专用）
+app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { amount } = req.body;
+
+        if (amount === undefined || amount === null || isNaN(parseInt(amount))) {
+            return res.status(400).json({ success: false, message: '金币数量无效' });
+        }
+
+        const delta = parseInt(amount);
+        const current = userCoins.get(userId) || 0;
+        const updated = current + delta;
+        userCoins.set(userId, updated);
+
+        console.log(`[Admin] 用户 ${userId} 金币变更 ${delta >= 0 ? '+' : ''}${delta}，当前余额 ${updated}`);
+
+        res.json({
+            success: true,
+            message: `已为 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 金币`,
+            coins: updated
+        });
+    } catch (error) {
+        console.error('[API] 调整金币失败:', error);
+        res.status(500).json({ success: false, message: '调整金币失败' });
+    }
+});
+
 // API: 删除房间（管理员专用）
 app.delete('/api/admin/rooms/:roomId', requireAdminAuth, (req, res) => {
     try {
@@ -405,6 +447,9 @@ app.post('/api/admin/rooms/:roomId/kick-all', requireAdminAuth, (req, res) => {
         room.status = 'waiting';
         
         console.log(`[Admin] 房间 ${roomId} 的所有玩家已被请出，共 ${kickedPlayersCount} 人`);
+        
+        // 广播更新后的房间列表
+        broadcastRoomList();
         
         res.json({ success: true, message: `已请出 ${kickedPlayersCount} 名玩家` });
     } catch (error) {
@@ -890,49 +935,6 @@ io.on('connection', (socket) => {
         }
     });
 });
-// 在 server.cjs 中找到 kick-all API
-app.post('/api/admin/rooms/:roomId/kick-all', requireAdminAuth, (req, res) => {
-    try {
-        const roomId = req.params.roomId;
-        const room = rooms.get(roomId);
-        
-        if (!room) {
-            return res.status(404).json({ success: false, message: '房间不存在' });
-        }
-        
-        // 记录被踢出的玩家数量
-        const kickedPlayersCount = room.players.size;
-        
-        // 通知房间内所有玩家
-        io.to(roomId).emit('room-kicked', {
-            message: '房间被管理员清空，所有人被请出。'
-        });
-        
-        // 强制断开所有玩家的连接
-        for (const [playerId, player] of room.players.entries()) {
-            const socket = io.sockets.sockets.get(player.socketId);
-            if (socket) {
-                socket.disconnect(true);
-            }
-        }
-        
-        // 清空房间玩家
-        room.players.clear();
-        
-        // 将房间状态重置为等待
-        room.status = 'waiting';
-        
-        // 广播更新后的房间列表
-        broadcastRoomList();
-        
-        console.log(`[Admin] 房间 ${roomId} 的所有玩家已被请出，共 ${kickedPlayersCount} 人`);
-        
-        res.json({ success: true, message: `已请出 ${kickedPlayersCount} 名玩家` });
-    } catch (error) {
-        console.error('[API] 踢出玩家失败:', error);
-        res.status(500).json({ success: false, message: '踢出玩家失败' });
-    }
-});
 // 在 server.cjs 的 app.use(...) 路由下方添加
 app.post('/api/admin/rooms/:roomId/system-message', requireAdminAuth, (req, res) => {
     try {
@@ -963,6 +965,31 @@ app.post('/api/admin/rooms/:roomId/system-message', requireAdminAuth, (req, res)
         res.status(500).json({ success: false, message: '服务器内部错误' });
     }
 });
+
+// API: 向所有在线客户端发送全局弹窗（管理员专用）
+app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
+    try {
+        const { title, message } = req.body;
+
+        if (!title || !message) {
+            return res.status(400).json({ success: false, message: '弹窗标题和内容不能为空' });
+        }
+
+        // 向所有连接的客户端广播弹窗事件（游戏端需监听 'admin-popup' 才能显示）
+        io.emit('admin-popup', {
+            title: title,
+            message: message,
+            timestamp: Date.now()
+        });
+
+        console.log(`[Admin] 已发送全局弹窗: ${title}`);
+        res.json({ success: true, message: '弹窗已发送给所有在线玩家' });
+    } catch (error) {
+        console.error('[API] 发送弹窗失败:', error);
+        res.status(500).json({ success: false, message: '发送弹窗失败' });
+    }
+});
+
 // 在 server.cjs 中踢出所有玩家API之后添加
 app.delete('/api/admin/rooms/:roomId/players/:playerId', requireAdminAuth, (req, res) => {
     try {
