@@ -14804,7 +14804,8 @@ function connectToMultiplayerGame() {
                         maxPlayers: gameState.multiplayer.maxPlayers,
                         roomName: `${gameState.playerName}的房间`,
                         isPrivate: !!gameState.multiplayer.roomPassword,
-                        password: gameState.multiplayer.roomPassword
+                        password: gameState.multiplayer.roomPassword,
+                        roomCode: gameState.multiplayer.roomCode // 传递真实 Peer 房间号，保证服务器房间 ID 与 P2P 房间号一致
                     };
                     
                     console.log('发送房间创建请求到API服务器:', roomData);
@@ -16945,7 +16946,7 @@ function addKeyAndDoormultiplayer(size, maze) {
 }
 
 function generateMultiplayerMaze() {
-    const size = 15;
+    const size = 21; // 放大迷宫尺寸（21x21），比原来的 15x15 更大、更复杂
     let maze;
     let validMaze = false;
     let attempts = 0;
@@ -17012,9 +17013,10 @@ function tryGenerateValidMaze(maze, size) {
 }
 
 function addMultiplayerTraps(maze, size) {
-    // 添加陷阱（避开关键路径）
+    // 添加陷阱（避开关键路径）；数量随迷宫面积增长，越大越复杂
     const criticalPath = findCriticalPath(maze);
-    for (let i = 0; i < 8; i++) {
+    const trapCount = Math.min(30, Math.floor(size * size / 25));
+    for (let i = 0; i < trapCount; i++) {
         let x, y;
         let attempts = 0;
         do {
@@ -17033,7 +17035,7 @@ function addMultiplayerTraps(maze, size) {
 
 function addMultiplayerTeleporters(maze, size) {
     gameState.multiplayer.teleporters = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
         let x1, y1, x2, y2;
         let attempts = 0;
         do {
