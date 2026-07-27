@@ -1110,10 +1110,24 @@ app.post('/api/admin/rooms/:roomId/clear-room', requireAdminAuth, (req, res) => 
 function handleDisconnect(socketId) {
     console.log(`[Server] 用户断开连接: ${socketId}`);
 
-    // 1. 在全局 'players' Map 中查找玩家
-    const leavingPlayer = players.get(socketId);
+    // 1. 优先在全局 'players' Map 中查找玩家（socketId 为 key）
+    let leavingPlayer = players.get(socketId);
 
-    // 2. 如果玩家不存在（例如是被踢出后断开），直接返回
+    // 2. 兜底：遍历所有房间，按 player.socketId 匹配（处理 REST 建房 + socket 补全后 key 不一致的情况）
+    if (!leavingPlayer) {
+        for (const room of rooms.values()) {
+            for (const p of room.players.values()) {
+                if (p.socketId === socketId) {
+                    leavingPlayer = p;
+                    leavingPlayer.roomId = room.id;
+                    break;
+                }
+            }
+            if (leavingPlayer) break;
+        }
+    }
+
+    // 3. 如果玩家不存在（例如是被踢出后断开），直接返回
     if (!leavingPlayer) {
         console.log(`[Server] 找不到玩家 ${socketId}，可能是已经被移除。`);
         players.delete(socketId); // 清理一下以防万一
@@ -1124,6 +1138,7 @@ function handleDisconnect(socketId) {
     if (!room) {
         console.log(`[Server] 玩家 ${leavingPlayer.name} 的房间 ${leavingPlayer.roomId} 已不存在。`);
         players.delete(socketId);
+        if (leavingPlayer.socketId) players.delete(leavingPlayer.socketId);
         return;
     }
 
@@ -1175,8 +1190,11 @@ function handleDisconnect(socketId) {
     }
 
 
-    // 6. 最后，从全局 'players' Map 中彻底移除该玩家
+    // 6. 最后，从全局 'players' Map 中彻底移除该玩家（用 socketId 和原始 key 都试一次）
     players.delete(socketId);
+    if (leavingPlayer.socketId && leavingPlayer.socketId !== socketId) {
+        players.delete(leavingPlayer.socketId);
+    }
 }
  
 
@@ -1205,8 +1223,9 @@ function broadcastRoomList() {
 // 清理策略集中配置，支持环境变量覆盖（单位：秒），便于不同部署环境调整
 const ROOM_CLEANUP_CONFIG = {
     checkInterval: (parseInt(process.env.CLEANUP_CHECK_INTERVAL, 10) || 30) * 1000,          // 检查周期，默认 30s
-    emptyIdleTime: (parseInt(process.env.CLEANUP_EMPTY_IDLE, 10) || 5 * 60) * 1000,           // 空房间空闲上限，默认 5min
-    maxLifetime:   (parseInt(process.env.CLEANUP_MAX_LIFETIME, 10) || 24 * 60 * 60) * 1000,   // 房间最大存活时间，默认 24h
+    emptyIdleTime: (parseInt(process.env.CLEANUP_EMPTY_IDLE, 10) || 15) * 1000,              // 空房间空闲上限，默认 15s（人走即清，无需久等）
+    maxLifetime:   (parseInt(process.env.CLEANUP_MAX_LIFETIME, 10) || 24 * 60 * 60) * 1000,  // 房间最大存活时间，默认 24h
+    minRoomAge:    (parseInt(process.env.CLEANUP_MIN_AGE, 10) || 5) * 1000,                   // 房间最小存活时间，防止刚创建瞬间被误删，默认 5s
 };
 
 let totalRoomsCleaned = 0; // 累计清理房间数，便于监控
@@ -1216,10 +1235,19 @@ let totalRoomsCleaned = 0; // 累计清理房间数，便于监控
 function purgeZombiePlayers(room) {
     let purged = 0;
     for (const [pid, p] of room.players.entries()) {
+        // 对 REST 建房、socketId 仍为 null 的房主，直接视为可清（它还没建立有效连接）
+        if (!p.socketId) {
+            room.players.delete(pid);
+            players.delete(pid);
+            purged++;
+            continue;
+        }
         const sock = io.sockets.sockets.get(p.socketId);
-        if (!sock || !sock.connected) {
+        // socket 对象不存在，或已断开，或 ID 不匹配当前连接 → 视为僵尸
+        if (!sock || sock.connected === false || sock.id !== p.socketId) {
             room.players.delete(pid);
             players.delete(p.socketId); // 同步清理全局 players 映射
+            players.delete(pid);
             purged++;
         }
     }
@@ -1234,7 +1262,11 @@ setInterval(() => {
     let purgedTotal = 0;
 
     for (const [roomId, room] of rooms.entries()) {
-        // 1) 先清理房间内的僵尸玩家
+        // 0) 房间太新则不处理，避免刚创建瞬间被误删
+        const age = now - (room.createdAt || now);
+        if (age < cfg.minRoomAge) continue;
+
+        // 1) 先清理房间内的僵尸玩家（含未建立连接的 null socketId 房主）
         const purged = purgeZombiePlayers(room);
         if (purged > 0) {
             purgedTotal += purged;
@@ -1242,12 +1274,11 @@ setInterval(() => {
         }
 
         const lastAct = room.lastActivity || room.createdAt || now;
-        const age = now - (room.createdAt || now);
         const idle = now - lastAct;
         const isEmpty = room.players.size === 0;
 
         // 2) 删除条件：
-        //    a) 空房间且空闲超过阈值
+        //    a) 空房间且空闲超过阈值（人走即清，默认 15s）
         //    b) 超过最大存活时间（即便仍有活人，防止房间无限堆积）
         const idleTooLong = isEmpty && idle > cfg.emptyIdleTime;
         const tooOld = age > cfg.maxLifetime;
@@ -1259,7 +1290,10 @@ setInterval(() => {
             // 仅当房间还有活人时才发通知，避免给空房间发无意义消息
             if (room.players.size > 0) {
                 io.to(roomId).emit('room-kicked', { message: '房间因长时间未活动被系统关闭。' });
-                for (const p of room.players.values()) players.delete(p.socketId);
+                for (const p of room.players.values()) {
+                    players.delete(p.socketId);
+                    players.delete(p.id);
+                }
             }
             rooms.delete(roomId);
             cleanedThisRound++;
