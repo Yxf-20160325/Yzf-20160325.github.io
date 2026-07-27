@@ -3842,7 +3842,7 @@
     
     <script>
 const CLIENT_VERSION = "1.14";
-const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'; // 服务器URL，根据实际情况修改
+const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
     if (!GAME_SERVER_URL || GAME_SERVER_URL === 'http://' || GAME_SERVER_URL === 'http://localhost') {
