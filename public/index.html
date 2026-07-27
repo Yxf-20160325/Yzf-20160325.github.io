@@ -224,7 +224,7 @@
         #multiplayerCanvas {
             display: block;
             margin: 8px auto;
-            background-color: #333333;
+            background-color: #000000;
             border-radius: 10px;
             box-shadow: 0 0 30px rgba(0,0,0,0.7);
         }
@@ -17155,7 +17155,7 @@ function getCellWalls(x, y, maze) {
                             ctx.fillStyle = '#0FF';
                             break;
                         default: // 路
-                            ctx.fillStyle = '#333333';
+                            ctx.fillStyle = '#000000';
                     }
                     
                     ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
