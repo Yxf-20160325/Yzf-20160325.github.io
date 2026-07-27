@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.13.7";
+const SERVER_VERSION = "1.14";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -406,7 +406,7 @@ app.post('/api/admin/rooms/:roomId/kick-all', requireAdminAuth, (req, res) => {
         
         console.log(`[Admin] 房间 ${roomId} 的所有玩家已被请出，共 ${kickedPlayersCount} 人`);
         
-        res.json({ success: false, success: true, message: `已请出 ${kickedPlayersCount} 名玩家` });
+        res.json({ success: true, message: `已请出 ${kickedPlayersCount} 名玩家` });
     } catch (error) {
         console.error('[API] 踢出玩家失败:', error);
         res.status(500).json({ success: false, message: '踢出玩家失败' });
