@@ -57,6 +57,7 @@ const userLevels = new Map(); // 用户等级（按 userId 存储）
 // ===== 新增：管理后台数据（用户访问控制 / 功能控制 / 在线玩家映射 / 热门迷宫） =====
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
+const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool }，管理员封禁状态
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
@@ -1298,6 +1299,42 @@ app.post('/api/admin/function-control', requireAdminAuth, (req, res) => {
     } catch (error) {
         console.error('[API] 设置功能控制失败:', error);
         res.status(500).json({ success: false, message: '设置失败' });
+    }
+});
+
+// ===== 新增：管理员封禁（按用户禁用多人/单人游戏） =====
+// 封禁按 clientId（即在线用户列表中的 id）生效；客户端定时 REST 拉取自身封禁状态并应用。
+app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
+    try {
+        const { userId, type, banned } = req.body || {};
+        if (!userId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
+        if (type !== 'multiplayer' && type !== 'single') return res.status(400).json({ success: false, message: '类型无效（应为 multiplayer 或 single）' });
+        const ban = userBans.get(userId) || { multiplayer: false, single: false };
+        ban[type] = !!banned;
+        userBans.set(userId, ban);
+        console.log(`[Admin] 用户 ${userId} 的${type === 'multiplayer' ? '多人游戏' : '单人游戏'}已${banned ? '封禁' : '解封'}`);
+        // 若该用户当前有实时 socket，立即推送最新封禁状态（REST 注册的玩家无 socket，由客户端定时拉取兜底）
+        const socketId = onlineSockets.get(userId);
+        if (socketId && socketId !== 'rest') {
+            const sock = io.sockets.sockets.get(socketId);
+            if (sock) sock.emit('ban-update', { multiplayer: !!ban.multiplayer, single: !!ban.single });
+        }
+        res.json({ success: true, message: `已${banned ? '封禁' : '解封'}用户 ${userId} 的${type === 'multiplayer' ? '多人游戏' : '单人游戏'}`, ban });
+    } catch (error) {
+        console.error('[API] 设置封禁失败:', error);
+        res.status(500).json({ success: false, message: '设置失败' });
+    }
+});
+
+// 客户端拉取自身封禁状态（开放接口，按 clientId 查询）
+app.get('/api/my-ban', (req, res) => {
+    try {
+        const id = req.query.id;
+        if (!id) return res.json({ success: true, multiplayer: false, single: false });
+        const ban = userBans.get(id) || { multiplayer: false, single: false };
+        res.json({ success: true, multiplayer: !!ban.multiplayer, single: !!ban.single });
+    } catch (e) {
+        res.json({ success: true, multiplayer: false, single: false });
     }
 });
 
