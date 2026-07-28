@@ -54,6 +54,35 @@ const adminTokens = new Map(); // 存储管理员令牌
 const userCoins = new Map(); // 用户金币余额（按 userId 存储，供管理员金币管理）
 const userLevels = new Map(); // 用户等级（按 userId 存储）
 
+// ===== 新增：管理后台数据（用户访问控制 / 功能控制 / 在线玩家映射 / 热门迷宫） =====
+const userAccess = new Map();      // userId -> 页面访问权限设置
+const userFunctions = new Map();   // userId -> 功能控制设置
+const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
+const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
+const MAZES_FILE = path.join(__dirname, 'data', 'mazes.json');
+function loadMazes() {
+    try {
+        if (fs.existsSync(MAZES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(MAZES_FILE, 'utf8'));
+            if (Array.isArray(arr)) {
+                arr.forEach(m => mazes.set(m.id, m));
+                console.log(`[迷宫] 已从 ${MAZES_FILE} 加载 ${mazes.size} 个热门迷宫`);
+            }
+        }
+    } catch (e) {
+        console.error('[迷宫] 加载热门迷宫失败:', e.message);
+    }
+}
+function saveMazes() {
+    try {
+        fs.mkdirSync(path.dirname(MAZES_FILE), { recursive: true });
+        fs.writeFileSync(MAZES_FILE, JSON.stringify(Array.from(mazes.values()), null, 2));
+    } catch (e) {
+        console.error('[迷宫] 保存热门迷宫失败:', e.message);
+    }
+}
+loadMazes();
+
 // 辅助函数
 function generateRoomId() {
     // 生成5位纯数字房间ID
@@ -560,7 +589,7 @@ app.post('/api/create-room', express.json(), (req, res) => {
                 id: roomId,
                 name: roomName,
                 host: hostPlayer.id,
-                players: new Map([[hostPlayer.id, hostPlayer]]),
+                players: new Map(), // 真实玩家由客户端经 socket 'mp-register' 注册，避免重复计数
                 maxPlayers,
                 status: 'waiting',
                 hostName: playerName,
@@ -932,6 +961,45 @@ io.on('connection', (socket) => {
         handleDisconnect(socket.id);
     });
 
+    // ===== 新增：多人游戏真实玩家注册（供管理后台 /api/users 聚合在线用户） =====
+    // 客户端（房主与加入者）在成功进入房间后，经此事件把自身注册到服务器 room.players，
+    // 与 REST create-room 创建的房间（roomId = Peer 房间号）对应。断开时由 handleDisconnect 清理。
+    socket.on('mp-register', (data) => {
+        try {
+            const { roomId, player } = data || {};
+            const room = rooms.get(roomId);
+            if (!room || !player || !player.id) return;
+            room.players.set(player.id, {
+                id: player.id,
+                name: player.name || '玩家',
+                socketId: socket.id,
+                color: player.color || '#ffffff',
+                isHost: false,
+                joinedAt: Date.now()
+            });
+            onlineSockets.set(player.id, socket.id);
+            room.lastActivity = Date.now();
+            console.log(`[MP] 玩家 ${player.name} (${player.id}) 已注册到房间 ${roomId}，当前在线 ${room.players.size} 人`);
+        } catch (e) {
+            console.error('[MP] mp-register 处理出错:', e.message);
+        }
+    });
+
+    socket.on('mp-unregister', (data) => {
+        try {
+            const { roomId, playerId } = data || {};
+            const room = rooms.get(roomId);
+            if (room && playerId) {
+                const p = room.players.get(playerId);
+                if (p && p.socketId === socket.id) room.players.delete(playerId);
+            }
+            onlineSockets.delete(playerId);
+            if (room) room.lastActivity = Date.now();
+        } catch (e) {
+            console.error('[MP] mp-unregister 处理出错:', e.message);
+        }
+    });
+
     // 聊天消息处理
     socket.on('chat-message', (data) => {
         console.log('收到聊天消息:', data);
@@ -1008,6 +1076,138 @@ app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
     } catch (error) {
         console.error('[API] 发送弹窗失败:', error);
         res.status(500).json({ success: false, message: '发送弹窗失败' });
+    }
+});
+
+// ===== 新增：热门迷宫管理（管理员专用，持久化到 data/mazes.json） =====
+function generateMazeId() {
+    return 'maze_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 5);
+}
+
+// 公开接口：供游戏端读取热门迷宫列表（玩家侧也可见）
+app.get('/api/mazes', (req, res) => {
+    try {
+        res.json({ success: true, mazes: Array.from(mazes.values()) });
+    } catch (error) {
+        res.status(500).json({ success: false, message: '获取迷宫列表失败' });
+    }
+});
+
+// 管理员：获取全部迷宫
+app.get('/api/admin/mazes', requireAdminAuth, (req, res) => {
+    try {
+        res.json({ success: true, mazes: Array.from(mazes.values()) });
+    } catch (error) {
+        res.status(500).json({ success: false, message: '获取迷宫列表失败' });
+    }
+});
+
+// 管理员：新建迷宫
+app.post('/api/admin/mazes', requireAdminAuth, (req, res) => {
+    try {
+        const { name, description, difficulty, size, data } = req.body || {};
+        if (!name || !String(name).trim()) {
+            return res.status(400).json({ success: false, message: '迷宫名称不能为空' });
+        }
+        const maze = {
+            id: generateMazeId(),
+            name: String(name).trim(),
+            description: description || '',
+            difficulty: difficulty || '简单',
+            size: parseInt(size, 10) || 10,
+            data: (data !== undefined) ? data : null,
+            createdAt: Date.now()
+        };
+        mazes.set(maze.id, maze);
+        saveMazes();
+        console.log(`[Admin] 新建迷宫: ${maze.name} (${maze.id})`);
+        res.json({ success: true, message: '迷宫创建成功', maze });
+    } catch (error) {
+        console.error('[API] 新建迷宫失败:', error);
+        res.status(500).json({ success: false, message: '新建迷宫失败' });
+    }
+});
+
+// 管理员：更新迷宫
+app.put('/api/admin/mazes/:mazeId', requireAdminAuth, (req, res) => {
+    try {
+        const mazeId = req.params.mazeId;
+        const maze = mazes.get(mazeId);
+        if (!maze) return res.status(404).json({ success: false, message: '迷宫不存在' });
+        const { name, description, difficulty, size, data } = req.body || {};
+        if (name !== undefined) maze.name = String(name).trim() || maze.name;
+        if (description !== undefined) maze.description = description;
+        if (difficulty !== undefined) maze.difficulty = difficulty;
+        if (size !== undefined) maze.size = parseInt(size, 10) || maze.size;
+        if (data !== undefined) maze.data = data;
+        maze.updatedAt = Date.now();
+        mazes.set(mazeId, maze);
+        saveMazes();
+        console.log(`[Admin] 更新迷宫: ${maze.name} (${mazeId})`);
+        res.json({ success: true, message: '迷宫更新成功', maze });
+    } catch (error) {
+        console.error('[API] 更新迷宫失败:', error);
+        res.status(500).json({ success: false, message: '更新迷宫失败' });
+    }
+});
+
+// 管理员：删除迷宫
+app.delete('/api/admin/mazes/:mazeId', requireAdminAuth, (req, res) => {
+    try {
+        const mazeId = req.params.mazeId;
+        if (!mazes.has(mazeId)) return res.status(404).json({ success: false, message: '迷宫不存在' });
+        mazes.delete(mazeId);
+        saveMazes();
+        console.log(`[Admin] 删除迷宫: ${mazeId}`);
+        res.json({ success: true, message: '迷宫删除成功' });
+    } catch (error) {
+        console.error('[API] 删除迷宫失败:', error);
+        res.status(500).json({ success: false, message: '删除迷宫失败' });
+    }
+});
+
+// ===== 新增：用户页面访问控制 / 功能控制（管理员专用） =====
+app.post('/api/admin/access', requireAdminAuth, (req, res) => {
+    try {
+        const { userId, access } = req.body || {};
+        if (!userId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
+        userAccess.set(userId, access || 'all');
+        console.log(`[Admin] 用户 ${userId} 页面访问权限设为: ${access || 'all'}`);
+        res.json({ success: true, message: `已为用户 ${userId} 设置访问权限: ${access || 'all'}`, access: userAccess.get(userId) });
+    } catch (error) {
+        console.error('[API] 设置访问权限失败:', error);
+        res.status(500).json({ success: false, message: '设置失败' });
+    }
+});
+
+app.post('/api/admin/function-control', requireAdminAuth, (req, res) => {
+    try {
+        const { userId, control } = req.body || {};
+        if (!userId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
+        userFunctions.set(userId, control || 'enable');
+        console.log(`[Admin] 用户 ${userId} 功能控制设为: ${control || 'enable'}`);
+        res.json({ success: true, message: `已为用户 ${userId} 设置功能控制: ${control || 'enable'}`, control: userFunctions.get(userId) });
+    } catch (error) {
+        console.error('[API] 设置功能控制失败:', error);
+        res.status(500).json({ success: false, message: '设置失败' });
+    }
+});
+
+// ===== 新增：远程控制（管理员专用，精准投递到目标用户 socket） =====
+app.post('/api/admin/remote', requireAdminAuth, (req, res) => {
+    try {
+        const { userId, action } = req.body || {};
+        if (!userId || !action) return res.status(400).json({ success: false, message: '缺少 userId 或 action' });
+        const socketId = onlineSockets.get(userId);
+        if (!socketId) return res.status(404).json({ success: false, message: '目标用户不在线或未注册' });
+        const sock = io.sockets.sockets.get(socketId);
+        if (!sock) return res.status(404).json({ success: false, message: '目标用户连接已断开' });
+        sock.emit('admin-command', { action, timestamp: Date.now() });
+        console.log(`[Admin] 已向用户 ${userId} 发送远程指令: ${action}`);
+        res.json({ success: true, message: `已向用户 ${userId} 发送指令: ${action}` });
+    } catch (error) {
+        console.error('[API] 远程控制失败:', error);
+        res.status(500).json({ success: false, message: '远程控制失败' });
     }
 });
 
@@ -1244,6 +1444,8 @@ function handleDisconnect(socketId) {
     if (leavingPlayer.socketId && leavingPlayer.socketId !== socketId) {
         players.delete(leavingPlayer.socketId);
     }
+    // 同步清理在线玩家映射（供远程控制精准投递）
+    if (leavingPlayer.id) onlineSockets.delete(leavingPlayer.id);
 }
  
 
