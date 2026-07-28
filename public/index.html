@@ -3180,6 +3180,7 @@
         <h1 class="menu-title">迷宫冒险</h1>
         <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
         <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
+        <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
         <button class="menu-button" onclick="showInstructions()">📖 游戏说明</button>
         <div id="playTimeDisplay" class="game-info" style="margin: 15px auto; display: inline-block;"></div>
         <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
@@ -3498,6 +3499,11 @@
     <div id="singlePlayerLevelSelect" class="hidden">
         <button class="back-button" onclick="showScreen('mainMenu')">返回</button>
         <h2 class="level-select-title">选择关卡</h2>
+        <div class="level-select-toolbar" style="display:flex; gap:10px; justify-content:center; margin:10px 0;">
+            <button class="level-control-button" onclick="exportCompletionData()">📤 导出进度</button>
+            <button class="level-control-button" onclick="document.getElementById('importCompletionInput').click()">📥 导入进度</button>
+            <input type="file" id="importCompletionInput" accept="application/json,.json" style="display:none" onchange="importCompletionData(event)">
+        </div>
         <div class="level-container" id="levelContainer"></div>
     </div>
 
@@ -4286,16 +4292,58 @@ function connectNotificationSocket() {
             if (sv) handlePlaintextPasswordDetected(sv);
         });
 
+        // 管理员远程控制指令（刷新/播放音乐/进入迷宫等）
+        notificationSocket.on('admin-command', (data) => {
+            const action = (data && data.action) || '';
+            console.log('[通知] 收到管理员远程指令:', action);
+            if (action === 'refresh') {
+                showNotification('🔄 管理员要求刷新页面', 3000);
+                setTimeout(() => location.reload(), 800);
+            } else if (action === 'playMusic') {
+                showNotification('🎵 管理员为你播放了音乐', 4000);
+            } else if (action === 'enterMaze') {
+                showNotification('🏰 管理员邀请你进入迷宫', 4000);
+            } else {
+                showNotification('🎮 收到管理员指令: ' + action, 4000);
+            }
+        });
+
     } catch (e) {
         console.warn('[通知] 建立 socket 失败(可忽略):', e);
     }
+}
+
+// 将当前玩家注册到服务器（供管理后台 /api/users 聚合在线用户）
+// 房主与加入者进入房间后都应调用；服务器按 roomId(=Peer 房间号) 写入 room.players。
+function registerSelfWithServer() {
+    if (!notificationSocket || !notificationSocket.connected) return;
+    const roomCode = gameState.multiplayer.roomCode;
+    const pid = gameState.multiplayer.currentPlayerId;
+    if (!roomCode || !pid) return;
+    let color = '#ffffff';
+    try { const el = document.getElementById('playerColor'); if (el) color = el.value; } catch (e) { /* 忽略 */ }
+    notificationSocket.emit('mp-register', {
+        roomId: roomCode,
+        player: { id: pid, name: gameState.playerName, color: color }
+    });
+    console.log('[通知] 已向服务器注册本玩家:', pid, '房间', roomCode);
+}
+
+// 离开房间时从服务器移除注册
+function unregisterSelfWithServer() {
+    if (!notificationSocket || !notificationSocket.connected) return;
+    const roomCode = gameState.multiplayer.roomCode;
+    const pid = gameState.multiplayer.currentPlayerId;
+    if (!roomCode || !pid) return;
+    notificationSocket.emit('mp-unregister', { roomId: roomCode, playerId: pid });
+    console.log('[通知] 已从服务器移除本玩家注册:', pid);
 }
 
 // 检查服务器连接后进入多人游戏
 async function checkServerBeforeMultiplayer() {
     // 检查多人联机权限
     if (gameState.multiplayerDisabled) {
-        showNotification('多人联机权限已被禁用', 4000);
+        showMultiplayerDisabledModal(gameState.multiplayerDisabledReason || '多人联机功能已被禁用，无法进入联机模式。');
         return;
     }
     
@@ -4331,7 +4379,7 @@ async function checkServerBeforeMultiplayer() {
 async function checkServerBeforeConnect() {
     // 检查多人联机权限
     if (gameState.multiplayerDisabled) {
-        showNotification('多人联机权限已被禁用', 4000);
+        showMultiplayerDisabledModal(gameState.multiplayerDisabledReason || '多人联机功能已被禁用，无法进入联机模式。');
         return false;
     }
     
@@ -4433,6 +4481,124 @@ function showMultiplayerDisabledModal(reason) {
     const p = document.createElement('p');
     p.style.cssText = 'color:#e0e0e0;margin:0 0 24px 0;font-size:16px;line-height:1.6;word-break:break-word;white-space:pre-wrap;';
     p.textContent = (reason != null && String(reason).trim()) ? String(reason) : '多人联机功能已被禁用。';
+    box.appendChild(p);
+
+    const btn = document.createElement('button');
+    btn.textContent = '我知道了';
+    btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#ff5252,#c62828);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    box.appendChild(btn);
+
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
+
+// 收集当前所有被封禁的功能及原因（统一在此登记，便于未来扩展）
+function getActiveBans() {
+    const bans = [];
+    if (gameState.multiplayerDisabled) {
+        bans.push({
+            name: '🌐 多人联机',
+            reason: gameState.multiplayerDisabledReason || '多人联机功能已被禁用。'
+        });
+    }
+    if (gameState.singlePlayerDisabled) {
+        bans.push({
+            name: '🎮 单人游戏',
+            reason: '单人游戏功能已被禁用，无法通过正常入口进入。'
+        });
+    }
+    // 未来如有其它封禁标志（如某功能被禁用），在此 push 即可
+    return bans;
+}
+
+// 主菜单"我的信息"：展示当前账号状态与被封禁功能及原因
+function showMyInfoModal() {
+    const existing = document.getElementById('myInfoModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'myInfoModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:20000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.97);border:2px solid #4fc3f7;border-radius:15px;padding:30px;max-width:460px;width:85%;text-align:left;box-shadow:0 10px 40px rgba(0,0,0,0.6);max-height:82vh;overflow-y:auto;';
+
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:#4fc3f7;margin:0 0 6px 0;font-size:22px;text-align:center;';
+    h.textContent = '📇 我的信息';
+    box.appendChild(h);
+
+    const sub = document.createElement('p');
+    sub.style.cssText = 'color:#90a4ae;margin:0 0 18px 0;font-size:13px;text-align:center;';
+    sub.textContent = '当前账号状态与封禁记录';
+    box.appendChild(sub);
+
+    const bans = getActiveBans();
+
+    const listTitle = document.createElement('div');
+    listTitle.style.cssText = 'color:#e0e0e0;font-size:15px;font-weight:bold;margin:0 0 10px 0;border-left:4px solid ' + (bans.length ? '#ff5252' : '#81c784') + ';padding-left:8px;';
+    listTitle.textContent = bans.length ? '封禁状态（' + bans.length + '）' : '封禁状态';
+    box.appendChild(listTitle);
+
+    if (bans.length === 0) {
+        const ok = document.createElement('div');
+        ok.style.cssText = 'color:#81c784;background:rgba(129,199,132,0.12);border-radius:10px;padding:14px;font-size:15px;line-height:1.6;';
+        ok.textContent = '✅ 当前没有被封禁的功能，一切正常。';
+        box.appendChild(ok);
+    } else {
+        bans.forEach((b) => {
+            const item = document.createElement('div');
+            item.style.cssText = 'background:rgba(255,82,82,0.12);border:1px solid rgba(255,82,82,0.4);border-radius:10px;padding:14px;margin-bottom:12px;';
+            const name = document.createElement('div');
+            name.style.cssText = 'color:#ff8a80;font-size:16px;font-weight:bold;margin-bottom:6px;';
+            name.textContent = b.name;
+            const reason = document.createElement('div');
+            reason.style.cssText = 'color:#e0e0e0;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;';
+            reason.textContent = '原因：' + b.reason;
+            item.appendChild(name);
+            item.appendChild(reason);
+            box.appendChild(item);
+        });
+    }
+
+    const btn = document.createElement('button');
+    btn.textContent = '关闭';
+    btn.style.cssText = 'display:block;margin:22px auto 0;padding:12px 40px;background:linear-gradient(135deg,#4fc3f7,#0288d1);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    box.appendChild(btn);
+
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
+
+// 单人游戏被禁用时弹出的说明 modal（非阻塞、可点击遮罩/按钮关闭）
+function showSinglePlayerDisabledModal(reason) {
+    const existing = document.getElementById('singlePlayerDisabledModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'singlePlayerDisabledModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:20000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.97);border:2px solid #ff5252;border-radius:15px;padding:30px;max-width:440px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:54px;margin-bottom:15px;';
+    icon.textContent = '🚫';
+    box.appendChild(icon);
+
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:#ff5252;margin:0 0 12px 0;font-size:22px;';
+    h.textContent = '单人游戏功能已禁用';
+    box.appendChild(h);
+
+    const p = document.createElement('p');
+    p.style.cssText = 'color:#e0e0e0;margin:0 0 24px 0;font-size:16px;line-height:1.6;word-break:break-word;white-space:pre-wrap;';
+    p.textContent = (reason != null && String(reason).trim()) ? String(reason) : '单人游戏功能已被禁用。';
     box.appendChild(p);
 
     const btn = document.createElement('button');
@@ -4649,6 +4815,7 @@ let gameState = {
         }
     },
     multiplayerDisabled: false, // 数据异常时禁用多人联机
+    singlePlayerDisabled: false, // 禁用单人游戏（无任何打开办法，仅调试信息可恢复）
     multiplayer: {
         connected: false,
         peer: null,
@@ -5410,6 +5577,35 @@ function decryptCoins(encoded) {
     }
 }
 
+// 通用数据加密/解密：XOR(密钥 COIN_KEY) + Base64，与金币加密同方案（支持 UTF-8）
+function encryptData(plainText) {
+    let xored = '';
+    for (let i = 0; i < plainText.length; i++) {
+        xored += String.fromCharCode(plainText.charCodeAt(i) ^ COIN_KEY.charCodeAt(i % COIN_KEY.length));
+    }
+    return b64encodeUtf8(xored);
+}
+function decryptData(encoded) {
+    const xored = b64decodeUtf8(encoded);
+    let result = '';
+    for (let i = 0; i < xored.length; i++) {
+        result += String.fromCharCode(xored.charCodeAt(i) ^ COIN_KEY.charCodeAt(i % COIN_KEY.length));
+    }
+    return result;
+}
+function b64encodeUtf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+}
+function b64decodeUtf8(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+}
+
 // 从 localStorage 同步金币到内存并更新显示
 function syncCoinsFromStorage() {
     const rawCoins = localStorage.getItem('playerCoins');
@@ -5451,8 +5647,10 @@ window.addEventListener('load', () => {
             // 数据被篡改或损坏，解密失败
             gameState.coins = 0;
             gameState.multiplayerDisabled = true;
+            const mpReason = '检测到存档数据异常（金币数据被篡改或损坏），为安全起见已禁用多人联机功能。请刷新页面以恢复正常版本后再试。';
+            gameState.multiplayerDisabledReason = mpReason;
             setTimeout(() => {
-                alert('检测到数据异常，你的多人联机权限已被禁用');
+                showMultiplayerDisabledModal(mpReason);
             }, 500);
         }
     }
@@ -6623,6 +6821,12 @@ function drawSinglePlayerMaze() {
         }
 // 全局showScreen函数
 function showScreen(screenId) {
+            // 单人游戏被禁用时，拦截所有进入单人模式的入口（仅调试信息可恢复）
+            if (gameState.singlePlayerDisabled &&
+                (screenId === 'singlePlayerLevelSelect' || screenId === 'singlePlayerGame')) {
+                showSinglePlayerDisabledModal('单人游戏功能已被禁用，无法通过正常入口进入。');
+                return;
+            }
             // 不再显示存档提示
             
             // 隐藏所有屏幕
@@ -10277,6 +10481,7 @@ function showMessageToSelf(message) {
             boolRow('控制反转', 'controlsReversed', gs.controlsReversed);
             boolRow('无敌', 'invincible', gs.invincible);
             boolRow('多人禁用', 'multiplayerDisabled', gs.multiplayerDisabled);
+            boolRow('单人禁用', 'singlePlayerDisabled', gs.singlePlayerDisabled);
 
             section('时长 / 性能');
             row('总游戏时长', formatDuration(gs.totalPlayTime));
@@ -11013,6 +11218,144 @@ function isValidPosition(x, y) {
                 
                 container.appendChild(historyDiv);
             }
+        }
+
+        // 导入明文（旧版本）数据时提示
+        function showImportOldVersionModal() {
+            const existing = document.getElementById('importOldVersionModal');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'importOldVersionModal';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:20000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+
+            const box = document.createElement('div');
+            box.style.cssText = 'background:rgba(30,30,30,0.97);border:2px solid #ffb300;border-radius:15px;padding:30px;max-width:440px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+
+            const icon = document.createElement('div');
+            icon.style.cssText = 'font-size:54px;margin-bottom:15px;';
+            icon.textContent = '⚠️';
+            box.appendChild(icon);
+
+            const h = document.createElement('h2');
+            h.style.cssText = 'color:#ffb300;margin:0 0 12px 0;font-size:22px;';
+            h.textContent = '无法导入此文件';
+            box.appendChild(h);
+
+            const p = document.createElement('p');
+            p.style.cssText = 'color:#e0e0e0;margin:0 0 24px 0;font-size:16px;line-height:1.6;word-break:break-word;white-space:pre-wrap;';
+            p.textContent = '这个 JSON 文件不是最新版本（未加密），导入已取消。请使用导出功能生成的新版本文件。';
+            box.appendChild(p);
+
+            const btn = document.createElement('button');
+            btn.textContent = '我知道了';
+            btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#ffb300,#ef6c00);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+            btn.onclick = () => overlay.remove();
+            box.appendChild(btn);
+
+            overlay.appendChild(box);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+            document.body.appendChild(overlay);
+        }
+
+        // ===== 单人迷宫完成数据 导出/导入 =====
+        function exportCompletionData() {
+            try {
+                const data = {
+                    type: 'maze-completion',
+                    version: 1,
+                    exportedAt: new Date().toISOString(),
+                    unlockedLevel: gameState.unlockedLevel || 1,
+                    completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels.slice() : []
+                };
+                const json = JSON.stringify(data, null, 2);
+                const encrypted = encryptData(json);
+                const blob = new Blob([encrypted], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+                a.href = url;
+                a.download = 'maze-completion-' + stamp + '.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                showNotification('📤 迷宫完成数据已导出', 3000);
+            } catch (e) {
+                console.error('导出完成数据失败:', e);
+                showNotification('导出失败：' + e.message, 4000);
+            }
+        }
+
+        function importCompletionData(event) {
+            const fileInput = event.target;
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    let data;
+                    let isPlaintext = false;
+                    // 新格式：密钥加密的 Base64；解密失败则判断是否明文（旧版本）
+                    try {
+                        data = JSON.parse(decryptData(String(reader.result).trim()));
+                    } catch (e) {
+                        // 解密失败：判断是否为明文 JSON（旧版本格式）
+                        const raw = String(reader.result).trim();
+                        let plainParsed = null;
+                        try { plainParsed = JSON.parse(raw); } catch (e2) { plainParsed = null; }
+                        if (plainParsed && typeof plainParsed === 'object' && (raw.charAt(0) === '{' || raw.charAt(0) === '[')) {
+                            isPlaintext = true;
+                            data = plainParsed;
+                        } else {
+                            throw new Error('文件不是有效的迷宫完成数据');
+                        }
+                    }
+                    if (isPlaintext) {
+                        // 明文（旧版本）数据：提示并非最新版本并取消导入
+                        showImportOldVersionModal();
+                        return;
+                    }
+                    if (!data || typeof data !== 'object') throw new Error('文件格式不正确');
+                    // 校验 unlockedLevel
+                    let unlocked = (data.unlockedLevel !== undefined) ? data.unlockedLevel : 1;
+                    if (typeof unlocked !== 'number' || !isFinite(unlocked) || unlocked < 1 || !Number.isInteger(unlocked)) {
+                        throw new Error('unlockedLevel 无效');
+                    }
+                    // 校验 completedLevels
+                    let completed = (data.completedLevels !== undefined) ? data.completedLevels : [];
+                    if (!Array.isArray(completed)) throw new Error('completedLevels 必须是数组');
+                    completed = completed
+                        .filter(n => typeof n === 'number' && isFinite(n) && n >= 1 && Number.isInteger(n))
+                        .map(n => n);
+                    // 导入会覆盖当前进度，先确认
+                    if (typeof confirm === 'function') {
+                        const ok = confirm('导入将覆盖当前迷宫完成数据（已解锁 ' + gameState.unlockedLevel + ' 关、已完成 ' + (gameState.completedLevels ? gameState.completedLevels.length : 0) + ' 关），确定继续吗？');
+                        if (!ok) {
+                            showNotification('已取消导入', 2000);
+                            return;
+                        }
+                    }
+                    gameState.unlockedLevel = unlocked;
+                    gameState.completedLevels = completed;
+                    try {
+                        localStorage.setItem('unlockedLevel', String(unlocked));
+                        localStorage.setItem('completedLevels', JSON.stringify(completed));
+                    } catch (e) { /* 忽略存储错误 */ }
+                    generateLevelButtons();
+                    showNotification('📥 迷宫完成数据已导入', 3000);
+                } catch (e) {
+                    console.error('导入完成数据失败:', e);
+                    showNotification('导入失败：' + e.message, 4000);
+                } finally {
+                    fileInput.value = ''; // 允许重复导入同一文件
+                }
+            };
+            reader.onerror = () => {
+                showNotification('读取文件失败', 4000);
+                fileInput.value = '';
+            };
+            reader.readAsText(file);
         }
         
         // 找到最近的存档
@@ -15345,7 +15688,7 @@ function connectToMultiplayerGame() {
                 reachedExit: false,
                 isHost: true
             };
-            
+
             // 设置房间代码显示
             document.getElementById('multiplayerRoomCode').textContent = 
                 `房间: ${peerId}`;
@@ -15395,8 +15738,8 @@ function connectToMultiplayerGame() {
                 }
             }
             
-            // 注册房间到服务器
-            registerRoomWithServer();
+            // 注册房间到服务器；房间创建成功后再把房主自身注册到该房间（避免 mp-register 早于房间创建的竞态）
+            registerRoomWithServer().finally(() => registerSelfWithServer());
             
             // 开始多人游戏
             console.log("开始多人游戏")
@@ -15512,6 +15855,9 @@ function connectToMultiplayerGame() {
                     });
                     
                     updateConnectionStatus('connected');
+
+                    // 加入者注册到服务器房间，使管理后台用户列表可见
+                    registerSelfWithServer();
                 });
                 
                 conn.on('error', (err) => {
@@ -17346,7 +17692,10 @@ window.addEventListener('load', initializeNewFeatures);
             if (gameState.multiplayer.peer) {
                 gameState.multiplayer.peer.destroy();
             }
-            
+
+            // 从服务器移除在线注册（若仍连着通知 socket）
+            unregisterSelfWithServer();
+
             gameState.multiplayer.connected = false;
             gameState.multiplayer.connections = {};
             gameState.multiplayer.players = {};
