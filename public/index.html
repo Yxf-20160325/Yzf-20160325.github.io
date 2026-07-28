@@ -4278,6 +4278,14 @@ function connectNotificationSocket() {
                 try { disconnectMultiplayer(); } catch (e) { /* 忽略 */ }
             }
         });
+
+        // 服务器检测到明文密码等安全风险，要求本客户端执行版本检测
+        notificationSocket.on('version-check-required', (data) => {
+            console.warn('[通知] 收到服务器版本检测要求:', data);
+            const sv = (data && data.serverVersion) ? data.serverVersion : null;
+            if (sv) handlePlaintextPasswordDetected(sv);
+        });
+
     } catch (e) {
         console.warn('[通知] 建立 socket 失败(可忽略):', e);
     }
@@ -4349,6 +4357,93 @@ async function checkServerBeforeConnect() {
         showNotification('无法连接到服务器，请确保服务器打开', 4000);
         return false;
     }
+}
+
+// ========== 服务器检测到明文密码时的版本检测与联机禁用 ==========
+// 服务器在 create-room 发现客户端发送了明文密码（旧版/不安全客户端特征），
+// 会返回 code:'PLAINTEXT_PASSWORD' 并附带 serverVersion；本函数执行一次版本检测，
+// 若客户端版本与服务器不一致，则退出多人游戏并禁用联机功能（刷新页面前保持）。
+function handlePlaintextPasswordDetected(serverVersion) {
+    console.warn('[安全] 服务器检测到明文密码，启动版本检测。serverVersion =', serverVersion);
+    const clientVersion = CLIENT_VERSION;
+    if (typeof serverVersion === 'string' && serverVersion && clientVersion !== serverVersion) {
+        forceExitAndDisableMultiplayer(
+            '服务器检测到你发送了明文密码（旧版客户端特征）。你的客户端版本 ' + clientVersion +
+            ' 与服务器 ' + serverVersion + ' 不一致，已退出联机并禁用多人功能。请刷新页面更新到最新版本。'
+        );
+    } else {
+        // 版本一致：明文检测理论上只会在旧客户端触发，这里做兜底提示并阻止本次建房
+        showNotification('⚠️ 服务器检测到明文密码，已阻止创建房间。请刷新页面更新客户端。', 6000);
+    }
+}
+
+function forceExitAndDisableMultiplayer(reason) {
+    // 若正在多人游戏中，先强制断开
+    try {
+        if (typeof disconnectMultiplayer === 'function') disconnectMultiplayer();
+    } catch (e) { console.warn('断开多人游戏失败(可忽略):', e); }
+    // 禁用联机功能
+    setMultiplayerDisabled(true, reason);
+}
+
+function setMultiplayerDisabled(disabled, reason) {
+    gameState.multiplayerDisabled = !!disabled;
+    // 记录禁用原因，便于入口拦截时再次说明
+    gameState.multiplayerDisabledReason = disabled ? (reason || '') : '';
+    // 禁用/恢复入口按钮
+    ['multiplayerBtn', 'startMultiplayerBtn', 'multiplayerStartBtn'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.disabled = !!disabled;
+            el.style.opacity = disabled ? '0.5' : '';
+            el.style.pointerEvents = disabled ? 'none' : '';
+            el.title = disabled ? (reason || '多人联机功能已被禁用') : '';
+        }
+    });
+    if (disabled) {
+        // 弹 modal 明确告知禁用原因
+        showMultiplayerDisabledModal(reason || '多人联机功能已被禁用。');
+    } else {
+        showNotification('✅ 多人联机功能已恢复', 3000);
+    }
+}
+
+// 多人联机被禁用时弹出的说明 modal（非阻塞、可点击遮罩/按钮关闭）
+function showMultiplayerDisabledModal(reason) {
+    const existing = document.getElementById('multiplayerDisabledModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'multiplayerDisabledModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:20000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.97);border:2px solid #ff5252;border-radius:15px;padding:30px;max-width:440px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:54px;margin-bottom:15px;';
+    icon.textContent = '🚫';
+    box.appendChild(icon);
+
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:#ff5252;margin:0 0 12px 0;font-size:22px;';
+    h.textContent = '多人联机功能已禁用';
+    box.appendChild(h);
+
+    const p = document.createElement('p');
+    p.style.cssText = 'color:#e0e0e0;margin:0 0 24px 0;font-size:16px;line-height:1.6;word-break:break-word;white-space:pre-wrap;';
+    p.textContent = (reason != null && String(reason).trim()) ? String(reason) : '多人联机功能已被禁用。';
+    box.appendChild(p);
+
+    const btn = document.createElement('button');
+    btn.textContent = '我知道了';
+    btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#ff5252,#c62828);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    box.appendChild(btn);
+
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
 }
 
 let teleportSelectionMode = false;
@@ -12759,7 +12854,7 @@ function handleSinglePlayerMoveLogic(dx, dy) {
             startUnlockDoor();
             return;
         } else {
-            alert("你需要钥匙才能打开这扇门！");
+            showNotification('🔑 你需要钥匙才能打开这扇门！');
             return;
         }
     }
@@ -15103,12 +15198,13 @@ function connectToMultiplayerGame() {
 
                 // 获取房间密码与私密开关
                 const roomPassword = document.getElementById('roomPassword').value.trim();
-                const isPrivateRoom = document.getElementById('privateRoomToggle').checked;
+                // 设置了密码即视为私密房间（不公开到房间列表，仅房号+密码可加入），与界面提示一致
+                const isPrivateRoom = document.getElementById('privateRoomToggle').checked || !!roomPassword;
 
                 // 设置最大玩家数和密码
                 if (roomCodeInput === '') {
                     gameState.multiplayer.maxPlayers = parseInt(document.getElementById('maxPlayers').value);
-                    gameState.multiplayer.roomPassword = roomPassword;
+                    gameState.multiplayer.roomPassword = hashRoomPassword(roomPassword);
                     gameState.multiplayer.isPrivate = isPrivateRoom;
                 }
             
@@ -15262,7 +15358,8 @@ function connectToMultiplayerGame() {
                         maxPlayers: gameState.multiplayer.maxPlayers,
                         roomName: `${gameState.playerName}的房间`,
                         isPrivate: !!gameState.multiplayer.isPrivate,
-                        password: gameState.multiplayer.roomPassword,
+                        // 无密码时 roomPassword 为 ''，这里转成 undefined，避免服务器误报 hasPassword=true
+                        password: gameState.multiplayer.roomPassword || undefined,
                         roomCode: gameState.multiplayer.roomCode // 传递真实 Peer 房间号，保证服务器房间 ID 与 P2P 房间号一致
                     };
                     
@@ -15282,6 +15379,16 @@ function connectToMultiplayerGame() {
                     } else {
                         const error = await response.json();
                         console.error('房间创建请求失败:', error);
+                        if (error && error.code === 'PLAINTEXT_PASSWORD') {
+                            // 服务器检测到明文密码 → 执行版本检测；版本不一致则退出并禁用联机
+                            handlePlaintextPasswordDetected(error.serverVersion);
+                            // 恢复按钮状态并中止本次建房流程
+                            const sb = document.getElementById('multiplayerStartBtn');
+                            if (sb) sb.disabled = false;
+                            const se = document.getElementById('roomStatus');
+                            if (se) se.textContent = '';
+                            return;
+                        }
                     }
                 } catch (err) {
                     console.error('发送房间创建请求时发生错误:', err);
@@ -15294,6 +15401,66 @@ function connectToMultiplayerGame() {
             // 开始多人游戏
             console.log("开始多人游戏")
             startMultiplayerGame();
+        }
+
+        // ===== 房间密码哈希：避免明文在 P2P 通道传输、也避免服务器明文存储 =====
+        // 纯 JS SHA-256（同步、无依赖，兼容 file:// 与 Node），用于房间密码的单向哈希
+        function sha256Hex(message) {
+            function utf8(str) { return unescape(encodeURIComponent(str)); }
+            const K = [
+                0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+                0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+                0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+                0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+                0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+                0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+                0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+                0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+            ];
+            const Hinit = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+            function ror(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
+            const msg = utf8(message);
+            const msgLen = msg.length;
+            const bytes = [];
+            for (let i = 0; i < msgLen; i++) bytes.push(msg.charCodeAt(i) & 0xff);
+            bytes.push(0x80);
+            while (bytes.length % 64 !== 56) bytes.push(0x00);
+            const totalBits = msgLen * 8;
+            const bitHi = Math.floor(totalBits / 0x100000000);
+            const bitLo = totalBits >>> 0;
+            bytes.push((bitHi >>> 24) & 0xff, (bitHi >>> 16) & 0xff, (bitHi >>> 8) & 0xff, bitHi & 0xff,
+                       (bitLo >>> 24) & 0xff, (bitLo >>> 16) & 0xff, (bitLo >>> 8) & 0xff, bitLo & 0xff);
+            const H = Hinit.slice();
+            const w = new Array(64);
+            for (let off = 0; off < bytes.length; off += 64) {
+                for (let i = 0; i < 16; i++) {
+                    w[i] = ((bytes[off + i*4] << 24) | (bytes[off + i*4 + 1] << 16) | (bytes[off + i*4 + 2] << 8) | bytes[off + i*4 + 3]) >>> 0;
+                }
+                for (let i = 16; i < 64; i++) {
+                    const s0 = ror(w[i-15], 7) ^ ror(w[i-15], 18) ^ (w[i-15] >>> 3);
+                    const s1 = ror(w[i-2], 17) ^ ror(w[i-2], 19) ^ (w[i-2] >>> 10);
+                    w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
+                }
+                let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+                for (let i = 0; i < 64; i++) {
+                    const S1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25);
+                    const ch = (e & f) ^ (~e & g);
+                    const t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+                    const S0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22);
+                    const maj = (a & b) ^ (a & c) ^ (b & c);
+                    const t2 = (S0 + maj) | 0;
+                    h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+                }
+                H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+                H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+            }
+            return H.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('');
+        }
+
+        // 带固定 salt 的房间密码哈希；空密码返回空串（保持"无密码=公开"语义）
+        function hashRoomPassword(pwd) {
+            if (!pwd) return '';
+            return sha256Hex('maze_room_pwd_v1:' + pwd);
         }
 
         function connectToHost(hostId) {
@@ -15328,9 +15495,10 @@ function connectToMultiplayerGame() {
                 conn.on('open', () => {
                     console.log('已连接到主机');
                     clearTimeout(connectionTimeout); // 清除超时
-                    // 获取用户选择的颜色和密码
+                    // 获取用户选择的颜色和密码（密码以哈希形式发送，不传明文）
                     const playerColor = document.getElementById('playerColor').value;
                     const roomPassword = document.getElementById('roomPassword').value.trim();
+                    const roomPasswordHash = hashRoomPassword(roomPassword);
                     
                     // 发送加入请求
                     conn.send({
@@ -15340,7 +15508,7 @@ function connectToMultiplayerGame() {
                             name: gameState.playerName,
                             color: playerColor
                         },
-                        password: roomPassword
+                        password: roomPasswordHash
                     });
                     
                     updateConnectionStatus('connected');
@@ -16098,12 +16266,6 @@ function handleMultiplayerData(data, peerId) {
                     showScreen('multiplayerSetup');
                     alert('密码错误，无法加入房间');
                     break;
-                case 'door-open':
-                        gameState.multiplayer.maze[data.y][data.x] = 0;
-                        document.getElementById('unlockTimer').classList.add('hidden');
-                        gameState.multiplayer.isUnlocking = false;
-                        drawMultiplayerMaze();
-                    break;  
                 case 'player-join':
                     // 新玩家加入
                     console.log(data);
@@ -16141,13 +16303,6 @@ function handleMultiplayerData(data, peerId) {
                     }
                     drawMultiplayerMaze();
                     break;
-                case 'key-pickup':
-                    if (gameState.multiplayer.players[data.playerId]) {
-                        gameState.multiplayer.players[data.playerId].hasKey = true;
-                        delete gameState.multiplayer.keyPosition;
-                        drawMultiplayerMaze();
-                    }
-                    break;
                 case 'game-state':
                         // 收到游戏状态（客户端）
                         gameState.multiplayer.maze = data.maze;
@@ -16176,13 +16331,6 @@ function handleMultiplayerData(data, peerId) {
                         startMultiplayerGame();
                         break;
                     
-                case 'enemy-move':
-                    // 更新敌人位置
-                    if (data.enemies) {
-                        gameState.multiplayer.movingEnemies = data.enemies;
-                        drawMultiplayerMaze();
-                    }
-                    break;
                 case 'player-move':
                     if (peerId === gameState.multiplayer.currentPlayerId) {
                         break;
@@ -16218,15 +16366,18 @@ function handleMultiplayerData(data, peerId) {
                         
                 case 'door-open':
                         gameState.multiplayer.maze[data.y][data.x] = 0;
+                        const _ut = document.getElementById('unlockTimer');
+                        if (_ut) _ut.classList.add('hidden');
+                        gameState.multiplayer.isUnlocking = false;
                         drawMultiplayerMaze();
-                        break;
+                    break;
                         
                 case 'enemy-move':
-                        if (gameState.multiplayer.movingEnemies) {
+                        if (data.enemies) {
                             gameState.multiplayer.movingEnemies = data.enemies;
                             drawMultiplayerMaze();
                         }
-                        break;    
+                    break;    
                 case 'teleport-request':
                     // 处理传送请求（只有主机会收到）
                     console.log(data);
@@ -16513,6 +16664,8 @@ function broadcast(data, excludePlayerId = null) {
         function onPeerDisconnected(peerId) {
             if (!peerId) return;
             const player = gameState.multiplayer.players[peerId];
+            // 玩家从未成功加入（例如密码错误被房主拒绝），连接关闭不应提示"退出"
+            if (!player) return;
             const name = (player && player.name) ? player.name : '玩家';
             const isHostLeft = !!(player && player.isHost);
             // 自己断开不提示
@@ -16571,14 +16724,28 @@ function broadcast(data, excludePlayerId = null) {
             window.addEventListener('keydown', handleMultiplayerKeyDown);
 
             function gameLoop() {
-                // 仅主机驱动敌人移动并广播，避免客户端重复移动造成抖动
-                if (gameState.multiplayer.isHost) {
-                    updateMultiplayerGame();
+                try {
+                    // 仅主机驱动敌人移动并广播，避免客户端重复移动造成抖动
+                    if (gameState.multiplayer.isHost) {
+                        updateMultiplayerGame();
+                    }
+                    EventSystem.update();
+                } catch (e) {
+                    console.error('多人游戏循环异常（已恢复）:', e);
                 }
-                EventSystem.update();
+                // 即使某帧抛错也保证循环继续，避免敌人/渲染冻结
                 requestAnimationFrame(gameLoop);
             }
-            
+
+            // 房主：用独立计时器驱动敌人移动，避免依赖 rAF（标签页失焦会被节流）
+            // 与 rAF 互为备份，敌人移动本身有速度节流，不会因此加速
+            if (gameState.multiplayer.isHost) {
+                clearInterval(gameState.multiplayer.enemyInterval);
+                gameState.multiplayer.enemyInterval = setInterval(() => {
+                    try { updateMultiplayerGame(); } catch (e) { console.error('敌人移动异常:', e); }
+                }, 200);
+            }
+
             // 启动游戏循环
             gameLoop();
             // 应用UI设置
@@ -16697,7 +16864,7 @@ function handleMultiplayerMoveLogic(dx, dy) {
             startMultiplayerUnlockDoor();
             return; // 开门倒计时开始，本次移动结束
         } else {
-            alert("你需要钥匙才能打开这扇门！");
+            showNotification('🔑 你需要钥匙才能打开这扇门！');
             return; // 没有钥匙，开门失败，本次移动结束
         }
     }
@@ -16711,6 +16878,14 @@ function handleMultiplayerMoveLogic(dx, dy) {
     gameState.multiplayer.moveCount++;
     document.getElementById('multiplayerMoveCount').textContent = `移动: ${gameState.multiplayer.moveCount}`;
     
+    // 先校验出口/门：若到达出口（或绕开门被挡回），在此处理并直接返回，
+    // 避免先把出口坐标广播出去导致对方误判通关
+    if (checkPlayerAtExit(currentPlayer)) {
+        drawMultiplayerMaze();
+        updatePlayerList();
+        return;
+    }
+
     // 广播移动
     broadcast({
         type: 'player-move',
@@ -16718,15 +16893,12 @@ function handleMultiplayerMoveLogic(dx, dy) {
         x: currentPlayer.x,
         y: currentPlayer.y
     });
-    
+
     console.log('移动!');
 
     // 6. 绘制UI和检查出口
     drawMultiplayerMaze();
     updatePlayerList();
-    
-    // 检查是否到达出口
-    checkPlayerAtExit(currentPlayer);
 }
 
 /**
@@ -16736,7 +16908,44 @@ function handleMultiplayerMoveLogic(dx, dy) {
 function checkPlayerAtExit(player) {
     const exit = gameState.multiplayer.exit;
     if (player.x === exit.x && player.y === exit.y) {
-        // 玩家到达出口
+        // 若本局有门（螺旋迷宫），必须先开门才能通关，防止绕开门直达出口
+        if (gameState.multiplayer.doorPosition &&
+            gameState.multiplayer.maze[gameState.multiplayer.doorPosition.y][gameState.multiplayer.doorPosition.x] !== 0) {
+            // 门未打开：提示需要钥匙，并把玩家推回门前的空地
+            alert("你需要找到钥匙并打开门才能通关！");
+            const directions = [
+                {dx: 1, dy: 0}, {dx: -1, dy: 0},
+                {dx: 0, dy: 1}, {dx: 0, dy: -1}
+            ];
+            let moved = false;
+            for (const dir of directions) {
+                const nx = exit.x + dir.dx;
+                const ny = exit.y + dir.dy;
+                if (nx >= 0 && nx < gameState.multiplayer.maze[0].length &&
+                    ny >= 0 && ny < gameState.multiplayer.maze.length &&
+                    gameState.multiplayer.maze[ny][nx] === 0) {
+                    player.x = nx;
+                    player.y = ny;
+                    moved = true;
+                    // 广播被推回的位置
+                    if (gameState.multiplayer.isHost) {
+                        broadcast({ type: 'player-move', playerId: player.id, x: player.x, y: player.y });
+                    } else {
+                        // 非房主把自己推回的位置上报给房主
+                        const conn = Object.values(gameState.multiplayer.connections)[0];
+                        if (conn && conn.open) conn.send({ type: 'player-move', playerId: player.id, x: player.x, y: player.y });
+                    }
+                    break;
+                }
+            }
+            if (!moved) {
+                player.x = 1; player.y = 1;
+            }
+            drawMultiplayerMaze();
+            return true;
+        }
+
+        // 玩家到达出口（门已开或本局无门）
         player.reachedExit = true;
         console.log(`${player.name} 到达了出口！`);
 
@@ -16748,7 +16957,9 @@ function checkPlayerAtExit(player) {
 
         // 检查是否所有人都到了
         checkAllPlayersReachedExit();
+        return true;
     }
+    return false;
 }
 
         function initMultiplayerCanvas() {
@@ -16872,6 +17083,8 @@ function checkPlayerAtExit(player) {
             
             let newX = player.x;
             let newY = player.y;
+            const startX = player.x;  // 移动前坐标，无钥匙时用于推回门前
+            const startY = player.y;
             
             switch(e.key) {
                 case 'ArrowUp': newY--; break;
@@ -16889,6 +17102,14 @@ function checkPlayerAtExit(player) {
                 
                 // 检查是否是墙
                 if (cellValue === 1) return;
+                
+                // 检查是否是门：未持钥匙不能通过（在广播前推回，避免其它玩家看到错位）
+                if (cellValue === 9 && !gameState.multiplayer.hasKey) {
+                    showNotification('🔑 你需要钥匙才能打开这扇门！');
+                    drawMultiplayerMaze();
+                    updatePlayerList();
+                    return;
+                }
                 
                 // 检查是否是陷阱
                 if (cellValue === 2) {
@@ -16973,19 +17194,8 @@ function checkPlayerAtExit(player) {
                     y: player.y
                 });
                 drawMultiplayerMaze();
-                // 检查是否到达出口
-                if (player.x === gameState.multiplayer.exit.x && player.y === gameState.multiplayer.exit.y) {
-                    player.reachedExit = true;
-                    
-                    // 广播到达出口
-                    broadcast({
-                        type: 'player-reached-exit',
-                        playerId: gameState.multiplayer.currentPlayerId
-                    });
-                    
-                    // 检查是否所有玩家都到达出口
-                    checkAllPlayersReachedExit();
-                }
+                // 检查是否到达出口（带门校验：螺旋迷宫需先拿钥匙开门才能通关）
+                checkPlayerAtExit(player);
                 drawMultiplayerMaze();
                 if (cellValue === 8) {
                     gameState.multiplayer.hasKey = true;
@@ -17000,20 +17210,12 @@ function checkPlayerAtExit(player) {
                     });
                 }
                 
-                // 检查是否是门
-                if (cellValue === 9) {
-                        if (gameState.multiplayer.hasKey) {
-                            // 开始开门倒计时
-                            startMultiplayerUnlockDoor();
-                            
-                        } else {
-                            // 没有钥匙，不能通过
-                            alert("你需要钥匙才能打开这扇门！");
-                            
-                        }
-                drawMultiplayerMaze();
-                updatePlayerList();
-            }
+                // 检查是否是门（已持钥匙 → 开始开门倒计时）
+                if (cellValue === 9 && gameState.multiplayer.hasKey) {
+                    startMultiplayerUnlockDoor();
+                    drawMultiplayerMaze();
+                    updatePlayerList();
+                }
         }
     }
 function startUnlockDoor() {
@@ -17056,7 +17258,7 @@ function startUnlockDoor() {
             singlePlayerGame.isUnlocking = false;
             
             drawSinglePlayerMaze();
-            alert("门已打开！现在你可以进入出口了。");
+            showNotification('🔓 门已打开！现在你可以进入出口了。');
         }
     }, 1000);
 }
@@ -17094,7 +17296,7 @@ function startMultiplayerUnlockDoor() {
             }
             
             drawMultiplayerMaze();
-            alert("门已打开！");
+            showNotification('🔓 门已打开！');
         }
     }, 1000);
 }
@@ -17150,6 +17352,7 @@ window.addEventListener('load', initializeNewFeatures);
             gameState.multiplayer.players = {};
             gameState.multiplayer.protectedPlayers = {};
             clearInterval(gameState.multiplayer.timerInterval);
+            clearInterval(gameState.multiplayer.enemyInterval);
             window.removeEventListener('keydown', handleMultiplayerKeyDown);
             showScreen('mainMenu');
             
@@ -18131,6 +18334,10 @@ document.addEventListener('touchstart', function(e) {
     // 检查点击的是否是目标按钮
     if (e.target.id === 'multiplayerBtn' || e.target.parentElement.id === 'multiplayerBtn') {
         e.preventDefault();
+        if (gameState.multiplayerDisabled) {
+            showMultiplayerDisabledModal(gameState.multiplayerDisabledReason || '多人联机功能已被禁用。');
+            return;
+        }
         showScreen('multiplayerSetup');
     }
     
