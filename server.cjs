@@ -57,7 +57,7 @@ const userLevels = new Map(); // 用户等级（按 userId 存储）
 // ===== 新增：管理后台数据（用户访问控制 / 功能控制 / 在线玩家映射 / 热门迷宫） =====
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
-const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool }，管理员封禁状态
+const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool }，管理员封禁状态
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
@@ -372,12 +372,24 @@ function getAllUsersList() {
             online: true
         });
     }
-    // 2. 兜底：room.players 中未在 onlinePlayers 列出的（兼容旧逻辑）
+    // 2. 兜底：room.players 中未在在线表出现的，按「名字」合并进已有在线条目（避免 peerId 产生重复条目）
     for (const room of rooms.values()) {
         if (!room.players) continue;
         for (const player of room.players.values()) {
             if (!player || !player.id) continue;
             if (userMap.has(player.id)) continue;
+            // 尝试按名字找到已有的在线条目，把房间号合并进去
+            let merged = false;
+            for (const u of userMap.values()) {
+                if (u.username === (player.name || '未知用户') && !u.roomId) {
+                    u.roomId = room.id;
+                    u.roomName = room.name;
+                    merged = true;
+                    break;
+                }
+            }
+            if (merged) continue;
+            // 实在找不到对应在线条目才新增（极少见）
             userMap.set(player.id, {
                 id: player.id,
                 username: player.name || '未知用户',
@@ -1067,6 +1079,7 @@ io.on('connection', (socket) => {
             const { roomId, player } = data || {};
             const room = rooms.get(roomId);
             if (!room || !player || !player.id) return;
+            // room.players 仍以 peerId 为键（P2P 逻辑需要）
             room.players.set(player.id, {
                 id: player.id,
                 name: player.name || '玩家',
@@ -1075,18 +1088,22 @@ io.on('connection', (socket) => {
                 isHost: false,
                 joinedAt: Date.now()
             });
-            onlineSockets.set(player.id, socket.id);
-            // 同步到在线玩家表（带上房间号），便于管理后台展示所在房间
-            onlinePlayers.set(player.id, {
-                id: player.id,
-                name: player.name || '玩家',
+            // 在线表统一用 clientId 作为键（与 player-online 一致），避免同一玩家出现两条（clientId + peerId）
+            const cid = player.clientId || player.id;
+            const prev = onlinePlayers.get(cid) || {};
+            onlinePlayers.set(cid, {
+                id: cid,
+                name: (player.name && String(player.name).trim()) || prev.name || '玩家',
                 socketId: socket.id,
                 color: player.color || '#ffffff',
-                roomId: roomId,
-                joinedAt: Date.now()
+                roomId: roomId || prev.roomId || null,
+                joinedAt: prev.joinedAt || Date.now()
             });
+            onlineSockets.set(cid, socket.id);
+            // 清除可能残留的旧 peerId 条目，防止管理后台重复显示
+            if (cid !== player.id) onlinePlayers.delete(player.id);
             room.lastActivity = Date.now();
-            console.log(`[MP] 玩家 ${player.name} (${player.id}) 已注册到房间 ${roomId}，当前在线 ${room.players.size} 人`);
+            console.log(`[MP] 玩家 ${player.name} (${cid}) 已注册到房间 ${roomId}，当前在线 ${room.players.size} 人`);
         } catch (e) {
             console.error('[MP] mp-register 处理出错:', e.message);
         }
@@ -1094,14 +1111,15 @@ io.on('connection', (socket) => {
 
     socket.on('mp-unregister', (data) => {
         try {
-            const { roomId, playerId } = data || {};
+            const { roomId, playerId, clientId } = data || {};
             const room = rooms.get(roomId);
             if (room && playerId) {
                 const p = room.players.get(playerId);
                 if (p && p.socketId === socket.id) room.players.delete(playerId);
             }
-            // 玩家离开房间但仍在线，更新在线表的房间号为 null（不再删 onlinePlayers/onlineSockets）
-            const op = onlinePlayers.get(playerId);
+            // 玩家离开房间但仍在线：按 clientId 清除在线表的房间号（不再删 onlinePlayers/onlineSockets）
+            const cid = clientId || playerId;
+            const op = onlinePlayers.get(cid);
             if (op && op.socketId === socket.id) op.roomId = null;
             if (room) room.lastActivity = Date.now();
         } catch (e) {
@@ -1304,22 +1322,41 @@ app.post('/api/admin/function-control', requireAdminAuth, (req, res) => {
 
 // ===== 新增：管理员封禁（按用户禁用多人/单人游戏） =====
 // 封禁按 clientId（即在线用户列表中的 id）生效；客户端定时 REST 拉取自身封禁状态并应用。
+// 兼容管理员填「名字」或「名字 (ID: xxx)」整段：自动解析为对应的 clientId 再存储。
+function resolveUserId(raw) {
+    if (!raw) return raw;
+    const s = String(raw).trim();
+    // 1) 已是 clientId（在线表或已有封禁记录）直接返回
+    if (onlinePlayers.has(s) || userBans.has(s)) return s;
+    // 2) 形如 "名字 (ID: xxx)" 或 "ID: xxx" —— 提取括号内的 id
+    const m = s.match(/ID:\s*([^\s\)]+)/i);
+    if (m && onlinePlayers.has(m[1])) return m[1];
+    // 3) 按名字精确匹配在线玩家，取其 clientId（同名取第一个）
+    for (const [cid, p] of onlinePlayers) {
+        if (p && p.name === s) return cid;
+    }
+    // 4) 都匹配不到，原样返回（交由后续逻辑按原值处理）
+    return s;
+}
 app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
     try {
-        const { userId, type, banned } = req.body || {};
-        if (!userId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
-        if (type !== 'multiplayer' && type !== 'single') return res.status(400).json({ success: false, message: '类型无效（应为 multiplayer 或 single）' });
-        const ban = userBans.get(userId) || { multiplayer: false, single: false };
+        const rawId = (req.body && req.body.userId) || '';
+        if (!rawId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
+        const userId = resolveUserId(rawId);
+        const { type, banned } = req.body || {};
+        if (type !== 'multiplayer' && type !== 'single' && type !== 'puzzle') return res.status(400).json({ success: false, message: '类型无效（应为 multiplayer、single 或 puzzle）' });
+        const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false };
         ban[type] = !!banned;
         userBans.set(userId, ban);
-        console.log(`[Admin] 用户 ${userId} 的${type === 'multiplayer' ? '多人游戏' : '单人游戏'}已${banned ? '封禁' : '解封'}`);
+        const banLabel = type === 'multiplayer' ? '多人游戏' : (type === 'single' ? '单人游戏' : '解密游戏');
+        console.log(`[Admin] 用户 ${userId} 的${banLabel}已${banned ? '封禁' : '解封'}`);
         // 若该用户当前有实时 socket，立即推送最新封禁状态（REST 注册的玩家无 socket，由客户端定时拉取兜底）
         const socketId = onlineSockets.get(userId);
         if (socketId && socketId !== 'rest') {
             const sock = io.sockets.sockets.get(socketId);
-            if (sock) sock.emit('ban-update', { multiplayer: !!ban.multiplayer, single: !!ban.single });
+            if (sock) sock.emit('ban-update', { multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle });
         }
-        res.json({ success: true, message: `已${banned ? '封禁' : '解封'}用户 ${userId} 的${type === 'multiplayer' ? '多人游戏' : '单人游戏'}`, ban });
+        res.json({ success: true, message: `已${banned ? '封禁' : '解封'}用户 ${userId} 的${banLabel}`, ban });
     } catch (error) {
         console.error('[API] 设置封禁失败:', error);
         res.status(500).json({ success: false, message: '设置失败' });
@@ -1330,11 +1367,11 @@ app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
 app.get('/api/my-ban', (req, res) => {
     try {
         const id = req.query.id;
-        if (!id) return res.json({ success: true, multiplayer: false, single: false });
-        const ban = userBans.get(id) || { multiplayer: false, single: false };
-        res.json({ success: true, multiplayer: !!ban.multiplayer, single: !!ban.single });
+        if (!id) return res.json({ success: true, multiplayer: false, single: false, puzzle: false });
+        const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false };
+        res.json({ success: true, multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle });
     } catch (e) {
-        res.json({ success: true, multiplayer: false, single: false });
+        res.json({ success: true, multiplayer: false, single: false, puzzle: false });
     }
 });
 
