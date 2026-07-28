@@ -403,6 +403,46 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
     }
 });
 
+// API: 玩家上线登记（开放接口，供游戏客户端调用）
+// 使用 REST 而非 socket.io：实测 onrender 代理下 socket.io 的 polling 发送会丢包、
+// websocket 又被部分浏览器/网络拦截，故改用普通 HTTPS POST 上报在线状态，最稳。
+// 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
+app.post('/api/player-online', (req, res) => {
+    try {
+        const { id, name, coins, level } = req.body || {};
+        if (!id) return res.json({ success: false, message: '缺少 id' });
+        const existing = onlinePlayers.get(id) || {};
+        onlinePlayers.set(id, {
+            id: id,
+            name: (name && String(name).trim()) || existing.name || '玩家',
+            socketId: existing.socketId || null,   // 保留 socket 通道写入的连接标识
+            roomId: existing.roomId || null,
+            joinedAt: existing.joinedAt || Date.now()
+        });
+        onlineSockets.set(id, 'rest');
+        console.log(`[Online] 玩家 ${name} (${id}) 上线(REST)，当前在线 ${onlinePlayers.size} 人`);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
+
+// API: 玩家下线（开放接口）
+app.post('/api/player-offline', (req, res) => {
+    try {
+        const { id } = req.body || {};
+        if (id) {
+            const p = onlinePlayers.get(id);
+            // 仅当该玩家不是经 socket 实时连着的（socketId 为 null 或标记 'rest'）才删除，避免误删 socket 在线者
+            if (p && (!p.socketId || p.socketId === 'rest' || p.socketId === null)) onlinePlayers.delete(id);
+            if (onlineSockets.get(id) === 'rest') onlineSockets.delete(id);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
+
 // API: 为用户增减金币（管理员专用）
 app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
     try {
