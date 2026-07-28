@@ -4183,8 +4183,11 @@ async function autoConnectToServer() {
             console.log('管理员登录成功:', adminSession);
         }
 
-        // 版本检查通过即建立实时通知 socket，接收管理员弹窗等广播
-        connectNotificationSocket();
+        // 版本更新检测：客户端版本低于服务器版本时弹窗提示（不影响正常游戏）
+        const latestVersion = data.serverVersion || data.version;
+        if (latestVersion && isVersionLower(CLIENT_VERSION, latestVersion)) {
+            showUpdateAvailableModal(CLIENT_VERSION, latestVersion);
+        }
 
     } catch (error) {
         console.error('自动连接服务器失败:', error);
@@ -4197,6 +4200,7 @@ async function autoConnectToServer() {
 // 导致服务器广播的 admin-popup / room-kicked 事件无人接收。这里建立一条
 // 独立的通知 socket（与多人游戏的 PeerJS 连接互不干扰，单人模式也能收）。
 let notificationSocket = null;
+let onlineHeartbeat = null; // 在线状态心跳定时器，避免被服务器/空闲超时清理
 
 function showAdminPopup(title, message) {
     // 已存在则先移除，避免重复堆叠
@@ -4245,20 +4249,51 @@ function connectNotificationSocket() {
         console.log('[通知] 服务器未配置，跳过通知 socket 连接');
         return;
     }
+    // socket.io 客户端未加载（如 cdnjs 被墙）：改从游戏服务器自身加载自带客户端（版本匹配、同源可达）
+    if (typeof io === 'undefined') {
+        console.warn('[通知] socket.io 客户端未加载，尝试从游戏服务器加载...');
+        const src = GAME_SERVER_URL.replace(/\/+$/, '') + '/socket.io/socket.io.js';
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = () => { console.log('[通知] 已从游戏服务器加载 socket.io 客户端，开始连接'); connectNotificationSocket(); };
+        s.onerror = () => {
+            console.error('[通知] 从游戏服务器加载 socket.io 失败，尝试 CDN 兜底');
+            const s2 = document.createElement('script');
+            s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js';
+            s2.onload = () => { console.log('[通知] CDN 兜底加载成功，开始连接'); connectNotificationSocket(); };
+            s2.onerror = () => console.error('[通知] socket.io 客户端加载失败（游戏服务器与 CDN 均不可用）');
+            document.head.appendChild(s2);
+        };
+        document.head.appendChild(s);
+        return;
+    }
     try {
+        console.log('[通知] 正在建立实时通知 socket 连接:', GAME_SERVER_URL);
         notificationSocket = io(GAME_SERVER_URL, {
-            transports: ['websocket', 'polling'],
+            // 仅用 polling：本 socket 现在只负责"接收"服务器推送（管理员弹窗/清空/远程指令等），
+            // 发送类操作（玩家上线/下线）已改用 REST POST，故无需 websocket。
+            // 实测 onrender 代理对 socket.io 的 polling 发送会丢包、websocket 又被部分浏览器拦截，
+            // 因此统一走 polling 接收，避免 wss 握手报错。
+            transports: ['polling'],
             reconnection: true,
             reconnectionDelay: 3000,
             reconnectionAttempts: Infinity
         });
         notificationSocket.on('connect', () => {
             console.log('[通知] 实时通知 socket 已连接');
-            // socket 连接建立后，若已取名则立即注册在线（管理后台可见）
-            if (gameState.playerName) registerPlayerOnline();
+            // socket 连接建立后，立即注册在线（内部已判断 playerName 是否存在）
+            registerPlayerOnline();
+            // 心跳：每 15 秒刷新一次在线状态，避免被 onrender 空闲超时 / 连接抖动清理
+            if (onlineHeartbeat) clearInterval(onlineHeartbeat);
+            onlineHeartbeat = setInterval(() => {
+                if (notificationSocket && notificationSocket.connected) registerPlayerOnline();
+            }, 15000);
         });
         notificationSocket.on('connect_error', (err) => console.warn('[通知] socket 连接失败(可忽略，会重试):', err && err.message));
-        notificationSocket.on('disconnect', (reason) => console.log('[通知] socket 断开:', reason));
+        notificationSocket.on('disconnect', (reason) => {
+            console.log('[通知] socket 断开:', reason);
+            if (onlineHeartbeat) { clearInterval(onlineHeartbeat); onlineHeartbeat = null; }
+        });
 
         // 管理员发送的全局弹窗
         notificationSocket.on('admin-popup', (data) => {
@@ -4344,17 +4379,93 @@ function unregisterSelfWithServer() {
 }
 
 // 进入游戏即向服务器注册"在线"（无需进房间，供管理后台 /api/users 立即看到）
-// 使用稳定的 clientId 作为玩家标识，与多人 peerId 解耦。
-function registerPlayerOnline() {
-    if (!notificationSocket || !notificationSocket.connected) return;
-    if (!gameState.playerName) return;
-    notificationSocket.emit('player-online', { id: gameState.clientId, name: gameState.playerName });
+// 关键：使用 REST POST 上报（普通 HTTPS 请求，onrender 等代理下最稳，不依赖 socket.io 传输层，
+//       因为实测 socket.io 的 polling 发送在 onrender 代理下会丢包、websocket 又被部分浏览器/网络挡掉）；
+//       socket.io 仅作为冗余通道（环境支持 websocket 时双写）。clientId 作为稳定标识，与多人 peerId 解耦。
+async function registerPlayerOnline() {
+    if (!gameState.playerName || !gameState.clientId) return;
+    const payload = {
+        id: gameState.clientId,
+        name: gameState.playerName,
+        coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0,
+        level: (typeof gameState.level !== 'undefined') ? gameState.level : 1
+    };
+    // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
+    if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
+        try {
+            await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-online', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        } catch (e) { /* 网络失败可忽略，下次心跳或重连会重试 */ }
+    }
+    // 2) socket 冗余（websocket 可用时双写，便于实时）
+    if (notificationSocket && notificationSocket.connected) {
+        notificationSocket.emit('player-online', payload);
+    }
     console.log('[通知] 已注册玩家在线:', gameState.playerName, '(', gameState.clientId, ')');
 }
-function unregisterPlayerOnline() {
-    if (!notificationSocket || !notificationSocket.connected) return;
-    notificationSocket.emit('player-offline', { id: gameState.clientId });
+async function unregisterPlayerOnline() {
+    if (!gameState.clientId) return;
+    const payload = { id: gameState.clientId };
+    if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
+        try {
+            await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-offline', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        } catch (e) { /* 忽略 */ }
+    }
+    if (notificationSocket && notificationSocket.connected) {
+        notificationSocket.emit('player-offline', payload);
+    }
     console.log('[通知] 已通知服务器玩家下线:', gameState.clientId);
+}
+
+// 版本比较：a < b 返回 true（按点分数字逐段比较，如 1.15 < 1.16）
+function isVersionLower(a, b) {
+    const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const x = pa[i] || 0, y = pb[i] || 0;
+        if (x < y) return true;
+        if (x > y) return false;
+    }
+    return false;
+}
+
+// 检测到新版本时弹窗提示（仅告知，不影响游戏正常进行）
+function showUpdateAvailableModal(currentVersion, latestVersion) {
+    const existing = document.getElementById('updateAvailableModal');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'updateAvailableModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:20000;display:flex;justify-content:center;align-items:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(35,35,35,0.98);border:2px solid #ffb300;border-radius:15px;padding:30px;max-width:440px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:50px;margin-bottom:12px;';
+    icon.textContent = '🆕';
+    box.appendChild(icon);
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:#ffb300;margin:0 0 14px 0;font-size:22px;';
+    h.textContent = '检测到游戏更新';
+    box.appendChild(h);
+    const p = document.createElement('p');
+    p.style.cssText = 'color:#e0e0e0;margin:0 0 22px 0;font-size:16px;line-height:1.7;';
+    p.textContent = '检测到游戏更新，当前版本 ' + currentVersion + '，最新版本 ' + latestVersion + '，如需更新请联系管理员。';
+    box.appendChild(p);
+    const btn = document.createElement('button');
+    btn.textContent = '我知道了';
+    btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#ffb300,#f57c00);color:#fff;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    box.appendChild(btn);
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
 }
 
 // 玩家身份初始化：若已存名字则直接注册在线；否则弹窗要求取名
@@ -4764,13 +4875,21 @@ function showSinglePlayerDisabledModal(reason) {
 let teleportSelectionMode = false;
 const modal = document.createElement('div');
 window.addEventListener('load', function() {
-    // 页面加载时自动连接服务器
+    // 页面加载时先建立实时通知 socket（与版本检测解耦，确保玩家一进游戏就注册在线）
+    connectNotificationSocket();
+    // 自动连接服务器（版本检测 + 更新提示 + 管理员登录）
     autoConnectToServer();
     // 初始化玩家身份：已存名字则直接注册在线，否则弹窗要求取名
     initPlayerIdentity();
     // 离开页面时通知服务器下线（socket.io 也会在断开时清理）
     window.addEventListener('beforeunload', function() {
         try { unregisterPlayerOnline(); } catch (e) {}
+    });
+    // 切回标签页时若已连接则重新注册在线（防止隐藏期间连接被静默断开后不再出现）
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden && notificationSocket && notificationSocket.connected) {
+            try { registerPlayerOnline(); } catch (e) {}
+        }
     });
 
     const levelContainer = document.getElementById('levelContainer');
