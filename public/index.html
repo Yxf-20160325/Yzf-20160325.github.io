@@ -220,13 +220,65 @@
             box-shadow: 0 0 30px rgba(0,0,0,0.7);
         }
         
-        /* 多人游戏画布 */
+        /* 多人游戏界面：作为画布视口，但不显示任何边框/背景，画面直接铺在背景上 */
+        #multiplayerGame {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            /* 直接使用视口高度，避免依赖父级 height:100%（body 使用 min-height:100vh，
+               百分比高度无法解析会回退为 auto，叠加 canvas 为 absolute 不撑高父容器时，
+               父容器高度坍塌、overflow:hidden 会把整个 canvas 裁掉 → 表现为“没有 canvas” */
+            height: 100vh;
+            height: 100dvh; /* 移动端更准确（避开地址栏） */
+            touch-action: none; /* 由 JS 处理拖拽平移 */
+        }
+
+        /* 多人游戏画布：直接画在背景上，无边框/圆角/阴影，可超出屏幕通过拖拽滑动查看 */
         #multiplayerCanvas {
-            display: block;
-            margin: 8px auto;
+            position: absolute;
+            top: 10px;
+            left: 50%;
             background-color: #000000;
-            border-radius: 10px;
-            box-shadow: 0 0 30px rgba(0,0,0,0.7);
+            display: block;
+            will-change: transform;
+        }
+
+        /* 多人游戏：玩家退出 / 上线等轻量通知 toast（不阻塞操作） */
+        #mpToastContainer {
+            position: fixed;
+            top: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 15000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            pointer-events: none;
+            width: max-content;
+            max-width: 90vw;
+        }
+        .mp-toast {
+            background: rgba(20, 20, 20, 0.92);
+            color: #fff;
+            border: 1px solid rgba(255, 183, 77, 0.7);
+            border-radius: 22px;
+            padding: 10px 20px;
+            font-size: 15px;
+            font-weight: bold;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+            animation: mp-toast-in 0.25s ease-out, mp-toast-out 0.4s ease-in 2.6s forwards;
+            white-space: nowrap;
+            max-width: 90vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        @keyframes mp-toast-in {
+            from { opacity: 0; transform: translateY(-12px) scale(0.96); }
+            to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes mp-toast-out {
+            to { opacity: 0; transform: translateY(-12px) scale(0.96); }
         }
         
         /* 单人游戏容器：底部留出控制栏空间 */
@@ -347,16 +399,36 @@
         /* 多人游戏设置样式 */
         .multiplayer-setup {
             position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(0, 0, 0, 0.95);
-            padding: 40px;
-            border-radius: 15px;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.92);
+            padding: 40px 20px;
             text-align: center;
-            width: 400px;
-            box-shadow: 0 0 30px rgba(76, 175, 80, 0.5);
-            border: 2px solid #4CAF50;
+            box-sizing: border-box;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            /* 直接铺满背景，无边框/圆角/阴影 */
+            border: none;
+            border-radius: 0;
+            box-shadow: none;
+        }
+
+        /* 内部内容限制最大宽度，避免文字拉太宽，但在大屏上看着更大 */
+        .multiplayer-setup > * {
+            width: 100%;
+            max-width: 520px;
+        }
+
+        .multiplayer-setup h2 {
+            flex-shrink: 0;
         }
         
         .multiplayer-setup h2 {
@@ -832,6 +904,136 @@
         
         .console-hidden {
             display: none;
+        }
+
+        /* 调试信息按钮与面板（开发者模式） */
+        .debug-info-btn {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 9999;
+            padding: 8px 14px;
+            background: rgba(0, 0, 0, 0.75);
+            color: #4CAF50;
+            border: 1px solid #4CAF50;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            font-family: monospace;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .debug-info-btn:hover {
+            background: rgba(0, 0, 0, 0.92);
+        }
+
+        .debug-panel {
+            position: fixed;
+            top: 52px;
+            right: 10px;
+            width: 330px;
+            max-width: 92vw;
+            max-height: 82vh;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.88);
+            color: #c8e6c9;
+            border: 1px solid #4CAF50;
+            border-radius: 8px;
+            z-index: 9998;
+            font-family: monospace;
+            font-size: 13px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+        }
+        .debug-panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            border-bottom: 1px solid #4CAF50;
+            color: #4CAF50;
+            font-weight: bold;
+            position: sticky;
+            top: 0;
+            background: rgba(0, 0, 0, 0.95);
+        }
+        .debug-panel-close {
+            background: transparent;
+            border: none;
+            color: #4CAF50;
+            font-size: 20px;
+            cursor: pointer;
+            line-height: 1;
+            padding: 0 4px;
+        }
+        .debug-panel-content {
+            padding: 10px 12px;
+        }
+        .debug-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 2px 0;
+            border-bottom: 1px solid rgba(76, 175, 80, 0.15);
+        }
+        .debug-row .k {
+            color: #80cbc4;
+            flex-shrink: 0;
+        }
+        .debug-row .v {
+            color: #fff;
+            text-align: right;
+            word-break: break-all;
+        }
+        .debug-section {
+            margin-top: 8px;
+            color: #ffb74d;
+            font-weight: bold;
+            border-top: 1px dashed rgba(255, 183, 77, 0.4);
+            padding-top: 4px;
+        }
+        .debug-bool {
+            cursor: pointer;
+            padding: 1px 9px;
+            border-radius: 4px;
+            font-weight: bold;
+            border: 1px solid;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .debug-bool.on {
+            color: #fff;
+            background: #2e7d32;
+            border-color: #4CAF50;
+        }
+        .debug-bool.off {
+            color: #ff8a80;
+            background: rgba(244, 67, 54, 0.18);
+            border-color: #f44336;
+        }
+        .debug-bool:hover {
+            filter: brightness(1.25);
+        }
+        .debug-num {
+            width: 92px;
+            max-width: 45vw;
+            background: rgba(0, 0, 0, 0.45);
+            border: 1px solid #4CAF50;
+            color: #fff;
+            border-radius: 4px;
+            padding: 1px 5px;
+            font: inherit;
+            font-size: 12px;
+            text-align: right;
+            -moz-appearance: textfield;
+        }
+        .debug-num::-webkit-outer-spin-button,
+        .debug-num::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        .debug-num:focus {
+            outline: none;
+            border-color: #ffb74d;
+            box-shadow: 0 0 0 1px rgba(255, 183, 77, 0.5);
         }
         
         /* 控制台提示 */
@@ -3375,6 +3577,16 @@
                         <option value="8">8人</option>
                     </select>
                 </div>
+                <div class="setting-row">
+                    <label for="privateRoomToggle">
+                        <input type="checkbox" id="privateRoomToggle"> 私密房间
+                    </label>
+                    <span style="font-size: 12px; color: #aaa; margin-left: 8px;">(不在房间列表公开，需房号+密码加入)</span>
+                </div>
+                <div class="setting-row" id="passwordRow">
+                    <label for="roomPassword">房间密码:</label>
+                    <input type="password" id="roomPassword" class="setup-input" placeholder="可选">
+                </div>
             </div>
             <div id="roomStatus" style="margin: 10px 0; color: #4CAF50;"></div>
             <button class="menu-button" onclick="connectToMultiplayerGame()" id="multiplayerStartBtn">开始游戏</button>
@@ -3724,6 +3936,21 @@
             <input type="text"class="console-input"id="consoleInput"placeholder="输入命令...">
         </div>
     </div>
+
+    <!-- 调试信息按钮（开发者模式下显示在游戏右上方） -->
+    <button id="debugInfoBtn" class="debug-info-btn hidden" onclick="toggleDebugPanel()">🐞 调试信息</button>
+
+    <!-- 调试信息面板 -->
+    <div id="debugInfoPanel" class="debug-panel hidden">
+        <div class="debug-panel-header">
+            <div class="debug-panel-title">🐞 调试信息</div>
+            <button class="debug-panel-close" onclick="toggleDebugPanel(false)">×</button>
+        </div>
+        <div class="debug-panel-content" id="debugInfoContent"></div>
+    </div>
+
+    <!-- 多人游戏：玩家退出 / 上线等轻量通知 toast 容器 -->
+    <div id="mpToastContainer"></div>
 
     <!-- 控制台密码输入模态框 -->
     <div id="consolePasswordModal" class="settings-modal hidden">
@@ -9709,6 +9936,7 @@ function toggleConsole() {
         consoleDiv.classList.remove('console-hidden');
         document.getElementById('consoleInput').focus();
         gameState.developerMode = true; // 打开控制台时激活开发者模式
+        refreshDevUI(); // 开发者模式开启后显示“调试信息”按钮
         // 开发者控制台解锁时自动将金币设为 1000000
         gameState.coins = 1000000;
         gameState.playerData.coins = 1000000;
@@ -9796,6 +10024,211 @@ function showMessageToSelf(message) {
 }
 
 
+        // =============== 调试信息面板（开发者模式） ===============
+        let debugPanelVisible = false;
+        let debugFpsFrames = 0;
+        let debugFpsLastTime = performance.now();
+        let debugFps = 0;
+        let debugFpsRafId = null;
+
+        // 根据开发者模式显示/隐藏“调试信息”按钮
+        function refreshDevUI() {
+            const btn = document.getElementById('debugInfoBtn');
+            if (!btn) return;
+            if (gameState.developerMode || gameState.devMode) {
+                btn.classList.remove('hidden');
+            } else {
+                btn.classList.add('hidden');
+                if (debugPanelVisible) toggleDebugPanel(false);
+            }
+        }
+
+        function toggleDebugPanel(force) {
+            const panel = document.getElementById('debugInfoPanel');
+            if (!panel) return;
+            debugPanelVisible = (typeof force === 'boolean') ? force : !debugPanelVisible;
+            if (debugPanelVisible) {
+                panel.classList.remove('hidden');
+                updateGameDebugInfo();
+                startDebugFps();
+            } else {
+                panel.classList.add('hidden');
+                stopDebugFps();
+            }
+        }
+
+        function startDebugFps() {
+            if (debugFpsRafId) return;
+            debugFpsLastTime = performance.now();
+            debugFpsFrames = 0;
+            const loop = (t) => {
+                debugFpsFrames++;
+                if (t - debugFpsLastTime >= 1000) {
+                    debugFps = Math.round(debugFpsFrames * 1000 / (t - debugFpsLastTime));
+                    debugFpsFrames = 0;
+                    debugFpsLastTime = t;
+                    if (debugPanelVisible) updateGameDebugInfo();
+                }
+                debugFpsRafId = requestAnimationFrame(loop);
+            };
+            debugFpsRafId = requestAnimationFrame(loop);
+        }
+
+        function stopDebugFps() {
+            if (debugFpsRafId) {
+                cancelAnimationFrame(debugFpsRafId);
+                debugFpsRafId = null;
+            }
+        }
+
+        function formatDebugVal(v) {
+            if (typeof v === 'boolean') return v ? 'true' : 'false';
+            if (v === null || v === undefined) return '-';
+            return String(v);
+        }
+
+        function formatDuration(ms) {
+            if (!ms || ms < 0) return '0s';
+            const s = Math.floor(ms / 1000);
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            if (h > 0) return h + 'h' + m + 'm' + sec + 's';
+            if (m > 0) return m + 'm' + sec + 's';
+            return sec + 's';
+        }
+
+        function debugResolve(path) {
+            let root, rest;
+            if (path.indexOf('sp.') === 0) { root = singlePlayerGame; rest = path.slice(3); }
+            else if (path.indexOf('mp.me.') === 0) {
+                const mp = gameState.multiplayer;
+                root = (mp.players && mp.currentPlayerId) ? mp.players[mp.currentPlayerId] : null;
+                rest = path.slice('mp.me.'.length);
+            }
+            else if (path.indexOf('mp.') === 0) { root = gameState.multiplayer; rest = path.slice(3); }
+            else { root = gameState; rest = path; }
+            if (!root) return null;
+            const parts = rest.split('.');
+            let obj = root;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (obj == null) return null;
+                obj = obj[parts[i]];
+            }
+            if (obj == null) return null;
+            return { obj: obj, key: parts[parts.length - 1] };
+        }
+
+        function debugToggle(path) {
+            const r = debugResolve(path);
+            if (!r.obj) return;
+            r.obj[r.key] = !r.obj[r.key];
+            refreshDevUI(); // 翻转开发者模式时同步隐藏按钮/面板
+            if (debugPanelVisible) updateGameDebugInfo();
+        }
+
+        // 调试面板：修改数值字段（金币改动会自动加密写入本地存储）
+        function debugSetNum(path, raw) {
+            const r = debugResolve(path);
+            if (!r || !r.obj) return;
+            let val = Number(raw);
+            if (isNaN(val)) return;
+            r.obj[r.key] = val;
+
+            // 金币：自动加密并保存到 localStorage
+            if (path === 'coins') {
+                gameState.coins = val;
+                gameState.playerData.coins = val;
+                try {
+                    localStorage.setItem('playerCoins', encryptCoins(val));
+                } catch (e) { /* 忽略存储异常 */ }
+                if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
+            }
+            // 已解锁关卡：持久化
+            if (path === 'unlockedLevel') {
+                try { localStorage.setItem('unlockedLevel', String(val)); } catch (e) {}
+            }
+            if (debugPanelVisible) updateGameDebugInfo();
+        }
+
+        function updateGameDebugInfo() {
+            const el = document.getElementById('debugInfoContent');
+            if (!el) return;
+            // 若正在编辑某个数字输入框，则跳过本次重建，避免每帧刷新打断输入
+            const _active = document.activeElement;
+            if (_active && _active.tagName === 'INPUT' && _active.classList.contains('debug-num')) return;
+            const gs = gameState;
+            const rows = [];
+            const row = (k, v) => rows.push('<div class="debug-row"><span class="k">' + k + '</span><span class="v">' + formatDebugVal(v) + '</span></div>');
+            const section = (t) => rows.push('<div class="debug-section">' + t + '</div>');
+            // 布尔字段：渲染为可点击切换的 true/false（调试面板只允许修改布尔值）
+            const boolRow = (k, path, value) => {
+                const v = !!value;
+                rows.push('<div class="debug-row"><span class="k">' + k + '</span><span class="v"><span class="debug-bool ' + (v ? 'on' : 'off') + '" onclick="debugToggle(\'' + path + '\')">' + (v ? 'true' : 'false') + '</span></span></div>');
+            };
+            // 数值字段：渲染为可编辑的数字输入框（调试面板只允许修改数值）
+            const numRow = (k, path, value) => {
+                const num = (value === null || value === undefined || isNaN(Number(value))) ? 0 : Number(value);
+                rows.push('<div class="debug-row"><span class="k">' + k + '</span><span class="v"><input class="debug-num" type="number" value="' + num + '" data-path="' + path + '" onchange="debugSetNum(this.dataset.path, this.value)"></span></div>');
+            };
+
+            section('基础状态');
+            row('当前屏幕', gs.currentScreen);
+            boolRow('开发者模式', 'developerMode', gs.developerMode);
+            boolRow('开发模式(devMode)', 'devMode', gs.devMode);
+            numRow('金币', 'coins', gs.coins);
+            numRow('已解锁关卡', 'unlockedLevel', gs.unlockedLevel);
+            numRow('当前关卡', 'currentLevel', gs.currentLevel);
+            boolRow('控制反转', 'controlsReversed', gs.controlsReversed);
+            boolRow('无敌', 'invincible', gs.invincible);
+            boolRow('多人禁用', 'multiplayerDisabled', gs.multiplayerDisabled);
+
+            section('时长 / 性能');
+            row('总游戏时长', formatDuration(gs.totalPlayTime));
+            row('会话时长', formatDuration(Date.now() - gs.sessionStartTime));
+            row('FPS', debugFps);
+
+            if (gs.currentScreen === 'singlePlayerGame') {
+                section('单人游戏');
+                const sp = singlePlayerGame;
+                const pl = sp.player;
+                numRow('玩家 X', 'sp.player.x', pl ? pl.x : 0);
+                numRow('玩家 Y', 'sp.player.y', pl ? pl.y : 0);
+                const maze = sp.maze;
+                if (Array.isArray(maze) && maze.length && Array.isArray(maze[0])) {
+                    row('迷宫尺寸', maze[0].length + ' × ' + maze.length);
+                }
+                row('移动敌人', (sp.movingEnemies || []).length);
+                row('移动陷阱', (sp.movingTraps || []).length);
+                boolRow('持有钥匙', 'sp.hasKey', sp.hasKey);
+                if (sp.keyPosition) row('钥匙位置', '(' + sp.keyPosition.x + ', ' + sp.keyPosition.y + ')');
+                if (sp.doorPosition) row('门位置', '(' + sp.doorPosition.x + ', ' + sp.doorPosition.y + ')');
+                numRow('步数', 'sp.moveCount', sp.moveCount);
+            }
+
+            if (gs.currentScreen === 'multiplayerGame') {
+                section('多人游戏');
+                const mp = gs.multiplayer;
+                row('房间号', mp.roomCode);
+                boolRow('是否房主', 'mp.isHost', mp.isHost);
+                boolRow('已连接', 'mp.connected', mp.connected);
+                row('玩家人数', Object.keys(mp.players || {}).length);
+                row('最大人数', mp.maxPlayers);
+                const me = mp.currentPlayerId ? mp.players[mp.currentPlayerId] : null;
+                if (me && me.x !== undefined) {
+                    numRow('我的 X', 'mp.me.x', me.x);
+                    numRow('我的 Y', 'mp.me.y', me.y);
+                }
+                const mpMaze = mp.maze;
+                if (Array.isArray(mpMaze) && mpMaze.length && Array.isArray(mpMaze[0])) {
+                    row('迷宫尺寸', mpMaze[0].length + ' × ' + mpMaze.length);
+                }
+                if (mp.movingEnemies) row('移动敌人', mp.movingEnemies.length);
+            }
+
+            el.innerHTML = rows.join('');
+        }
+
 function executeCommand(command) {
             const output = document.getElementById('consoleOutput');
             output.innerHTML += `\n> ${command}`;
@@ -9829,6 +10262,7 @@ function executeCommand(command) {
                 case 'dev':
                     if (args.length > 0 && args[0] === 'dev') {
                         gameState.devMode = true;
+                        refreshDevUI(); // dev 命令激活后也显示“调试信息”按钮
                         output.innerHTML += '\n开发者模式已激活！';
                     } else {
                         output.innerHTML += '\n需要密码！输入 "dev [password]" 激活开发者模式';
@@ -12135,9 +12569,12 @@ function resetSinglePlayerLevel() {
                 let newX = trap.x + Math.round(trap.dx);
                 let newY = trap.y + Math.round(trap.dy);
                 
-                // 检查边界和墙壁
-                if (newX <= 0 || newX >= size-1 || newY <= 0 || newY >= size-1 || 
-                    maze[newY][newX] === 1 || maze[newY][newX] === 9 || maze[newY][newX] === 14 || maze[newY][newX] >= 50 ||
+                // 检查边界和墙壁；同时禁止踩到钥匙(8)/金币(10)/静态陷阱(2)/其它移动陷阱(4)，
+                // 否则会把钥匙或金币覆盖掉（“移动陷阱把钥匙吃掉”的根源）
+                if (newX <= 0 || newX >= size-1 || newY <= 0 || newY >= size-1 ||
+                    maze[newY][newX] === 1 || maze[newY][newX] === 2 || maze[newY][newX] === 4 ||
+                    maze[newY][newX] === 8 || maze[newY][newX] === 9 || maze[newY][newX] === 10 ||
+                    maze[newY][newX] === 14 || maze[newY][newX] >= 50 ||
                     maze[newY][newX] === 13 || maze[newY][newX] === 11 ||
                     (newX === singlePlayerGame.exit.x && newY === singlePlayerGame.exit.y)) {
                     // 改变方向
@@ -12154,8 +12591,11 @@ function resetSinglePlayerLevel() {
                 
                 // 检查是否碰到玩家
                 if (trap.x === singlePlayerGame.player.x && trap.y === singlePlayerGame.player.y) {
-                    // 回到起点
-                    singlePlayerGame.player = findStartPosition(singlePlayerGame.maze);
+                    // 无敌模式：免疫移动陷阱，不回到起点
+                    if (!gameState.invincible) {
+                        // 回到起点
+                        singlePlayerGame.player = findStartPosition(singlePlayerGame.maze);
+                    }
                     // singlePlayerGame.hasKey = false;
                     // document.getElementById('keyStatus').textContent = `钥匙: 未获得`;
                 }
@@ -12188,8 +12628,10 @@ function resetSinglePlayerLevel() {
                     const newX = enemy.x + attempt.dx;
                     const newY = enemy.y + attempt.dy;
                     const cellKey = newX + ',' + newY;
-                    if (newX >= 0 && newX < size && newY >= 0 && newY < size && 
-                        maze[newY][newX] !== 1 && maze[newY][newX] !== 9 && maze[newY][newX] !== 14 && maze[newY][newX] < 50 &&
+                    if (newX >= 0 && newX < size && newY >= 0 && newY < size &&
+                        maze[newY][newX] !== 1 && maze[newY][newX] !== 2 && maze[newY][newX] !== 4 &&
+                        maze[newY][newX] !== 8 && maze[newY][newX] !== 9 && maze[newY][newX] !== 10 &&
+                        maze[newY][newX] !== 14 && maze[newY][newX] < 50 &&
                         !enemyCells.has(cellKey)) {
                         enemyCells.delete(enemy.x + ',' + enemy.y);
                         enemy.x = newX;
@@ -12202,8 +12644,11 @@ function resetSinglePlayerLevel() {
                 
                 // 检查是否碰到玩家
                 if (enemy.x === singlePlayerGame.player.x && enemy.y === singlePlayerGame.player.y) {
-                    // 回到起点
-                    singlePlayerGame.player = findStartPosition(singlePlayerGame.maze);
+                    // 无敌模式：免疫移动敌人，不回到起点
+                    if (!gameState.invincible) {
+                        // 回到起点
+                        singlePlayerGame.player = findStartPosition(singlePlayerGame.maze);
+                    }
                     // singlePlayerGame.hasKey = false;
                     // document.getElementById('keyStatus').textContent = `钥匙: 未获得`;
                 }
@@ -14655,14 +15100,16 @@ function connectToMultiplayerGame() {
                 startBtn.disabled = true;
                 
                 gameState.playerName = document.getElementById('playerName').value.trim() || '玩家';
-                
-                // 获取房间密码
+
+                // 获取房间密码与私密开关
                 const roomPassword = document.getElementById('roomPassword').value.trim();
-                
+                const isPrivateRoom = document.getElementById('privateRoomToggle').checked;
+
                 // 设置最大玩家数和密码
                 if (roomCodeInput === '') {
                     gameState.multiplayer.maxPlayers = parseInt(document.getElementById('maxPlayers').value);
                     gameState.multiplayer.roomPassword = roomPassword;
+                    gameState.multiplayer.isPrivate = isPrivateRoom;
                 }
             
             // 初始化Peer连接
@@ -14814,7 +15261,7 @@ function connectToMultiplayerGame() {
                         playerName: gameState.playerName,
                         maxPlayers: gameState.multiplayer.maxPlayers,
                         roomName: `${gameState.playerName}的房间`,
-                        isPrivate: !!gameState.multiplayer.roomPassword,
+                        isPrivate: !!gameState.multiplayer.isPrivate,
                         password: gameState.multiplayer.roomPassword,
                         roomCode: gameState.multiplayer.roomCode // 传递真实 Peer 房间号，保证服务器房间 ID 与 P2P 房间号一致
                     };
@@ -14912,6 +15359,11 @@ function connectToMultiplayerGame() {
                 conn.on('close', () => {
                     console.error('连接意外关闭');
                     clearTimeout(connectionTimeout); // 清除超时
+                    // 非房主：与房主的连接断开，提示房主已退出
+                    if (!gameState.multiplayer.isHost) {
+                        const hostPlayer = (gameState.multiplayer.players && Object.values(gameState.multiplayer.players).find(p => p.isHost)) || null;
+                        showPlayerLeftToast(hostPlayer ? hostPlayer.name : '房主', true);
+                    }
                     alert('与主机的连接已关闭\n\n调试信息：\n- 房间号：' + formattedHostId);
                     updateConnectionStatus('disconnected');
                     disconnectMultiplayer();
@@ -14949,12 +15401,12 @@ function connectToMultiplayerGame() {
             
             conn.on('close', () => {
                 console.log('连接关闭:', conn.peer);
-                removePlayer(conn.peer);
+                onPeerDisconnected(conn.peer);
             });
             
             conn.on('error', (err) => {
                 console.error('连接错误:', conn.peer, err);
-                removePlayer(conn.peer);
+                onPeerDisconnected(conn.peer);
             });
         }
 // 生成简短房间号（5位数字）
@@ -15833,6 +16285,21 @@ function handleMultiplayerData(data, peerId) {
                         updatePlayerList();
                         drawMultiplayerMaze();
                     }
+                    // 全房间通知：谁加入了游戏（自己加入不提示）
+                    if (data.player.id !== gameState.multiplayer.currentPlayerId) {
+                        showPlayerJoinedToast(data.player.name || '玩家');
+                    }
+                    break;
+
+                case 'player-left':
+                    // 收到房主广播：某玩家已退出游戏
+                    console.log('收到玩家退出广播:', data);
+                    if (data && data.playerName) {
+                        showPlayerLeftToast(data.playerName, !!data.isHost);
+                    }
+                    if (data && data.playerId) {
+                        removePlayer(data.playerId);
+                    }
                     break;
                     
                 case 'player-kicked':
@@ -15986,6 +16453,9 @@ function handleMultiplayerData(data, peerId) {
                 player: gameState.multiplayer.players[player.id]
             }, player.id);
             
+            // 房主本地也提示新玩家加入
+            showPlayerJoinedToast(player.name || '玩家');
+            
             updatePlayerList();
             drawMultiplayerMaze();
         }
@@ -16016,6 +16486,45 @@ function broadcast(data, excludePlayerId = null) {
         }
     }
 }
+
+        // ========== 多人游戏：玩家退出广播通知 ==========
+        // 轻量 toast（不阻塞操作，3 秒后自动消失）
+        function showPlayerLeftToast(name, isHostLeft) {
+            const container = document.getElementById('mpToastContainer');
+            if (!container) return;
+            const toast = document.createElement('div');
+            toast.className = 'mp-toast';
+            toast.textContent = isHostLeft ? `👑 ${name}（房主）已退出游戏` : `👋 ${name} 退出了游戏`;
+            container.appendChild(toast);
+            setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3200);
+        }
+
+        function showPlayerJoinedToast(name) {
+            const container = document.getElementById('mpToastContainer');
+            if (!container) return;
+            const toast = document.createElement('div');
+            toast.className = 'mp-toast';
+            toast.textContent = `🎮 ${name} 加入了游戏`;
+            container.appendChild(toast);
+            setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3200);
+        }
+
+        // 某玩家连接断开时的统一处理：本地提示 + （房主）向其他所有人广播
+        function onPeerDisconnected(peerId) {
+            if (!peerId) return;
+            const player = gameState.multiplayer.players[peerId];
+            const name = (player && player.name) ? player.name : '玩家';
+            const isHostLeft = !!(player && player.isHost);
+            // 自己断开不提示
+            if (peerId !== gameState.multiplayer.currentPlayerId) {
+                showPlayerLeftToast(name, isHostLeft);
+            }
+            // 房主把"谁退出了"广播给其余仍在场的玩家（星型拓扑下只有房主直接看到非房主断开）
+            if (gameState.multiplayer.isHost && peerId !== gameState.multiplayer.currentPlayerId) {
+                broadcast({ type: 'player-left', playerId: peerId, playerName: name, isHost: isHostLeft }, peerId);
+            }
+            removePlayer(peerId);
+        }
 
         function startMultiplayerGame() {
             gameState.multiplayer.connected = true;
@@ -16245,12 +16754,8 @@ function checkPlayerAtExit(player) {
         function initMultiplayerCanvas() {
             const canvas = document.getElementById('multiplayerCanvas');
             const ctx = canvas.getContext('2d');
-            
-            // 调整画布大小
+
             console.log("初始化画布")
-            const maxWidth = window.innerWidth - 40;
-            const maxHeight = window.innerHeight - 180;
-            
             // 确保迷宫已初始化
             if (!gameState.multiplayer.maze || gameState.multiplayer.maze.length === 0) {
                 console.error("多人游戏迷宫未初始化");
@@ -16258,24 +16763,91 @@ function checkPlayerAtExit(player) {
                 canvas.height = 300;
                 return;
             }
-            
+
             const mazeWidth = gameState.multiplayer.maze[0].length;
             const mazeHeight = gameState.multiplayer.maze.length;
-            
-            const cellSize = Math.min(30, Math.floor(maxWidth / mazeWidth), 
-                                     Math.floor(maxHeight / mazeHeight));
-            
+
+            // 使用固定单元格大小（允许迷宫大于屏幕，通过拖拽滑动查看）
+            const cellSize = Math.min(30, Math.max(18, Math.floor(window.innerWidth / (mazeWidth + 2))));
             canvas.width = mazeWidth * cellSize;
             canvas.height = mazeHeight * cellSize;
-            
+
             // 保存单元格大小供后续使用
             gameState.multiplayer.cellSize = cellSize;
-            
+
+            // 初始化平移偏移：CSS 已把画布放在"水平居中、顶部 10px"位置，
+            // 这里以该位置为原点（0,0），canvasOffset 仅表示用户拖拽产生的相对偏移
+            if (!gameState.multiplayer.canvasOffset) gameState.multiplayer.canvasOffset = { x: 0, y: 0 };
+            else { gameState.multiplayer.canvasOffset.x = 0; gameState.multiplayer.canvasOffset.y = 0; }
+            applyCanvasOffset();
+            initCanvasPan();
+
             // 绘制初始迷宫
             drawMultiplayerMaze();
-            
+
             // 更新玩家列表
             updatePlayerList();
+        }
+
+        // 将当前平移偏移应用到 canvas（transform: translate）
+        function applyCanvasOffset() {
+            const canvas = document.getElementById('multiplayerCanvas');
+            if (!canvas || !gameState.multiplayer.canvasOffset) return;
+            const off = gameState.multiplayer.canvasOffset;
+            // left:50% 已将左边缘放在视口中心，再用 translateX(-50%) 把画布自身中心对齐视口中心，
+            // 同时叠加 canvasOffset 实现拖拽平移
+            canvas.style.transform = `translate(calc(-50% + ${off.x}px), ${off.y}px)`;
+        }
+
+        // 拖拽平移：在多人游戏界面拖动空白处即可滑动查看超大迷宫
+        let _panInitialized = false;
+        function initCanvasPan() {
+            if (_panInitialized) return;
+            _panInitialized = true;
+            const canvas = document.getElementById('multiplayerCanvas');
+            if (!canvas) return;
+
+            let dragging = false;
+            let startX = 0, startY = 0;
+            let startOffX = 0, startOffY = 0;
+            const DRAG_THRESHOLD = 6; // 超过该像素才算拖拽，否则视为点击
+            let moved = false;
+
+            const onDown = (e) => {
+                dragging = true;
+                moved = false;
+                const pt = e.touches ? e.touches[0] : e;
+                startX = pt.clientX;
+                startY = pt.clientY;
+                startOffX = gameState.multiplayer.canvasOffset.x;
+                startOffY = gameState.multiplayer.canvasOffset.y;
+            };
+            const onMove = (e) => {
+                if (!dragging) return;
+                const pt = e.touches ? e.touches[0] : e;
+                const dx = pt.clientX - startX;
+                const dy = pt.clientY - startY;
+                if (!moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) moved = true;
+                if (moved) {
+                    if (e.cancelable) e.preventDefault();
+                    gameState.multiplayer.canvasOffset.x = startOffX + dx;
+                    gameState.multiplayer.canvasOffset.y = startOffY + dy;
+                    applyCanvasOffset();
+                }
+            };
+            const onUp = () => { dragging = false; };
+
+            canvas.addEventListener('mousedown', onDown);
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+            canvas.addEventListener('touchstart', onDown, { passive: true });
+            canvas.addEventListener('touchmove', onMove, { passive: false });
+            canvas.addEventListener('touchend', onUp);
+
+            // 防止拖拽误触发 canvas 上的 click（地图选择模式）
+            canvas.addEventListener('click', (e) => {
+                if (moved) { e.stopPropagation(); e.preventDefault(); }
+            }, true);
         }
 
         function handleMultiplayerKeyDown(e) {
@@ -16980,8 +17552,8 @@ function generateMultiplayerMaze() {
     // 先清空敌人，避免上一局螺旋迷宫的敌人残留在普通迷宫中
     gameState.multiplayer.movingEnemies = [];
     
-    // 10%概率生成螺旋迷宫（含移动敌人）
-    const isSpiralMaze = Math.random() < 0.1;
+    // 40%概率生成螺旋迷宫（含移动敌人）
+    const isSpiralMaze = Math.random() < 0.4;
     // %100生成（调试用）
     // const isSpiralMaze = true;
     if (isSpiralMaze) {
@@ -17731,6 +18303,7 @@ window.openConsoleModal = function() {
             modal.classList.remove('hidden');
             // 打开控制台时开启开发者模式
             gameState.developerMode = true;
+            refreshDevUI(); // 开发者模式开启后显示“调试信息”按钮
             console.log('开发者模式已开启');
             
             // 显示所有控制台消息
