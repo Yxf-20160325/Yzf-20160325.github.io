@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const cors = require('cors');
@@ -522,14 +522,20 @@ app.post('/api/create-room', express.json(), (req, res) => {
             });
         }
 
-        // 如果是私密房间，需要密码
-        if (isPrivate && !password) {
-            return res.status(400).json({ 
-                success: false, 
-                message: '私密房间需要设置密码',
-                code: 'PASSWORD_REQUIRED'
+        // ===== 安全检测：客户端不应再发送明文密码（新客户端只发送 SHA-256 哈希） =====
+        // 合法密码要么是 undefined/空（无密码），要么是 64 位十六进制 SHA-256 哈希。
+        // 收到非哈希的明文密码，判定为旧版/不安全客户端：拒绝建房并触发其版本检测。
+        if (password && typeof password === 'string' && !/^[0-9a-f]{64}$/i.test(String(password).trim())) {
+            console.warn('[安全] /api/create-room 检测到明文密码（疑似旧版客户端）。拒绝建房并通知其进行版本检测。');
+            return res.status(400).json({
+                success: false,
+                code: 'PLAINTEXT_PASSWORD',
+                message: '服务器检测到明文密码，你的客户端可能已过时',
+                serverVersion: SERVER_VERSION
             });
         }
+
+        // 私密房间不再强制要求密码（可仅凭房间号加入，不在列表公开）
 
         // 优先采用客户端传来的真实 Peer 房间号，确保服务器房间 ID 与 P2P 连接房间号一致；否则回退生成唯一 ID
         let roomId = (req.body.roomCode && typeof req.body.roomCode === 'string' && req.body.roomCode.trim()) ? req.body.roomCode.trim() : null;
@@ -616,8 +622,7 @@ const io = new Server(server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"],
-        credentials: true,
-        allowedHeaders: ["Content-Type", "Authorization"]
+        allowedHeaders: "*"
     }
 });
 
@@ -655,6 +660,12 @@ io.on('connection', (socket) => {
     socket.on('createRoom', (data, callback) => {
         try {
             const { playerName, maxPlayers = 4, roomName, isPrivate = false, password } = data;
+            // ===== 安全检测：同 HTTP create-room，拒绝明文密码并通知版本检测 =====
+            if (password && typeof password === 'string' && !/^[0-9a-f]{64}$/i.test(String(password).trim())) {
+                console.warn('[安全] socket createRoom 检测到明文密码。拒绝建房并通知版本检测。');
+                socket.emit('version-check-required', { serverVersion: SERVER_VERSION, reason: 'PLAINTEXT_PASSWORD' });
+                return callback({ success: false, code: 'PLAINTEXT_PASSWORD', message: '服务器检测到明文密码，你的客户端可能已过时', serverVersion: SERVER_VERSION });
+            }
             // 优先采用客户端传来的真实 Peer 房间号，确保服务器房间 ID 与 P2P 连接房间号一致；否则回退生成唯一 ID
             let roomId = (data.roomCode && typeof data.roomCode === 'string' && data.roomCode.trim()) ? data.roomCode.trim() : null;
             if (!roomId || rooms.has(roomId)) {
