@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>迷宫冒险 - 1.14</title>
+    <title>迷宫冒险 - 1.15</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         html {
@@ -3373,7 +3373,7 @@
         <div class="updates-container">
             <!-- 更新内容将由用户填写 -->
             <div class="update-item">
-                <div class="update-title">版本 1.14</div>
+                <div class="update-title">版本 1.15</div>
                 <div class="update-content">
                     <ul>
                         <li>新增每日挑战系统，提供3种不同类型的挑战任务</li>
@@ -4047,7 +4047,7 @@
     </div>
     
     <!-- 版本信息显示 -->
-    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.14</div>
+    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15</div>
     
     <!-- 管理员登录界面 -->
     <div id="adminLoginModal" class="hidden" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 99999; display: flex; justify-content: center; align-items: center;">
@@ -4082,7 +4082,7 @@
     </div>
     
     <script>
-const CLIENT_VERSION = "1.14";
+const CLIENT_VERSION = "1.15";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
@@ -4252,7 +4252,11 @@ function connectNotificationSocket() {
             reconnectionDelay: 3000,
             reconnectionAttempts: Infinity
         });
-        notificationSocket.on('connect', () => console.log('[通知] 实时通知 socket 已连接'));
+        notificationSocket.on('connect', () => {
+            console.log('[通知] 实时通知 socket 已连接');
+            // socket 连接建立后，若已取名则立即注册在线（管理后台可见）
+            if (gameState.playerName) registerPlayerOnline();
+        });
         notificationSocket.on('connect_error', (err) => console.warn('[通知] socket 连接失败(可忽略，会重试):', err && err.message));
         notificationSocket.on('disconnect', (reason) => console.log('[通知] socket 断开:', reason));
 
@@ -4337,6 +4341,92 @@ function unregisterSelfWithServer() {
     if (!roomCode || !pid) return;
     notificationSocket.emit('mp-unregister', { roomId: roomCode, playerId: pid });
     console.log('[通知] 已从服务器移除本玩家注册:', pid);
+}
+
+// 进入游戏即向服务器注册"在线"（无需进房间，供管理后台 /api/users 立即看到）
+// 使用稳定的 clientId 作为玩家标识，与多人 peerId 解耦。
+function registerPlayerOnline() {
+    if (!notificationSocket || !notificationSocket.connected) return;
+    if (!gameState.playerName) return;
+    notificationSocket.emit('player-online', { id: gameState.clientId, name: gameState.playerName });
+    console.log('[通知] 已注册玩家在线:', gameState.playerName, '(', gameState.clientId, ')');
+}
+function unregisterPlayerOnline() {
+    if (!notificationSocket || !notificationSocket.connected) return;
+    notificationSocket.emit('player-offline', { id: gameState.clientId });
+    console.log('[通知] 已通知服务器玩家下线:', gameState.clientId);
+}
+
+// 玩家身份初始化：若已存名字则直接注册在线；否则弹窗要求取名
+function initPlayerIdentity() {
+    const stored = localStorage.getItem('playerName');
+    if (stored && String(stored).trim()) {
+        gameState.playerName = stored.trim();
+        // socket 可能已连接或稍后连接，两处都会尝试注册
+        registerPlayerOnline();
+    } else {
+        showNameEntryModal();
+    }
+}
+
+// 进入游戏取名弹窗（阻塞式，必须取名才能继续；取完名自动注册到服务器并在管理后台显示）
+function showNameEntryModal() {
+    const existing = document.getElementById('nameEntryModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'nameEntryModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:30000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.98);border:2px solid #4fc3f7;border-radius:18px;padding:34px 30px;max-width:420px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:50px;margin-bottom:12px;';
+    icon.textContent = '🙂';
+    box.appendChild(icon);
+
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:#4fc3f7;margin:0 0 6px 0;font-size:22px;';
+    h.textContent = '欢迎来到迷宫探险';
+    box.appendChild(h);
+
+    const sub = document.createElement('p');
+    sub.style.cssText = 'color:#90a4ae;margin:0 0 18px 0;font-size:14px;';
+    sub.textContent = '进入游戏前，请先取一个名字';
+    box.appendChild(sub);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'nameEntryInput';
+    input.maxLength = 10;
+    input.placeholder = '输入你的名字（最多10字）';
+    input.style.cssText = 'width:100%;box-sizing:border-box;padding:12px 14px;font-size:16px;border-radius:10px;border:1px solid #4fc3f7;background:rgba(0,0,0,0.3);color:#fff;outline:none;margin-bottom:18px;';
+    box.appendChild(input);
+
+    const btn = document.createElement('button');
+    btn.textContent = '进入游戏';
+    btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#4fc3f7,#0288d1);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;width:100%;';
+    btn.onclick = () => {
+        let name = input.value.trim();
+        if (!name) name = '玩家' + Math.floor(Math.random() * 1000);
+        gameState.playerName = name;
+        try { localStorage.setItem('playerName', name); } catch (e) {}
+        // 同步到多人设置输入框（默认即使用此名字，允许在多人界面修改）
+        const pn = document.getElementById('playerName');
+        if (pn) pn.value = name;
+        overlay.remove();
+        registerPlayerOnline();
+    };
+    box.appendChild(btn);
+
+    // 允许回车确认
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') btn.onclick(); });
+
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    // 自动聚焦输入框
+    setTimeout(() => { try { input.focus(); } catch (e) {} }, 50);
 }
 
 // 检查服务器连接后进入多人游戏
@@ -4563,6 +4653,65 @@ function showMyInfoModal() {
         });
     }
 
+    // ===== 改名功能（消耗 25 金币） =====
+    const renameCost = 25;
+    const renameWrap = document.createElement('div');
+    renameWrap.style.cssText = 'margin-top:20px;padding-top:18px;border-top:1px dashed rgba(79,195,247,0.4);';
+    box.appendChild(renameWrap);
+
+    const renameTitle = document.createElement('div');
+    renameTitle.style.cssText = 'color:#e0e0e0;font-size:15px;font-weight:bold;margin:0 0 10px 0;border-left:4px solid #4fc3f7;padding-left:8px;';
+    renameTitle.textContent = '✏️ 修改名字';
+    renameWrap.appendChild(renameTitle);
+
+    const curNameLine = document.createElement('div');
+    curNameLine.style.cssText = 'color:#90a4ae;font-size:13px;margin-bottom:10px;';
+    curNameLine.appendChild(document.createTextNode('当前名字：'));
+    const curNameSpan = document.createElement('span');
+    curNameSpan.style.cssText = 'color:#4fc3f7;font-weight:bold;';
+    curNameSpan.textContent = gameState.playerName;
+    curNameLine.appendChild(curNameSpan);
+    renameWrap.appendChild(curNameLine);
+
+    const renameInput = document.createElement('input');
+    renameInput.type = 'text';
+    renameInput.maxLength = 10;
+    renameInput.placeholder = '输入新名字（最多10字）';
+    renameInput.value = gameState.playerName;
+    renameInput.style.cssText = 'width:100%;box-sizing:border-box;padding:11px 13px;font-size:15px;border-radius:10px;border:1px solid #4fc3f7;background:rgba(0,0,0,0.3);color:#fff;outline:none;margin-bottom:12px;';
+    renameWrap.appendChild(renameInput);
+
+    const renameBtn = document.createElement('button');
+    renameBtn.textContent = '改名（-' + renameCost + ' 金币）';
+    renameBtn.style.cssText = 'padding:11px 24px;background:linear-gradient(135deg,#ffb74d,#f57c00);color:white;border:none;border-radius:25px;cursor:pointer;font-size:15px;font-weight:bold;';
+    renameBtn.onclick = () => {
+        const newName = renameInput.value.trim();
+        if (!newName) { showNotification('⚠️ 名字不能为空', 2500); return; }
+        if (newName === gameState.playerName) { showNotification('⚠️ 名字没有改变', 2500); return; }
+        if (gameState.coins < renameCost) {
+            showNotification('💰 金币不足，改名需要 ' + renameCost + ' 金币（当前 ' + gameState.coins + '）', 3000);
+            return;
+        }
+        // 扣费（持久化 + 刷新显示）
+        deductAuthorCoins(renameCost);
+        // 更新名字并持久化
+        gameState.playerName = newName;
+        try { localStorage.setItem('playerName', newName); } catch (e) {}
+        // 同步到多人设置输入框（默认用所取名字）
+        const pn = document.getElementById('playerName');
+        if (pn) pn.value = newName;
+        // 通知服务器更新在线名字（管理后台用户列表立即生效）
+        registerPlayerOnline();
+        showNotification('✅ 改名成功！消耗 ' + renameCost + ' 金币', 3000);
+        overlay.remove();
+    };
+    renameWrap.appendChild(renameBtn);
+
+    const coinHint = document.createElement('div');
+    coinHint.style.cssText = 'color:#90a4ae;font-size:12px;margin-top:10px;text-align:center;';
+    coinHint.textContent = '当前金币：' + gameState.coins + ' ｜ 改名费用：' + renameCost + ' 金币';
+    renameWrap.appendChild(coinHint);
+
     const btn = document.createElement('button');
     btn.textContent = '关闭';
     btn.style.cssText = 'display:block;margin:22px auto 0;padding:12px 40px;background:linear-gradient(135deg,#4fc3f7,#0288d1);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
@@ -4617,7 +4766,13 @@ const modal = document.createElement('div');
 window.addEventListener('load', function() {
     // 页面加载时自动连接服务器
     autoConnectToServer();
-    
+    // 初始化玩家身份：已存名字则直接注册在线，否则弹窗要求取名
+    initPlayerIdentity();
+    // 离开页面时通知服务器下线（socket.io 也会在断开时清理）
+    window.addEventListener('beforeunload', function() {
+        try { unregisterPlayerOnline(); } catch (e) {}
+    });
+
     const levelContainer = document.getElementById('levelContainer');
     if (!levelContainer) return; // 元素不存在时安全退出
     let startY = 0;
@@ -4788,7 +4943,13 @@ let gameState = {
     unlockedLevel: parseInt(localStorage.getItem('unlockedLevel')) || 1,
     completedLevels: JSON.parse(localStorage.getItem('completedLevels')) || [],
     currentLevel: 1,
-    playerName: '玩家' + Math.floor(Math.random() * 1000),
+    playerName: localStorage.getItem('playerName') || ('玩家' + Math.floor(Math.random() * 1000)),
+    // 稳定客户端 ID（跨会话持久化），用于进入游戏即向服务器注册在线（与多人 peerId 解耦）
+    clientId: (localStorage.getItem('clientId') || (function() {
+        const id = 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        try { localStorage.setItem('clientId', id); } catch (e) {}
+        return id;
+    })()),
     unsolvableLevels: [], // 空的无解关卡列表（用户自定义）
     specialLevels: [30,50], // 空的特殊关卡列表（用户自定义）
     controlsReversed: false,
@@ -15538,6 +15699,9 @@ function connectToMultiplayerGame() {
                 startBtn.disabled = true;
                 
                 gameState.playerName = document.getElementById('playerName').value.trim() || '玩家';
+                // 多人界面可能修改了名字，持久化并刷新服务器在线记录（管理后台显示最新名）
+                try { localStorage.setItem('playerName', gameState.playerName); } catch (e) {}
+                registerPlayerOnline();
 
                 // 获取房间密码与私密开关
                 const roomPassword = document.getElementById('roomPassword').value.trim();
