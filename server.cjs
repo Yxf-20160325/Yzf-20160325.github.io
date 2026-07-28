@@ -1,4 +1,4 @@
- const express = require('express');
+const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const cors = require('cors');
@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.14";
+const SERVER_VERSION = "1.15";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -58,6 +58,7 @@ const userLevels = new Map(); // 用户等级（按 userId 存储）
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
+const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
 const MAZES_FILE = path.join(__dirname, 'data', 'mazes.json');
 function loadMazes() {
@@ -347,13 +348,35 @@ app.get('/api/admin/stats', requireAdminAuth, (req, res) => {
     }
 });
 
-// 聚合所有房间内的玩家，生成用户列表（服务器无独立账号系统，以在线玩家为准）
+// 聚合所有在线玩家，生成用户列表（服务器无独立账号系统，以在线玩家为准）
+// 优先使用 onlinePlayers（进入游戏即上线的玩家，含未进房与已进房），再用 room.players 兜底未覆盖者
 function getAllUsersList() {
     const userMap = new Map();
+    // 1. 在线玩家（进入游戏即注册，含未进房与已进房）——在线状态的权威来源
+    for (const player of onlinePlayers.values()) {
+        if (!player || !player.id) continue;
+        let roomId = null, roomName = null;
+        if (player.roomId) {
+            const r = rooms.get(player.roomId);
+            roomId = player.roomId;
+            roomName = r ? r.name : null;
+        }
+        userMap.set(player.id, {
+            id: player.id,
+            username: player.name || '未知用户',
+            coins: userCoins.get(player.id) || 0,
+            level: userLevels.get(player.id) || 1,
+            roomId: roomId,
+            roomName: roomName,
+            online: true
+        });
+    }
+    // 2. 兜底：room.players 中未在 onlinePlayers 列出的（兼容旧逻辑）
     for (const room of rooms.values()) {
         if (!room.players) continue;
         for (const player of room.players.values()) {
             if (!player || !player.id) continue;
+            if (userMap.has(player.id)) continue;
             userMap.set(player.id, {
                 id: player.id,
                 username: player.name || '未知用户',
@@ -961,9 +984,43 @@ io.on('connection', (socket) => {
         handleDisconnect(socket.id);
     });
 
+    // ===== 新增：进入游戏即上线（管理后台 /api/users 可见，无需进房间） =====
+    // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
+    socket.on('player-online', (data) => {
+        try {
+            const { id, name } = data || {};
+            if (!id) return;
+            onlinePlayers.set(id, {
+                id: id,
+                name: (name && String(name).trim()) || '玩家',
+                socketId: socket.id,
+                roomId: null,
+                joinedAt: Date.now()
+            });
+            onlineSockets.set(id, socket.id);
+            console.log(`[Online] 玩家 ${name} (${id}) 上线，当前在线 ${onlinePlayers.size} 人`);
+        } catch (e) {
+            console.error('[Online] player-online 处理出错:', e.message);
+        }
+    });
+
+    // 玩家离开游戏（关闭/刷新页面前主动通知）
+    socket.on('player-offline', (data) => {
+        try {
+            const { id } = data || {};
+            if (!id) return;
+            const p = onlinePlayers.get(id);
+            if (p && p.socketId === socket.id) onlinePlayers.delete(id);
+            onlineSockets.delete(id);
+            console.log(`[Online] 玩家 ${id} 下线，当前在线 ${onlinePlayers.size} 人`);
+        } catch (e) {
+            console.error('[Online] player-offline 处理出错:', e.message);
+        }
+    });
+
     // ===== 新增：多人游戏真实玩家注册（供管理后台 /api/users 聚合在线用户） =====
     // 客户端（房主与加入者）在成功进入房间后，经此事件把自身注册到服务器 room.players，
-    // 与 REST create-room 创建的房间（roomId = Peer 房间号）对应。断开时由 handleDisconnect 清理。
+    // 与 REST create-room 创建的房间（roomId = Peer 房间号）对应。同时同步到 onlinePlayers（带上房间号）。
     socket.on('mp-register', (data) => {
         try {
             const { roomId, player } = data || {};
@@ -978,6 +1035,15 @@ io.on('connection', (socket) => {
                 joinedAt: Date.now()
             });
             onlineSockets.set(player.id, socket.id);
+            // 同步到在线玩家表（带上房间号），便于管理后台展示所在房间
+            onlinePlayers.set(player.id, {
+                id: player.id,
+                name: player.name || '玩家',
+                socketId: socket.id,
+                color: player.color || '#ffffff',
+                roomId: roomId,
+                joinedAt: Date.now()
+            });
             room.lastActivity = Date.now();
             console.log(`[MP] 玩家 ${player.name} (${player.id}) 已注册到房间 ${roomId}，当前在线 ${room.players.size} 人`);
         } catch (e) {
@@ -993,7 +1059,9 @@ io.on('connection', (socket) => {
                 const p = room.players.get(playerId);
                 if (p && p.socketId === socket.id) room.players.delete(playerId);
             }
-            onlineSockets.delete(playerId);
+            // 玩家离开房间但仍在线，更新在线表的房间号为 null（不再删 onlinePlayers/onlineSockets）
+            const op = onlinePlayers.get(playerId);
+            if (op && op.socketId === socket.id) op.roomId = null;
             if (room) room.lastActivity = Date.now();
         } catch (e) {
             console.error('[MP] mp-unregister 处理出错:', e.message);
@@ -1358,6 +1426,15 @@ app.post('/api/rooms/:roomId/complete', (req, res) => {
 
 function handleDisconnect(socketId) {
     console.log(`[Server] 用户断开连接: ${socketId}`);
+
+    // 0. 清理在线玩家表（按 socketId 反查）
+    for (const [pid, p] of onlinePlayers) {
+        if (p && p.socketId === socketId) {
+            onlinePlayers.delete(pid);
+            onlineSockets.delete(pid);
+            console.log(`[Online] 玩家 ${pid} 因断开连接下线，当前在线 ${onlinePlayers.size} 人`);
+        }
+    }
 
     // 1. 优先在全局 'players' Map 中查找玩家（socketId 为 key）
     let leavingPlayer = players.get(socketId);
