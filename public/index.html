@@ -4487,6 +4487,7 @@ function setChatDisabled(disabled, reason) {
     gameState.chatDisabled = !!disabled;
     gameState.chatDisabledReason = disabled ? (reason || '') : '';
     if (disabled && !wasDisabled) {
+        closeChatModal();
         showChatDisabledModal(reason || '多人游戏聊天功能已被禁用。');
     } else if (!disabled && wasDisabled) {
         showChatRestoredModal();
@@ -7942,6 +7943,11 @@ function showScreen(screenId) {
         // 聊天系统函数
         // 打开聊天模态框
         function openChatModal() {
+            // 多人游戏聊天被管理员封禁：禁止打开聊天窗口
+            if (gameState.chatDisabled) {
+                showChatDisabledModal(gameState.chatDisabledReason || '你的多人游戏聊天功能已被管理员封禁。');
+                return;
+            }
             const chatModal = document.getElementById('chatModal');
             if (chatModal) {
                 chatModal.style.display = 'flex';
@@ -17325,6 +17331,8 @@ function handleMultiplayerData(data, peerId) {
                     break;
                 case 'chat-message':
                     // 收到聊天消息
+                    // 多人游戏聊天被管理员封禁：不显示收到的文本消息
+                    if (gameState.chatDisabled) break;
                     const chatSender = gameState.multiplayer.players[data.from];
                     if (chatSender) {
                         // 使用消息中携带的颜色，如果没有则使用玩家默认颜色
@@ -17334,6 +17342,8 @@ function handleMultiplayerData(data, peerId) {
                     break;
                 case 'chat-image':
                     // 收到图片消息
+                    // 多人游戏聊天被管理员封禁：不显示收到的图片消息
+                    if (gameState.chatDisabled) break;
                     const imageSender = gameState.multiplayer.players[data.from];
                     if (imageSender) {
                         addChatMessage(imageSender.name, null, imageSender.color, data.image, data.messageId);
