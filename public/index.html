@@ -4342,6 +4342,39 @@ function connectNotificationSocket() {
             }
         });
 
+        // 房间被管理员删除 → 立即移出所有人并断开多人游戏连接（仅处理自己所在的房间）
+        notificationSocket.on('room-deleted', (data) => {
+            console.log('[通知] 收到房间删除事件:', data);
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || (data.roomId && data.roomId !== myRoom)) return;
+            showAdminPopup('房间已被删除', (data && data.message) ? data.message : '房间已被管理员删除，你已被移出并断开多人游戏连接。');
+            if (typeof disconnectMultiplayer === 'function') {
+                try { disconnectMultiplayer(); } catch (e) { /* 忽略 */ }
+            }
+            try { showScreen('mainMenu'); } catch (e) { /* 忽略 */ }
+        });
+
+        // 管理员以 ADMIN 身份向房间发送聊天消息（仅本房间显示，带管理员标签）
+        notificationSocket.on('admin-chat-message', (data) => {
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || data.roomId !== myRoom) return;
+            if (typeof addChatMessage === 'function') {
+                try { addChatMessage('ADMIN', data.message, '#FF9800', null, data.messageId, true); } catch (e) { /* 忽略 */ }
+            }
+        });
+
+        // 管理员删除某条聊天消息 → 从聊天窗口移除对应消息
+        notificationSocket.on('admin-chat-delete', (data) => {
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || data.roomId !== myRoom || !data.messageId) return;
+            ['chatMessages', 'chatMessagesModal'].forEach(id => {
+                const box = document.getElementById(id);
+                if (!box) return;
+                const el = box.querySelector('[data-message-id="' + data.messageId + '"]');
+                if (el && el.parentElement) el.parentElement.removeChild(el);
+            });
+        });
+
         // 所有玩家到达终点 → 服务器删除房间，本房间客户端收到后退出
         notificationSocket.on('room-completed', (data) => {
             console.log('[通知] 收到房间完成(全员到达终点)事件:', data);
@@ -8128,6 +8161,29 @@ function showScreen(screenId) {
             }
         }
         
+        // 聊天镜像上报：聊天走 PeerJS P2P、服务器看不到，为支持管理员监管（查看/删除消息），
+        // 发送方把消息镜像一份到服务器留存（静默失败，不影响聊天本身）
+        function reportRoomChat(messageId, message, image) {
+            try {
+                if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+                const roomId = (gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+                if (!roomId) return;
+                const player = gameState.multiplayer.players[gameState.multiplayer.currentPlayerId];
+                fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/room-chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        roomId: roomId,
+                        messageId: String(messageId),
+                        sender: player ? player.name : '玩家',
+                        clientId: gameState.clientId || null,
+                        message: message || null,
+                        image: image || null
+                    })
+                }).catch(() => {});
+            } catch (e) { /* 忽略 */ }
+        }
+
         function sendChatMessage() {
             // 检查两个输入框
             const messageInput1 = document.getElementById('chatInput');
@@ -8574,6 +8630,9 @@ function showScreen(screenId) {
                     if (player) {
                         addChatMessage(player.name, message, gameState.chatColor || player.color, null, messageId);
                     }
+                    
+                    // 镜像上报到服务器（供管理员监管）
+                    reportRoomChat(messageId, message, null);
                 } else {
                     // 单人游戏模式下只显示自己的消息
                     addChatMessage('我', message, gameState.chatColor || '#4CAF50');
@@ -9369,7 +9428,7 @@ function showScreen(screenId) {
         }
 
         // 异步处理图片背景并显示消息
-        async function addChatMessage(sender, message, color, imageData, messageId) {
+        async function addChatMessage(sender, message, color, imageData, messageId, isAdmin) {
             // 处理图片背景
             let processedImageData = imageData;
             if (imageData) {
@@ -9390,7 +9449,13 @@ function showScreen(screenId) {
                 const finalMessageId = messageId || (Date.now() + Math.random().toString(36).substr(2, 9)); // 生成或使用提供的消息ID
                 messageElement.dataset.messageId = finalMessageId;
                 
-                let content = `<strong>${sender}:</strong>`;
+                let content;
+                if (isAdmin) {
+                    // 管理员消息：ADMIN 名字 + 醒目管理员标签
+                    content = `<strong style="color: #FF9800;">${sender}</strong><span style="display: inline-block; margin-left: 5px; padding: 1px 6px; background: linear-gradient(135deg, #FF9800, #F57C00); color: white; border-radius: 3px; font-size: 11px; font-weight: bold; vertical-align: middle;">管理员</span><strong>:</strong>`;
+                } else {
+                    content = `<strong>${sender}:</strong>`;
+                }
                 if (processedImageData) {
                     content += `<br><img src="${processedImageData}" onclick="openImagePreview('${processedImageData}')" style="max-width: 250px; max-height: 200px; border-radius: 5px; margin-top: 5px; cursor: pointer;">`;
                 }
@@ -9752,6 +9817,9 @@ function showScreen(screenId) {
                         if (player) {
                             addChatMessage(player.name, null, player.color, imageData, messageId);
                         }
+                        
+                        // 镜像上报到服务器（供管理员监管）
+                        reportRoomChat(messageId, null, imageData);
                     } else {
                         // 单人游戏模式下只显示自己的图片
                         addChatMessage('我', null, '#4CAF50', imageData);
