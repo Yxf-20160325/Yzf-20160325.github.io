@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>迷宫冒险 - 1.15.2</title>
+    <title>迷宫冒险 - 1.15.3</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         html {
@@ -3378,7 +3378,7 @@
         <div class="updates-container">
             <!-- 更新内容将由用户填写 -->
             <div class="update-item">
-                <div class="update-title">版本 1.15.2</div>
+                <div class="update-title">版本 1.15.3</div>
                 <div class="update-content">
                     <ul>
                         <li>新增综合反作弊系统：金币存档签名防篡改、金币异常变动检测、异常通关速度检测</li>
@@ -4077,7 +4077,7 @@
     </div>
     
     <!-- 版本信息显示 -->
-    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.2</div>
+    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.3</div>
     
     <!-- 管理员登录界面 -->
     <div id="adminLoginModal" class="hidden" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 99999; display: flex; justify-content: center; align-items: center;">
@@ -4112,7 +4112,7 @@
     </div>
     
     <script>
-const CLIENT_VERSION = "1.15.2";
+const CLIENT_VERSION = "1.15.3";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
@@ -4354,12 +4354,18 @@ function connectNotificationSocket() {
             try { showScreen('mainMenu'); } catch (e) { /* 忽略 */ }
         });
 
-        // 管理员以 ADMIN 身份向房间发送聊天消息（仅本房间显示，带管理员标签）
+        // 管理员从后台向房间发送聊天消息（仅本房间显示；支持伪装任意名字 + 任意标签）
         notificationSocket.on('admin-chat-message', (data) => {
             const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
             if (!data || !myRoom || data.roomId !== myRoom) return;
             if (typeof addChatMessage === 'function') {
-                try { addChatMessage('ADMIN', data.message, '#FF9800', null, data.messageId, true); } catch (e) { /* 忽略 */ }
+                try {
+                    const sender = data.sender || 'ADMIN';
+                    const label = (typeof data.label === 'string') ? data.label : '管理员';
+                    // 官方 ADMIN 身份用橙色名字；伪装身份用普通样式（看起来和玩家消息一样）
+                    const color = (sender === 'ADMIN') ? '#FF9800' : null;
+                    addChatMessage(sender, data.message, color, null, data.messageId, true, label);
+                } catch (e) { /* 忽略 */ }
             }
         });
 
@@ -4456,8 +4462,7 @@ async function registerPlayerOnline() {
     const payload = {
         id: gameState.clientId,
         name: gameState.playerName,
-        coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0,
-        level: (typeof gameState.level !== 'undefined') ? gameState.level : 1
+        coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0
     };
     // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
     if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
@@ -4610,10 +4615,30 @@ function startBanStateCheck() {
     }
     fetchMyBanState();
     fetchMyCoins();
+    reportMyCoins();
     banCheckInterval = setInterval(() => {
         fetchMyBanState();
         fetchMyCoins();
+        reportMyCoins();
     }, 15000);
+}
+
+// 把本地真实金币上报给服务器，供管理员在后台查看
+// （与 fetchMyCoins 不同：fetchMyCoins 是拉取管理员账本并入本地钱包；这里是反向把真实余额推给服务器展示）
+async function reportMyCoins() {
+    if (!gameState.clientId || !gameState.playerName) return;
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-online', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: gameState.clientId,
+                name: gameState.playerName,
+                coins: (typeof gameState.coins === 'number') ? gameState.coins : 0
+            })
+        });
+    } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
 }
 
 // 拉取服务器金币账本（管理员发放/扣除），并把差额并入本地钱包
@@ -9428,7 +9453,7 @@ function showScreen(screenId) {
         }
 
         // 异步处理图片背景并显示消息
-        async function addChatMessage(sender, message, color, imageData, messageId, isAdmin) {
+        async function addChatMessage(sender, message, color, imageData, messageId, isAdmin, adminLabel) {
             // 处理图片背景
             let processedImageData = imageData;
             if (imageData) {
@@ -9451,8 +9476,15 @@ function showScreen(screenId) {
                 
                 let content;
                 if (isAdmin) {
-                    // 管理员消息：ADMIN 名字 + 醒目管理员标签
-                    content = `<strong style="color: #FF9800;">${sender}</strong><span style="display: inline-block; margin-left: 5px; padding: 1px 6px; background: linear-gradient(135deg, #FF9800, #F57C00); color: white; border-radius: 3px; font-size: 11px; font-weight: bold; vertical-align: middle;">管理员</span><strong>:</strong>`;
+                    // 后台消息：支持任意名字 + 任意标签（标签为空则不显示，看起来和普通消息一样）
+                    const lbl = (typeof adminLabel === 'string') ? adminLabel : '管理员';
+                    const nameHtml = (sender === 'ADMIN')
+                        ? `<strong style="color: #FF9800;">${sender}</strong>`
+                        : `<strong>${sender}</strong>`;
+                    const tagHtml = lbl
+                        ? `<span style="display: inline-block; margin-left: 5px; padding: 1px 6px; background: linear-gradient(135deg, #FF9800, #F57C00); color: white; border-radius: 3px; font-size: 11px; font-weight: bold; vertical-align: middle;">${lbl}</span>`
+                        : '';
+                    content = `${nameHtml}${tagHtml}<strong>:</strong>`;
                 } else {
                     content = `<strong>${sender}:</strong>`;
                 }
@@ -18449,10 +18481,18 @@ function checkPlayerAtExit(player) {
                 
                 // 检查是否是墙
                 if (cellValue === 1) return;
-                
-                // 检查是否是门：未持钥匙不能通过（在广播前推回，避免其它玩家看到错位）
-                if (cellValue === 9 && !gameState.multiplayer.hasKey) {
-                    showNotification('🔑 你需要钥匙才能打开这扇门！');
+
+                // 检查是否是门：必须先用钥匙开门，玩家停在门外等待倒计时，不能穿过
+                // （修复：原逻辑只拦截"无钥匙"，导致持钥匙时玩家直接走进门格=穿墙）
+                if (cellValue === 9) {
+                    if (gameState.multiplayer.isUnlocking) {
+                        return; // 已在开门倒计时中，等待即可，避免重复触发
+                    }
+                    if (gameState.multiplayer.hasKey) {
+                        startMultiplayerUnlockDoor(); // 持钥匙：开始开门倒计时，本次移动不前进
+                    } else {
+                        showNotification('🔑 你需要钥匙才能打开这扇门！');
+                    }
                     drawMultiplayerMaze();
                     updatePlayerList();
                     return;
@@ -18555,13 +18595,6 @@ function checkPlayerAtExit(player) {
                         type: 'key-pickup',
                         playerId: gameState.multiplayer.currentPlayerId
                     });
-                }
-                
-                // 检查是否是门（已持钥匙 → 开始开门倒计时）
-                if (cellValue === 9 && gameState.multiplayer.hasKey) {
-                    startMultiplayerUnlockDoor();
-                    drawMultiplayerMaze();
-                    updatePlayerList();
                 }
         }
     }
