@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15";
+const SERVER_VERSION = "1.15.1";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -481,6 +481,19 @@ app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
     } catch (error) {
         console.error('[API] 调整金币失败:', error);
         res.status(500).json({ success: false, message: '调整金币失败' });
+    }
+});
+
+// API: 玩家拉取自己被管理员发放/扣除的金币余额（开放接口，供客户端同步钱包）
+// userCoins[clientId] 是管理员操作后的"服务器金币账本"，客户端据此把差额并入本地钱包
+app.get('/api/my-coins', (req, res) => {
+    try {
+        const id = req.query.id;
+        if (!id) return res.json({ success: true, coins: 0 });
+        const coins = userCoins.get(id) || 0;
+        res.json({ success: true, coins });
+    } catch (e) {
+        res.json({ success: true, coins: 0 });
     }
 });
 
@@ -1343,18 +1356,24 @@ app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
         const rawId = (req.body && req.body.userId) || '';
         if (!rawId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
         const userId = resolveUserId(rawId);
-        const { type, banned } = req.body || {};
+        const { type, banned, reason } = req.body || {};
         if (type !== 'multiplayer' && type !== 'single' && type !== 'puzzle') return res.status(400).json({ success: false, message: '类型无效（应为 multiplayer、single 或 puzzle）' });
-        const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false };
+        const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false, reasons: {} };
+        if (!ban.reasons) ban.reasons = {};
         ban[type] = !!banned;
+        // 记录/清除封禁理由（解封时清空）
+        ban.reasons[type] = banned ? ((reason && String(reason).trim()) || '') : '';
         userBans.set(userId, ban);
         const banLabel = type === 'multiplayer' ? '多人游戏' : (type === 'single' ? '单人游戏' : '解密游戏');
-        console.log(`[Admin] 用户 ${userId} 的${banLabel}已${banned ? '封禁' : '解封'}`);
+        console.log(`[Admin] 用户 ${userId} 的${banLabel}已${banned ? '封禁' : '解封'}${banned && ban.reasons[type] ? '，理由: ' + ban.reasons[type] : ''}`);
         // 若该用户当前有实时 socket，立即推送最新封禁状态（REST 注册的玩家无 socket，由客户端定时拉取兜底）
         const socketId = onlineSockets.get(userId);
         if (socketId && socketId !== 'rest') {
             const sock = io.sockets.sockets.get(socketId);
-            if (sock) sock.emit('ban-update', { multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle });
+            if (sock) sock.emit('ban-update', {
+                multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle,
+                multiplayerReason: ban.reasons.multiplayer || '', singleReason: ban.reasons.single || '', puzzleReason: ban.reasons.puzzle || ''
+            });
         }
         res.json({ success: true, message: `已${banned ? '封禁' : '解封'}用户 ${userId} 的${banLabel}`, ban });
     } catch (error) {
@@ -1367,11 +1386,18 @@ app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
 app.get('/api/my-ban', (req, res) => {
     try {
         const id = req.query.id;
-        if (!id) return res.json({ success: true, multiplayer: false, single: false, puzzle: false });
-        const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false };
-        res.json({ success: true, multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle });
+        if (!id) return res.json({ success: true, multiplayer: false, single: false, puzzle: false, multiplayerReason: '', singleReason: '', puzzleReason: '' });
+        const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, reasons: {} };
+        if (!ban.reasons) ban.reasons = {};
+        res.json({
+            success: true,
+            multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle,
+            multiplayerReason: ban.reasons.multiplayer || '',
+            singleReason: ban.reasons.single || '',
+            puzzleReason: ban.reasons.puzzle || ''
+        });
     } catch (e) {
-        res.json({ success: true, multiplayer: false, single: false, puzzle: false });
+        res.json({ success: true, multiplayer: false, single: false, puzzle: false, multiplayerReason: '', singleReason: '', puzzleReason: '' });
     }
 });
 
