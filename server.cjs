@@ -65,6 +65,19 @@ const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, m
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
+// 玩家关卡进度（客户端上报，供管理员查看过关历史）：clientId -> { unlockedLevel, completedLevels, puzzleCompletedLevels }
+const reportedProgress = new Map();
+// 玩家关卡权限（管理员设置）：clientId -> { "single:12": "forbidden"|"forced", "puzzle:5": "forbidden", ... }
+const levelPermissions = new Map();
+// 合并客户端上报的关卡进度（仅覆盖本次提供到的字段，其余保留）
+function mergeProgress(id, p) {
+    if (!id || !p || typeof p !== 'object') return;
+    const cur = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+    if (typeof p.unlockedLevel === 'number' && !isNaN(p.unlockedLevel)) cur.unlockedLevel = Math.max(1, p.unlockedLevel);
+    if (Array.isArray(p.completedLevels)) cur.completedLevels = p.completedLevels.slice(0, 200);
+    if (Array.isArray(p.puzzleCompletedLevels)) cur.puzzleCompletedLevels = p.puzzleCompletedLevels.slice(0, 200);
+    reportedProgress.set(id, cur);
+}
 const MAZES_FILE = path.join(__dirname, 'data', 'mazes.json');
 function loadMazes() {
     try {
@@ -432,12 +445,14 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins } = req.body || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
         const existing = onlinePlayers.get(id) || {};
         // 记录玩家上报的真实金币（供管理员查看）
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
+        // 记录玩家上报的关卡进度（供管理员查看过关历史）
+        mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
@@ -1221,7 +1236,7 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-        const { id, name, coins } = data || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels } = data || {};
         if (!id) return;
         onlinePlayers.set(id, {
             id: id,
@@ -1232,6 +1247,7 @@ io.on('connection', (socket) => {
         });
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
+        mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
             onlineSockets.set(id, socket.id);
             console.log(`[Online] 玩家 ${name} (${id}) 上线，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
@@ -1573,6 +1589,18 @@ app.get('/api/my-ban', (req, res) => {
     }
 });
 
+// 玩家拉取自身关卡权限（forbidden / forced），供客户端拦截"禁止进入"的关卡
+app.get('/api/my-level-permissions', (req, res) => {
+    try {
+        const id = req.query.id;
+        if (!id) return res.json({ success: true, levels: {} });
+        const perms = levelPermissions.get(id) || {};
+        res.json({ success: true, levels: perms });
+    } catch (e) {
+        res.json({ success: true, levels: {} });
+    }
+});
+
 // 反作弊：管理员查看作弊上报记录
 app.get('/api/admin/cheats', requireAdminAuth, (req, res) => {
     try {
@@ -1865,6 +1893,68 @@ app.post('/api/admin/rooms/:roomId/change-max-players', requireAdminAuth, (req, 
         res.json({ success: true, message: `已将人数上限从 ${old} 改为 ${max}`, maxPlayers: max });
     } catch (error) {
         console.error('[API] 修改人数上限失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// ===== 玩家关卡进度 / 关卡权限管理（管理员） =====
+// 查看某玩家的过关历史（单人已解锁关、已完成关；解密已完成关）
+app.get('/api/admin/users/:userId/level-history', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const p = reportedProgress.get(userId) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+        res.json({
+            success: true,
+            userId: userId,
+            unlockedLevel: p.unlockedLevel || 1,
+            completedLevels: Array.isArray(p.completedLevels) ? p.completedLevels : [],
+            puzzleCompletedLevels: Array.isArray(p.puzzleCompletedLevels) ? p.puzzleCompletedLevels : [],
+            maxSingle: 80,
+            maxPuzzle: 60
+        });
+    } catch (error) {
+        console.error('[API] 获取过关历史失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 查看某玩家的关卡权限设置（forbidden / forced）
+app.get('/api/admin/users/:userId/level-permissions', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const perms = levelPermissions.get(userId) || {};
+        res.json({ success: true, userId: userId, levels: perms });
+    } catch (error) {
+        console.error('[API] 获取关卡权限失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 设置某玩家某关卡的权限状态
+// key 形如 "single:12" / "puzzle:5"；state: "forbidden"(禁止进入) | "forced"(强制解锁) | "normal"(恢复正常)
+app.post('/api/admin/users/:userId/level-permission', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { key, state } = req.body || {};
+        if (!/^(single|puzzle):\d+$/.test(key || '')) {
+            return res.status(400).json({ success: false, message: 'key 格式应为 single:N 或 puzzle:N' });
+        }
+        if (!['forbidden', 'forced', 'normal'].includes(state)) {
+            return res.status(400).json({ success: false, message: 'state 必须为 forbidden / forced / normal' });
+        }
+        const perms = levelPermissions.get(userId) || {};
+        if (state === 'normal') {
+            delete perms[key];
+        } else {
+            perms[key] = state;
+        }
+        if (Object.keys(perms).length === 0) levelPermissions.delete(userId);
+        else levelPermissions.set(userId, perms);
+        // 通知该玩家客户端即时应用（按 clientId 过滤；非在线则下次拉取生效）
+        io.emit('level-permission-update', { clientId: userId, levels: perms });
+        res.json({ success: true, message: `已更新 ${key} 为 ${state}`, levels: perms });
+    } catch (error) {
+        console.error('[API] 设置关卡权限失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
     }
 });
