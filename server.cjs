@@ -514,7 +514,7 @@ app.post('/api/report-cheat', (req, res) => {
         if (cheatReports.length > 2000) cheatReports.shift(); // 防止无限增长
         // ===== 反作弊自动封禁：立即封禁其上报时所玩的玩法（管理员可在后台解封） =====
         const mode = (req.body && ['multiplayer', 'single', 'puzzle'].indexOf(req.body.mode) !== -1) ? req.body.mode : 'single';
-        const cheatTypeNames = { coin_tamper: '金币存档篡改', coin_injection: '金币异常变动', impossible_speed: '异常通关速度' };
+        const cheatTypeNames = { coin_tamper: '金币存档篡改', coin_injection: '金币异常变动', impossible_speed: '异常通关速度', forged_complete: '伪造通关' };
         const autoBan = userBans.get(report.clientId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
         if (!autoBan.reasons) autoBan.reasons = {};
         autoBan[mode] = true;
