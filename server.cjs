@@ -1452,6 +1452,30 @@ app.get('/api/admin/cheats', requireAdminAuth, (req, res) => {
     }
 });
 
+// 反作弊：管理员查看被反作弊系统自动封禁的玩家（理由以"反作弊系统自动封禁"开头的封禁）
+app.get('/api/admin/cheat-bans', requireAdminAuth, (req, res) => {
+    try {
+        const modeNames = { multiplayer: '多人游戏', single: '单人游戏', puzzle: '解密游戏', chat: '多人聊天' };
+        const list = [];
+        for (const [uid, ban] of userBans.entries()) {
+            if (!ban || !ban.reasons) continue;
+            const bans = [];
+            for (const mode of Object.keys(modeNames)) {
+                if (ban[mode] && typeof ban.reasons[mode] === 'string' && ban.reasons[mode].indexOf('反作弊系统自动封禁') === 0) {
+                    bans.push({ mode: mode, modeName: modeNames[mode], reason: ban.reasons[mode] });
+                }
+            }
+            if (bans.length > 0) {
+                const p = onlinePlayers.get(uid);
+                list.push({ clientId: uid, username: (p && p.name) ? p.name : '', online: !!p, bans: bans });
+            }
+        }
+        res.json({ success: true, users: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '服务器错误' });
+    }
+});
+
 // ===== 新增：远程控制（管理员专用，精准投递到目标用户 socket） =====
 app.post('/api/admin/remote', requireAdminAuth, (req, res) => {
     try {
