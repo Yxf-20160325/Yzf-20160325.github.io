@@ -4422,6 +4422,89 @@ function connectNotificationSocket() {
             applyBanState(data);
         });
 
+        // 管理员关闭/开启本房间聊天功能
+        notificationSocket.on('admin-room-chat-disabled', (data) => {
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || data.roomId !== myRoom) return;
+            gameState.multiplayer.chatDisabled = !!data.disabled;
+            if (data.disabled) {
+                try { if (typeof closeChatModal === 'function') closeChatModal(); } catch (e) {}
+                if (typeof showNotification === 'function') showNotification('🔇 该房间的聊天功能已被管理员关闭', 4000);
+            } else {
+                if (typeof showNotification === 'function') showNotification('💬 该房间的聊天功能已重新开启', 3000);
+            }
+        });
+
+        // 管理员将某玩家传送到指定坐标
+        notificationSocket.on('admin-teleport', (data) => {
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || data.roomId !== myRoom) return;
+            const pid = data.playerId;
+            const player = gameState.multiplayer.players[pid];
+            if (!player) return;
+            player.x = data.x;
+            player.y = data.y;
+            if (pid === gameState.multiplayer.currentPlayerId) {
+                // 本地玩家被传送：广播给所有 Peer，保证其它玩家看到一致位置
+                if (typeof broadcast === 'function') {
+                    broadcast({ type: 'player-move', playerId: pid, x: data.x, y: data.y });
+                }
+                if (typeof showNotification === 'function') showNotification('🌀 你已被管理员传送到 (' + data.x + ', ' + data.y + ')', 3000);
+            }
+            if (typeof drawMultiplayerMaze === 'function') drawMultiplayerMaze();
+        });
+
+        // 管理员将房主权限转移给某玩家
+        notificationSocket.on('admin-transfer-host', (data) => {
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || data.roomId !== myRoom) return;
+            const newId = data.newHostId;
+            for (const id in gameState.multiplayer.players) {
+                gameState.multiplayer.players[id].isHost = (id === newId);
+            }
+            if (gameState.multiplayer.currentPlayerId === newId) {
+                gameState.multiplayer.isHost = true;
+            }
+            if (typeof drawMultiplayerMaze === 'function') drawMultiplayerMaze();
+            if (typeof updatePlayerList === 'function') updatePlayerList();
+            if (typeof showNotification === 'function') showNotification('👑 房主已变更为 ' + (data.newHostName || '新玩家'), 3000);
+        });
+
+        // 管理员要求更换地图：仅房主客户端执行（复用本地 generateMultiplayerMaze 重新生成并同步）
+        notificationSocket.on('admin-regenerate-map', (data) => {
+            const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
+            if (!data || !myRoom || data.roomId !== myRoom) return;
+            if (!gameState.multiplayer.isHost) return; // 仅房主执行
+            if (typeof generateMultiplayerMaze !== 'function') return;
+            gameState.multiplayer.maze = generateMultiplayerMaze();
+            // 重置所有玩家到起点
+            for (const pid in gameState.multiplayer.players) {
+                const pl = gameState.multiplayer.players[pid];
+                if (pl) { pl.x = 1; pl.y = 1; pl.reachedExit = false; }
+            }
+            if (gameState.multiplayer.players[gameState.multiplayer.currentPlayerId]) {
+                gameState.multiplayer.players[gameState.multiplayer.currentPlayerId].x = 1;
+                gameState.multiplayer.players[gameState.multiplayer.currentPlayerId].y = 1;
+            }
+            if (typeof drawMultiplayerMaze === 'function') drawMultiplayerMaze();
+            // 向所有 Peer 重新同步完整游戏状态
+            if (typeof broadcast === 'function') {
+                broadcast({
+                    type: 'game-state',
+                    maze: gameState.multiplayer.maze,
+                    players: gameState.multiplayer.players,
+                    exit: gameState.multiplayer.exit,
+                    teleporters: gameState.multiplayer.teleporters,
+                    movingEnemies: gameState.multiplayer.movingEnemies || [],
+                    keyPosition: gameState.multiplayer.keyPosition || null,
+                    doorPosition: gameState.multiplayer.doorPosition || null,
+                    maxPlayers: gameState.multiplayer.maxPlayers,
+                    protectedPlayers: gameState.multiplayer.protectedPlayers
+                });
+            }
+            if (typeof showNotification === 'function') showNotification('🗺️ 管理员已更换地图，迷宫已重新生成', 3000);
+        });
+
     } catch (e) {
         console.warn('[通知] 建立 socket 失败(可忽略):', e);
     }
@@ -5540,7 +5623,8 @@ let gameState = {
         maxPlayers: 2, // 默认最大人数
         protectedPlayers: {}, // 受保护玩家列表
         showPlayerList: true,
-        unlockTimeLeft:10
+        unlockTimeLeft:10,
+        chatDisabled: false // 房间级聊天开关（管理员可关闭整个房间聊天）
     },
     devMode: false,
     uiSettings: JSON.parse(localStorage.getItem('uiSettings')) || {
@@ -8172,6 +8256,11 @@ function showScreen(screenId) {
                 showChatDisabledModal(gameState.chatDisabledReason || '你的多人游戏聊天功能已被管理员封禁。');
                 return;
             }
+            // 房间级聊天被管理员关闭：同样禁止打开
+            if (gameState.multiplayer && gameState.multiplayer.chatDisabled) {
+                showChatDisabledModal('该房间的聊天功能已被管理员关闭。');
+                return;
+            }
             const chatModal = document.getElementById('chatModal');
             if (chatModal) {
                 chatModal.style.display = 'flex';
@@ -8621,6 +8710,12 @@ function showScreen(screenId) {
                 // 多人游戏聊天被管理员封禁：拦截发送
                 if (gameState.chatDisabled) {
                     addChatMessage('系统', '你的多人游戏聊天功能已被管理员封禁。', '#dc3545');
+                    if (sourceInput) sourceInput.value = '';
+                    return;
+                }
+                // 房间级聊天被管理员关闭：拦截发送
+                if (gameState.multiplayer && gameState.multiplayer.chatDisabled) {
+                    addChatMessage('系统', '该房间的聊天功能已被管理员关闭。', '#dc3545');
                     if (sourceInput) sourceInput.value = '';
                     return;
                 }
@@ -9820,6 +9915,11 @@ function showScreen(screenId) {
                     // 多人游戏聊天被管理员封禁：拦截图片发送
                     if (gameState.chatDisabled) {
                         addChatMessage('系统', '你的多人游戏聊天功能已被管理员封禁，无法发送图片。', '#dc3545');
+                        return;
+                    }
+                    // 房间级聊天被管理员关闭：拦截图片发送
+                    if (gameState.multiplayer && gameState.multiplayer.chatDisabled) {
+                        addChatMessage('系统', '该房间的聊天功能已被管理员关闭，无法发送图片。', '#dc3545');
                         return;
                     }
                     // 检查是否处于多人游戏模式
@@ -17610,8 +17710,8 @@ function handleMultiplayerData(data, peerId) {
                     break;
                 case 'chat-message':
                     // 收到聊天消息
-                    // 多人游戏聊天被管理员封禁：不显示收到的文本消息
-                    if (gameState.chatDisabled) break;
+                    // 多人游戏聊天被管理员封禁 或 房间聊天被关闭：不显示收到的文本消息
+                    if (gameState.chatDisabled || (gameState.multiplayer && gameState.multiplayer.chatDisabled)) break;
                     const chatSender = gameState.multiplayer.players[data.from];
                     if (chatSender) {
                         // 使用消息中携带的颜色，如果没有则使用玩家默认颜色
@@ -17621,8 +17721,8 @@ function handleMultiplayerData(data, peerId) {
                     break;
                 case 'chat-image':
                     // 收到图片消息
-                    // 多人游戏聊天被管理员封禁：不显示收到的图片消息
-                    if (gameState.chatDisabled) break;
+                    // 多人游戏聊天被管理员封禁 或 房间聊天被关闭：不显示收到的图片消息
+                    if (gameState.chatDisabled || (gameState.multiplayer && gameState.multiplayer.chatDisabled)) break;
                     const imageSender = gameState.multiplayer.players[data.from];
                     if (imageSender) {
                         addChatMessage(imageSender.name, null, imageSender.color, data.image, data.messageId);
