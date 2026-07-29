@@ -59,6 +59,7 @@ const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
 const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool, chat:bool, reasons:{} }，管理员封禁状态
 const cheatReports = [];           // 反作弊上报记录：{ id, clientId, type, detail, time }
+const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, message, image, isAdmin, time}]，房间聊天记录（客户端镜像上报，供管理员监管），每房间上限 200 条
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
@@ -547,9 +548,15 @@ app.delete('/api/admin/rooms/:roomId', requireAdminAuth, (req, res) => {
             return res.status(404).json({ success: false, message: '房间不存在' });
         }
         
-        // 通知房间内所有玩家
+        // 通知房间内所有玩家（socket.io 房间通道，兼容旧连接方式）
         io.to(roomId).emit('room-kicked', {
             message: '房间已被管理员删除'
+        });
+        // 全局广播房间删除事件：玩家的通知 socket 未 join socket.io 房间，
+        // io.to(roomId) 实际到不了他们，必须全局广播、由客户端按 roomId 自行过滤（与 room-completed 同款模式）
+        io.emit('room-deleted', {
+            roomId: roomId,
+            message: '房间已被管理员删除，所有玩家已被移出并断开多人游戏连接。'
         });
         
         // 强制断开所有玩家的连接
@@ -560,10 +567,19 @@ app.delete('/api/admin/rooms/:roomId', requireAdminAuth, (req, res) => {
             }
         }
         
-        // 删除房间
+        // 清理在线玩家表中该房间的归属，避免残留
+        for (const p of onlinePlayers.values()) {
+            if (p && p.roomId === roomId) p.roomId = null;
+        }
+        
+        // 删除房间与聊天记录
         rooms.delete(roomId);
+        roomChats.delete(roomId);
         
         console.log(`[Admin] 房间 ${roomId} 已被管理员删除`);
+        
+        // 广播更新后的房间列表
+        broadcastRoomList();
         
         res.json({ success: true, message: '房间删除成功' });
     } catch (error) {
@@ -648,6 +664,88 @@ app.patch('/api/admin/rooms/:roomId/privacy', requireAdminAuth, (req, res) => {
     } catch (error) {
         console.error('[API] 切换房间私密状态失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// ===== 房间聊天监管（管理员可查看/发言/删除消息） =====
+// 聊天走 PeerJS P2P、服务器天然看不到，因此由发送方客户端把消息"镜像上报"到这里留存。
+
+// API: 客户端镜像上报聊天消息（公开接口）
+app.post('/api/room-chat', (req, res) => {
+    try {
+        const { roomId, messageId, sender, clientId, message, image } = req.body || {};
+        if (!roomId || !messageId || (!message && !image)) {
+            return res.json({ success: false, message: '参数不完整' });
+        }
+        let list = roomChats.get(String(roomId));
+        if (!list) { list = []; roomChats.set(String(roomId), list); }
+        // 去重（同一 messageId 只存一次）
+        if (list.some(m => m.messageId === messageId)) return res.json({ success: true });
+        list.push({
+            messageId: String(messageId),
+            sender: String(sender || '玩家').slice(0, 50),
+            clientId: clientId ? String(clientId) : null,
+            message: message ? String(message).slice(0, 2000) : null,
+            image: image ? String(image).slice(0, 500000) : null, // 图片 base64 上限 ~500KB
+            isAdmin: false,
+            time: Date.now()
+        });
+        if (list.length > 200) list.shift();
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
+
+// API: 管理员查看房间聊天记录
+app.get('/api/admin/rooms/:roomId/chat', requireAdminAuth, (req, res) => {
+    try {
+        const roomId = String(req.params.roomId);
+        const list = roomChats.get(roomId) || [];
+        res.json({ success: true, roomExists: rooms.has(roomId), messages: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '服务器错误' });
+    }
+});
+
+// API: 管理员以 ADMIN 身份向房间发送消息（全局广播，客户端按 roomId 过滤展示）
+app.post('/api/admin/rooms/:roomId/chat-send', requireAdminAuth, (req, res) => {
+    try {
+        const roomId = String(req.params.roomId);
+        const message = (req.body && req.body.message) ? String(req.body.message).slice(0, 2000) : '';
+        if (!message.trim()) return res.json({ success: false, message: '消息不能为空' });
+        const messageId = 'adm_' + Date.now() + Math.random().toString(36).slice(2, 8);
+        const record = {
+            messageId, sender: 'ADMIN', clientId: null,
+            message: message, image: null, isAdmin: true, time: Date.now()
+        };
+        let list = roomChats.get(roomId);
+        if (!list) { list = []; roomChats.set(roomId, list); }
+        list.push(record);
+        if (list.length > 200) list.shift();
+        // 全局广播（通知 socket 未 join 房间，由客户端按 roomId 过滤）
+        io.emit('admin-chat-message', { roomId, messageId, message });
+        console.log(`[Admin] ADMIN 向房间 ${roomId} 发送消息: ${message}`);
+        res.json({ success: true, messageId });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '发送失败' });
+    }
+});
+
+// API: 管理员删除房间内某条聊天消息（全局广播删除事件，客户端移除对应 DOM）
+app.post('/api/admin/rooms/:roomId/chat-delete', requireAdminAuth, (req, res) => {
+    try {
+        const roomId = String(req.params.roomId);
+        const messageId = (req.body && req.body.messageId) ? String(req.body.messageId) : '';
+        if (!messageId) return res.json({ success: false, message: '缺少 messageId' });
+        const list = roomChats.get(roomId) || [];
+        const idx = list.findIndex(m => m.messageId === messageId);
+        if (idx !== -1) list.splice(idx, 1);
+        io.emit('admin-chat-delete', { roomId, messageId });
+        console.log(`[Admin] 删除房间 ${roomId} 的消息 ${messageId}`);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
     }
 });
 
