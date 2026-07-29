@@ -18230,6 +18230,21 @@ function broadcast(data, excludePlayerId = null) {
             // 应用UI设置
             console.log("应用UI设置")
             applyUISettings();
+
+            // 通知服务器：本房间已开始游戏（用于房间列表/管理后台把状态从"等待中"切到"游戏中"）
+            // 实时游戏走 P2P，服务器无法直接感知开始，因此由房主启动时显式上报
+            try {
+                if (gameState.multiplayer.isHost && gameState.multiplayer.roomCode && notificationSocket) {
+                    const notifyStart = () => {
+                        if (notificationSocket.connected) {
+                            notificationSocket.emit('startGame', gameState.multiplayer.roomCode);
+                        } else {
+                            setTimeout(notifyStart, 1000);
+                        }
+                    };
+                    notifyStart();
+                }
+            } catch (e) { console.warn('[startGame] 上报失败(忽略):', e); }
         }
 
 function handleMultiplayerMoveLogic(dx, dy) {
@@ -19238,10 +19253,11 @@ function generateMultiplayerMaze() {
     // 先清空敌人，避免上一局螺旋迷宫的敌人残留在普通迷宫中
     gameState.multiplayer.movingEnemies = [];
     
-    // 40%概率生成螺旋迷宫（含移动敌人）
-    const isSpiralMaze = Math.random() < 0.4;
-    // %100生成（调试用）
-    // const isSpiralMaze = true;
+    // 螺旋迷宫生成开关（多人联机）：false = 永不生成螺旋迷宫，始终走普通迷宫
+    const isSpiralMaze = false;
+    // 以下为可选配置（取消注释可恢复螺旋迷宫生成）：
+    // 40%概率生成螺旋迷宫（含移动敌人）： const isSpiralMaze = Math.random() < 0.4;
+    // %100生成（调试用）： const isSpiralMaze = true;
     if (isSpiralMaze) {
         maze = generateSpiralMaze(size);
         gameState.multiplayer.exit = { 
