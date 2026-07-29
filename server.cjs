@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15.1";
+const SERVER_VERSION = "1.15.2";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -58,6 +58,7 @@ const userLevels = new Map(); // 用户等级（按 userId 存储）
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
 const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool, chat:bool, reasons:{} }，管理员封禁状态
+const cheatReports = [];           // 反作弊上报记录：{ id, clientId, type, detail, time }
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
@@ -494,6 +495,45 @@ app.get('/api/my-coins', (req, res) => {
         res.json({ success: true, coins });
     } catch (e) {
         res.json({ success: true, coins: 0 });
+    }
+});
+
+// 反作弊：客户端上报可疑作弊行为（公开接口，仅需 clientId + type + detail）
+app.post('/api/report-cheat', (req, res) => {
+    try {
+        const { clientId, type, detail } = req.body || {};
+        if (!clientId || !type) return res.status(400).json({ success: false, message: '缺少 clientId 或 type' });
+        const report = {
+            id: Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+            clientId: String(clientId).slice(0, 64),
+            type: String(type).slice(0, 40),
+            detail: String(detail || '').slice(0, 500),
+            time: new Date().toISOString()
+        };
+        cheatReports.push(report);
+        if (cheatReports.length > 2000) cheatReports.shift(); // 防止无限增长
+        // ===== 反作弊自动封禁：立即封禁其上报时所玩的玩法（管理员可在后台解封） =====
+        const mode = (req.body && ['multiplayer', 'single', 'puzzle'].indexOf(req.body.mode) !== -1) ? req.body.mode : 'single';
+        const cheatTypeNames = { coin_tamper: '金币存档篡改', coin_injection: '金币异常变动', impossible_speed: '异常通关速度' };
+        const autoBan = userBans.get(report.clientId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+        if (!autoBan.reasons) autoBan.reasons = {};
+        autoBan[mode] = true;
+        autoBan.reasons[mode] = `反作弊系统自动封禁：检测到${cheatTypeNames[report.type] || report.type}。如有异议请联系管理员申诉解封。`;
+        userBans.set(report.clientId, autoBan);
+        const modeLabel = mode === 'multiplayer' ? '多人游戏' : (mode === 'single' ? '单人游戏' : '解密游戏');
+        console.log(`[反作弊] 用户 ${report.clientId} 因 ${report.type} 被自动封禁${modeLabel}`);
+        // 若该用户有实时 socket，立即推送最新封禁状态（否则由客户端 15s 轮询兜底）
+        const cheatSocketId = onlineSockets.get(report.clientId);
+        if (cheatSocketId && cheatSocketId !== 'rest') {
+            const sock = io.sockets.sockets.get(cheatSocketId);
+            if (sock) sock.emit('ban-update', {
+                multiplayer: !!autoBan.multiplayer, single: !!autoBan.single, puzzle: !!autoBan.puzzle, chat: !!autoBan.chat,
+                multiplayerReason: autoBan.reasons.multiplayer || '', singleReason: autoBan.reasons.single || '', puzzleReason: autoBan.reasons.puzzle || '', chatReason: autoBan.reasons.chat || ''
+            });
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '服务器错误' });
     }
 });
 
@@ -1399,6 +1439,16 @@ app.get('/api/my-ban', (req, res) => {
         });
     } catch (e) {
         res.json({ success: true, multiplayer: false, single: false, puzzle: false, chat: false, multiplayerReason: '', singleReason: '', puzzleReason: '', chatReason: '' });
+    }
+});
+
+// 反作弊：管理员查看作弊上报记录
+app.get('/api/admin/cheats', requireAdminAuth, (req, res) => {
+    try {
+        const list = cheatReports.slice(-300).reverse(); // 最新在前
+        res.json({ success: true, reports: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '服务器错误' });
     }
 });
 
