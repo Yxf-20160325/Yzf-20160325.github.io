@@ -1197,14 +1197,19 @@ io.on('connection', (socket) => {
 
     socket.on('startGame', (roomId) => {
         const room = rooms.get(roomId);
-        if(room && room.actualHost === socket.id) {
-            room.status = 'playing';
-            room.lastActivity = Date.now(); // 更新房间最后活动时间
-            io.to(roomId).emit('game-started', {
-                roomId: roomId,
-                status: 'playing'
-            });
-            broadcastRoomList();
+        if (room) {
+            // REST 创建的房间房主 socket 未绑定时，首启即以当前连接为房主
+            // （否则 actualHost 恒为 null，startGame 永远不会生效，房间永远停在 waiting）
+            if (!room.actualHost) room.actualHost = socket.id;
+            if (room.actualHost === socket.id) {
+                room.status = 'playing';
+                room.lastActivity = Date.now(); // 更新房间最后活动时间
+                io.to(roomId).emit('game-started', {
+                    roomId: roomId,
+                    status: 'playing'
+                });
+                broadcastRoomList();
+            }
         }
     });
 
