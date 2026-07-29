@@ -4422,6 +4422,14 @@ function connectNotificationSocket() {
             applyBanState(data);
         });
 
+        // 管理员更新了本玩家的关卡权限（即时应用；若玩家以 REST 注册无 socket，则靠 15s 轮询兜底）
+        notificationSocket.on('level-permission-update', (data) => {
+            if (!data || !gameState.clientId) return;
+            if (data.clientId !== gameState.clientId) return;
+            console.log('[通知] 收到关卡权限更新:', data);
+            applyLevelPermissions(data.levels);
+        });
+
         // 管理员关闭/开启本房间聊天功能
         notificationSocket.on('admin-room-chat-disabled', (data) => {
             const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
@@ -4545,7 +4553,10 @@ async function registerPlayerOnline() {
     const payload = {
         id: gameState.clientId,
         name: gameState.playerName,
-        coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0
+        coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0,
+        unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
+        completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
+        puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : []
     };
     // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
     if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
@@ -4699,10 +4710,12 @@ function startBanStateCheck() {
     fetchMyBanState();
     fetchMyCoins();
     reportMyCoins();
+    fetchMyLevelPermissions();
     banCheckInterval = setInterval(() => {
         fetchMyBanState();
         fetchMyCoins();
         reportMyCoins();
+        fetchMyLevelPermissions();
     }, 15000);
 }
 
@@ -4718,10 +4731,38 @@ async function reportMyCoins() {
             body: JSON.stringify({
                 id: gameState.clientId,
                 name: gameState.playerName,
-                coins: (typeof gameState.coins === 'number') ? gameState.coins : 0
+                coins: (typeof gameState.coins === 'number') ? gameState.coins : 0,
+                unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
+                completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
+                puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : []
             })
         });
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
+}
+
+// 拉取并应用管理员设置的关卡权限（forbidden / forced），每 15 秒轮询兜底
+async function fetchMyLevelPermissions() {
+    if (!gameState.clientId) return;
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/my-level-permissions?id=' + encodeURIComponent(gameState.clientId));
+        const data = await resp.json();
+        if (data && data.success) gameState.levelPermissions = data.levels || {};
+    } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
+}
+
+// 应用管理员下发的关卡权限（供通知推送即时调用）
+function applyLevelPermissions(levels) {
+    gameState.levelPermissions = levels && typeof levels === 'object' ? levels : {};
+}
+
+// 判断某关卡是否被管理员禁止进入
+function isLevelBlocked(type, level) {
+    return gameState.levelPermissions[type + ':' + level] === 'forbidden';
+}
+// 判断某关卡是否被管理员强制解锁
+function isLevelForced(type, level) {
+    return gameState.levelPermissions[type + ':' + level] === 'forced';
 }
 
 // 拉取服务器金币账本（管理员发放/扣除），并把差额并入本地钱包
@@ -5575,6 +5616,7 @@ let gameState = {
     })()),
     unsolvableLevels: [], // 空的无解关卡列表（用户自定义）
     specialLevels: [30,50], // 空的特殊关卡列表（用户自定义）
+    levelPermissions: {}, // 管理员设置的关卡权限：{ "single:12": "forbidden"|"forced", "puzzle:5": "forbidden", ... }
     controlsReversed: false,
     showPathHint: false, // 控制是否显示路径提示
     pathHintTimer: null, // 路径提示定时器
@@ -6779,7 +6821,7 @@ function initPuzzleLevelSelect() {
         const btn = document.createElement('button');
         const completed = gameState.puzzleCompletedLevels.includes(i);
         // 第一关永远可玩，后续关卡需要前一关完成
-        const unlocked = i === 1 || gameState.puzzleCompletedLevels.includes(i - 1);
+        const unlocked = i === 1 || gameState.puzzleCompletedLevels.includes(i - 1) || isLevelForced('puzzle', i);
         
         btn.textContent = completed ? '✅' : i;
         btn.style.cssText = `
@@ -6813,6 +6855,11 @@ function initPuzzleLevelSelect() {
 
 // 开始指定关卡的解密游戏
 function startPuzzleLevel(level) {
+    // 管理员禁止进入该解密关卡：拦截
+    if (isLevelBlocked('puzzle', level)) {
+        if (typeof showNotification === 'function') showNotification('🚫 解密第 ' + level + ' 关已被管理员禁止进入', 4000);
+        return;
+    }
     gameState.isCustomMaze = true;
     gameState.isPreviewMode = false;
     gameState.currentLevel = 'puzzle';
@@ -12491,6 +12538,12 @@ function isValidPosition(x, y) {
         }
 
 function initSinglePlayerGame(isLoadingSave = false) {
+    // 管理员禁止进入该单人关卡：拦截并退回关卡选择
+    if (typeof gameState.currentLevel === 'number' && isLevelBlocked('single', gameState.currentLevel)) {
+        if (typeof showNotification === 'function') showNotification('🚫 第 ' + gameState.currentLevel + ' 关已被管理员禁止进入', 4000);
+        if (typeof showScreen === 'function') showScreen('singlePlayerLevelSelect');
+        return;
+    }
     // 每次进入游戏从 localStorage 同步金币
     syncCoinsFromStorage();
     
