@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>迷宫冒险 - 1.15.1</title>
+    <title>迷宫冒险 - 1.15.2</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         html {
@@ -3378,6 +3378,19 @@
         <div class="updates-container">
             <!-- 更新内容将由用户填写 -->
             <div class="update-item">
+                <div class="update-title">版本 1.15.2</div>
+                <div class="update-content">
+                    <ul>
+                        <li>新增综合反作弊系统：金币存档签名防篡改、金币异常变动检测、异常通关速度检测</li>
+                        <li>检测到作弊自动封禁对应玩法（管理员可解封）</li>
+                        <li>新增多人游戏聊天封禁功能（禁止打开聊天窗口、收发消息）</li>
+                        <li>管理后台新增作弊记录查看</li>
+                        <li>管理后台控制面板精简，用户列表增加加金币/聊天封禁按钮</li>
+                        <li>管理员发放金币改为弹窗提示</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="update-item">
                 <div class="update-title">版本 1.15.1</div>
                 <div class="update-content">
                     <ul>
@@ -4064,7 +4077,7 @@
     </div>
     
     <!-- 版本信息显示 -->
-    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.1</div>
+    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.2</div>
     
     <!-- 管理员登录界面 -->
     <div id="adminLoginModal" class="hidden" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 99999; display: flex; justify-content: center; align-items: center;">
@@ -4099,7 +4112,7 @@
     </div>
     
     <script>
-const CLIENT_VERSION = "1.15.1";
+const CLIENT_VERSION = "1.15.2";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
@@ -4575,14 +4588,16 @@ function applyServerCoins(serverCoins) {
     const oldDb = (typeof gameState.dbCoins === 'number') ? gameState.dbCoins : 0;
     const diff = serverCoins - oldDb;
     if (diff === 0) return;
+    gameState._adminCoinOp = true; // 标记管理端发放，避免被数值突变检测误判
     gameState.coins += diff;
     if (gameState.coins < 0) gameState.coins = 0;
     gameState.dbCoins = serverCoins;
     gameState.playerData.coins = gameState.coins;
     try {
-        localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
+        saveCoinsSecure();
         localStorage.setItem('dbCoins', String(serverCoins));
     } catch (e) {}
+    gameState._adminCoinOp = false;
     if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
     if (diff > 0) {
         showCoinGrantedModal(diff, true);
@@ -5759,7 +5774,7 @@ function buyItem(itemKey) {
         gameState.playerData.coins = gameState.coins;
         updateCoinDisplay();
         // 加密保存到 localStorage
-        localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
+        saveCoinsSecure();
         updateShopButtons(); // 更新按钮状态
         showNotification(`成功购买 ${item.name}！`);
         
@@ -6155,7 +6170,7 @@ function addCoins(amount) {
     }
     
     // 每次加金币时加密存储，防止意外丢失
-    localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
+    saveCoinsSecure();
     
     // 显示获得金币的提示
     showNotification(`获得 ${amount} 个金币！`);
@@ -6168,7 +6183,7 @@ function deductAuthorCoins(amount) {
     gameState.playerData.coins = gameState.coins;
     updateCoinDisplay();
     // 加密存储，防止意外丢失
-    localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
+    saveCoinsSecure();
     return true;
 }
 
@@ -6228,16 +6243,124 @@ function b64decodeUtf8(b64) {
     return new TextDecoder().decode(bytes);
 }
 
-// 从 localStorage 同步金币到内存并更新显示
-function syncCoinsFromStorage() {
-    const rawCoins = localStorage.getItem('playerCoins');
-    if (rawCoins !== null) {
-        const decrypted = decryptCoins(rawCoins);
-        if (decrypted !== null) {
-            gameState.coins = decrypted;
-            gameState.playerData.coins = decrypted;
+// =============== 反作弊系统 ===============
+const CHEAT_SIG_KEY = 'maze_anticheat_sig_v1';
+const COIN_ANOMALY_THRESHOLD = 50000; // 单次（非管理员发放/非开发者模式）金币变动超过此值视为可疑
+
+// 对加密后的金币串生成确定性签名（轻量哈希，用于检测外部篡改）
+function coinSignature(encrypted) {
+    let h = 0x811c9dc5;
+    const s = String(encrypted) + '|' + CHEAT_SIG_KEY;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16);
+}
+
+// 带签名保存金币到 localStorage（替换所有 encryptCoins 直接写入）
+function saveCoinsSecure(value) {
+    const v = (typeof value === 'number' && !isNaN(value)) ? value : (gameState.coins || 0);
+    const nv = v < 0 ? 0 : v;
+    gameState.coins = nv;
+    if (gameState.playerData) gameState.playerData.coins = nv;
+    const enc = encryptCoins(nv);
+    const sig = coinSignature(enc);
+    try {
+        localStorage.setItem('playerCoins', enc + '.' + sig);
+    } catch (e) {}
+    // 数值突变检测（排除开发者模式与管理端发放）
+    if (typeof gameState._lastSavedCoins === 'number') {
+        const delta = nv - gameState._lastSavedCoins;
+        if (!gameState._adminCoinOp && !gameState.developerMode && Math.abs(delta) > COIN_ANOMALY_THRESHOLD) {
+            handleCheatDetected('coin_injection', `金币异常变动: 上次 ${gameState._lastSavedCoins} → 当前 ${nv}（差额 ${delta > 0 ? '+' : ''}${delta}）`);
         }
     }
+    gameState._lastSavedCoins = nv;
+}
+
+// 从 localStorage 读取金币并校验签名
+function loadCoinsSecure() {
+    const raw = localStorage.getItem('playerCoins');
+    if (raw === null) return { value: 0, tampered: false, legacy: true };
+    if (raw.indexOf('.') !== -1) {
+        const parts = raw.split('.');
+        const enc = parts[0], sig = parts[parts.length - 1];
+        if (coinSignature(enc) === sig) {
+            const val = decryptCoins(enc);
+            return { value: (val === null ? 0 : val), tampered: false, legacy: false };
+        }
+        return { value: 0, tampered: true, legacy: false };
+    }
+    // 旧格式（无签名）：迁移
+    const val = decryptCoins(raw);
+    return { value: (val === null ? 0 : val), tampered: false, legacy: true };
+}
+
+// 判断当前所玩的玩法（用于反作弊自动封禁定位）
+function currentPlayMode() {
+    if (gameState.currentScreen === 'multiplayerGame') return 'multiplayer';
+    if (gameState.currentLevel === 'puzzle') return 'puzzle';
+    return 'single';
+}
+
+// 检测并处理作弊（同类型只上报一次，避免刷屏）
+// 检测到作弊：1) 上报服务器（服务器会自动封禁该玩法，管理员可解封）；2) 本地立即禁用该玩法（不等轮询）
+function handleCheatDetected(type, detail) {
+    gameState._cheatReported = gameState._cheatReported || {};
+    if (gameState._cheatReported[type]) return;
+    gameState._cheatReported[type] = true;
+    gameState.cheatDetected = true;
+    const mode = currentPlayMode();
+    reportCheat(type, detail, mode);
+    // 本地立即封禁当前玩法（服务器轮询/推送随后会同步权威状态）
+    const cheatBanReason = '反作弊系统自动封禁：检测到作弊行为。如有异议请联系管理员申诉解封。';
+    setTimeout(() => {
+        try {
+            if (mode === 'multiplayer' && typeof setMultiplayerDisabled === 'function') {
+                setMultiplayerDisabled(true, cheatBanReason);
+            } else if (mode === 'puzzle' && typeof setPuzzleDisabled === 'function') {
+                setPuzzleDisabled(true, cheatBanReason);
+            } else if (typeof setSinglePlayerDisabled === 'function') {
+                setSinglePlayerDisabled(true, cheatBanReason);
+            }
+        } catch (e) {}
+    }, 300);
+}
+
+// 上报作弊到服务器（服务端留存并自动封禁对应玩法，供管理后台审查/解封）
+function reportCheat(type, detail, mode) {
+    if (!gameState.clientId) return;
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/report-cheat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientId: gameState.clientId, type: type, detail: String(detail || '').slice(0, 500), mode: mode || currentPlayMode() })
+        }).catch(() => {});
+    } catch (e) {}
+}
+
+// 异常通关速度检测（基于 singlePlayerGame.startTime，单位秒）
+function detectImpossibleSpeed(elapsedSec, levelId) {
+    if (elapsedSec < 1) { // 小于1秒完成关卡基本不可能是正常操作
+        handleCheatDetected('impossible_speed', `关卡 ${levelId} 用时 ${elapsedSec}s 异常过短（疑似瞬通/作弊）`);
+    }
+}
+
+// 从 localStorage 同步金币到内存并更新显示
+function syncCoinsFromStorage() {
+    const r = loadCoinsSecure();
+    if (r.tampered) {
+        gameState.coins = 0;
+        gameState.playerData.coins = 0;
+        handleCheatDetected('coin_tamper', '从 localStorage 加载金币时发现签名不匹配（数据被外部篡改）');
+    } else {
+        gameState.coins = r.value;
+        gameState.playerData.coins = r.value;
+        if (r.legacy) saveCoinsSecure(r.value); // 旧格式迁移为带签名
+    }
+    gameState._lastSavedCoins = gameState.coins;
     // 加载服务器金币账本已并入本地的部分（刷新后用于与服务器对账，避免重复发放）
     const rawDb = localStorage.getItem('dbCoins');
     if (rawDb !== null) {
@@ -6250,38 +6373,23 @@ function syncCoinsFromStorage() {
 // 在页面加载时初始化金币显示
 window.addEventListener('load', () => {
     createCoinDisplay();
-    // 从 localStorage 加载金币（加密存储）
-    const rawCoins = localStorage.getItem('playerCoins');
-    if (rawCoins === null) {
-        // 首次使用，没有数据
+    // 从 localStorage 加载金币（带签名校验的反作弊存储）
+    const r = loadCoinsSecure();
+    if (r.tampered) {
+        // 数据被篡改：清零并禁用多人联机，记录作弊
         gameState.coins = 0;
+        gameState.multiplayerDisabled = true;
+        const mpReason = '检测到存档数据异常（金币数据被篡改），为安全起见已禁用多人联机功能。请刷新页面以恢复正常版本后再试。';
+        gameState.multiplayerDisabledReason = mpReason;
+        handleCheatDetected('coin_tamper', '页面加载时金币签名校验失败（数据被外部篡改）');
+        setTimeout(() => {
+            showMultiplayerDisabledModal(mpReason);
+        }, 500);
     } else {
-        let decrypted = decryptCoins(rawCoins);
-        
-        // 【修复】兼容旧版明文数据：如果解密失败，尝试当作旧格式解析
-        if (decrypted === null) {
-            const oldFormat = parseInt(rawCoins);
-            if (!isNaN(oldFormat)) {
-                // 旧格式数据，迁移到新格式
-                decrypted = oldFormat;
-                localStorage.setItem('playerCoins', encryptCoins(decrypted));
-            }
-        }
-        
-        if (decrypted !== null) {
-            // 解密成功
-            gameState.coins = decrypted;
-        } else {
-            // 数据被篡改或损坏，解密失败
-            gameState.coins = 0;
-            gameState.multiplayerDisabled = true;
-            const mpReason = '检测到存档数据异常（金币数据被篡改或损坏），为安全起见已禁用多人联机功能。请刷新页面以恢复正常版本后再试。';
-            gameState.multiplayerDisabledReason = mpReason;
-            setTimeout(() => {
-                showMultiplayerDisabledModal(mpReason);
-            }, 500);
-        }
+        gameState.coins = r.value;
+        if (r.legacy) saveCoinsSecure(r.value); // 旧格式（无签名）迁移为带签名
     }
+    gameState._lastSavedCoins = gameState.coins;
     gameState.playerData.coins = gameState.coins;
     // 初始不显示，在游戏开始时再显示
 });
@@ -6915,7 +7023,10 @@ function validatePuzzleLevelGeneration() {
 function completePuzzleLevel() {
     const level = gameState.puzzleCurrentLevel;
     if (!level) return;
-    
+
+    // 反作弊：异常通关速度检测（基于本关开始时间）
+    detectImpossibleSpeed(Math.floor((Date.now() - (singlePlayerGame.startTime || Date.now())) / 1000), 'puzzle#' + level);
+
     if (typeof gameState.puzzleCompletedLevels === 'undefined') {
         gameState.puzzleCompletedLevels = JSON.parse(localStorage.getItem('puzzleCompletedLevels')) || [];
     }
@@ -10889,7 +11000,7 @@ function toggleConsole() {
         // 开发者控制台解锁时自动将金币设为 1000000
         gameState.coins = 1000000;
         gameState.playerData.coins = 1000000;
-        localStorage.setItem('playerCoins', encryptCoins(1000000));
+        saveCoinsSecure(1000000);
         if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
         showNotification('开发者模式已激活！');
     } else {
@@ -11089,7 +11200,7 @@ function showMessageToSelf(message) {
                 gameState.coins = val;
                 gameState.playerData.coins = val;
                 try {
-                    localStorage.setItem('playerCoins', encryptCoins(val));
+                    saveCoinsSecure(val);
                 } catch (e) { /* 忽略存储异常 */ }
                 if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
             }
@@ -13613,9 +13724,12 @@ function completeLevel() {
 
     addCoins(5);
 
-    // 保存金币到 localStorage（加密存储）
-    localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
-    
+    // 保存金币到 localStorage（带签名校验的反作弊存储）
+    saveCoinsSecure();
+
+    // 反作弊：异常通关速度检测
+    detectImpossibleSpeed(Math.floor((Date.now() - singlePlayerGame.startTime) / 1000), gameState.currentLevel);
+
     // 8. 检查每日挑战完成情况
     checkDailyChallengeCompletion();
 }
@@ -19945,7 +20059,7 @@ function buySkin(skinId) {
         updateCoinsDisplay();
         updateSkinShop();
         // 加密存储金币
-        localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
+        saveCoinsSecure();
         saveGame();
         showNotification(`成功购买皮肤：${skin.name}！`, 3000);
     } else {
