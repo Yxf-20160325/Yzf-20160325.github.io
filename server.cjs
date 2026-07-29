@@ -714,9 +714,16 @@ app.post('/api/admin/rooms/:roomId/chat-send', requireAdminAuth, (req, res) => {
         const roomId = String(req.params.roomId);
         const message = (req.body && req.body.message) ? String(req.body.message).slice(0, 2000) : '';
         if (!message.trim()) return res.json({ success: false, message: '消息不能为空' });
+        // 伪装发送：sender 可为任意名字（默认 ADMIN）；label 可为任意标签文本
+        // label 未提供时：ADMIN → "管理员"；伪装名 → 无标签（看起来和普通玩家消息一样）
+        const sender = ((req.body && req.body.sender) ? String(req.body.sender).trim().slice(0, 30) : '') || 'ADMIN';
+        let label = (req.body && req.body.label !== undefined && req.body.label !== null)
+            ? String(req.body.label).trim().slice(0, 20)
+            : null;
+        if (label === null) label = (sender === 'ADMIN') ? '管理员' : '';
         const messageId = 'adm_' + Date.now() + Math.random().toString(36).slice(2, 8);
         const record = {
-            messageId, sender: 'ADMIN', clientId: null,
+            messageId, sender: sender, clientId: null, label: label,
             message: message, image: null, isAdmin: true, time: Date.now()
         };
         let list = roomChats.get(roomId);
@@ -724,8 +731,8 @@ app.post('/api/admin/rooms/:roomId/chat-send', requireAdminAuth, (req, res) => {
         list.push(record);
         if (list.length > 200) list.shift();
         // 全局广播（通知 socket 未 join 房间，由客户端按 roomId 过滤）
-        io.emit('admin-chat-message', { roomId, messageId, message });
-        console.log(`[Admin] ADMIN 向房间 ${roomId} 发送消息: ${message}`);
+        io.emit('admin-chat-message', { roomId, messageId, message, sender, label });
+        console.log(`[Admin] 后台以 "${sender}"${label ? '[' + label + ']' : ''} 身份向房间 ${roomId} 发送消息: ${message}`);
         res.json({ success: true, messageId });
     } catch (e) {
         res.status(500).json({ success: false, message: '发送失败' });
