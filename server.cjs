@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15.1";
+const SERVER_VERSION = "1.15";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
