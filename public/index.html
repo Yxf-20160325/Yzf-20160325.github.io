@@ -4546,6 +4546,15 @@ function applyBanState(ban) {
         gameState.chatDisabledReason = '';
         setChatDisabled(false);
     }
+    // 反作弊本地持久封禁协同：服务器已确认封禁的玩法 → 清除本地持久记录（转由服务器权威管理，管理员解封即生效）；
+    // 服务器未确认的（如服务端未部署/上报失败）→ 本地持久封禁继续生效，刷新页面无法绕过。
+    if (typeof getPersistedCheatBans === 'function') {
+        const _p = getPersistedCheatBans();
+        if (_p.multiplayer && mp) clearPersistedCheatBan('multiplayer');
+        if (_p.single && sp) clearPersistedCheatBan('single');
+        if (_p.puzzle && pz) clearPersistedCheatBan('puzzle');
+        applyPersistedCheatBans();
+    }
 }
 
 // 拉取并应用自身封禁状态（开放接口 /api/my-ban）
@@ -4562,6 +4571,10 @@ async function fetchMyBanState() {
 // 启动封禁状态轮询（独立于 socket，每 15 秒一次，确保 REST 注册的玩家也能及时生效）
 function startBanStateCheck() {
     if (banCheckInterval) return;
+    // 先应用本地持久化的作弊封禁（刷新页面无法绕过，不等服务器轮询）
+    if (typeof applyPersistedCheatBans === 'function') {
+        try { applyPersistedCheatBans(); } catch (e) {}
+    }
     fetchMyBanState();
     fetchMyCoins();
     banCheckInterval = setInterval(() => {
@@ -6304,8 +6317,49 @@ function currentPlayMode() {
     return 'single';
 }
 
+// ===== 反作弊本地封禁持久化（防止刷新页面绕过封禁） =====
+function persistCheatBan(mode, reason) {
+    try {
+        const data = getPersistedCheatBans();
+        data[mode] = { reason: reason || '', time: Date.now() };
+        localStorage.setItem('cheatLocalBan', encryptData(JSON.stringify(data)));
+    } catch (e) {}
+}
+function getPersistedCheatBans() {
+    try {
+        const raw = localStorage.getItem('cheatLocalBan');
+        if (!raw) return {};
+        return JSON.parse(decryptData(raw)) || {};
+    } catch (e) { return {}; }
+}
+function clearPersistedCheatBan(mode) {
+    try {
+        const data = getPersistedCheatBans();
+        if (!data[mode]) return;
+        delete data[mode];
+        if (Object.keys(data).length === 0) localStorage.removeItem('cheatLocalBan');
+        else localStorage.setItem('cheatLocalBan', encryptData(JSON.stringify(data)));
+    } catch (e) {}
+}
+// 应用本地持久化的作弊封禁（页面加载与每次轮询后调用，确保刷新后仍封禁）
+function applyPersistedCheatBans() {
+    const data = getPersistedCheatBans();
+    Object.keys(data).forEach(mode => {
+        const reason = (data[mode] && data[mode].reason) || '反作弊系统自动封禁：检测到作弊行为。如有异议请联系管理员申诉解封。';
+        try {
+            if (mode === 'multiplayer') {
+                if (!gameState.multiplayerDisabled) setMultiplayerDisabled(true, reason);
+            } else if (mode === 'puzzle') {
+                if (!gameState.puzzleDisabled) setPuzzleDisabled(true, reason);
+            } else {
+                if (!gameState.singlePlayerDisabled) setSinglePlayerDisabled(true, reason);
+            }
+        } catch (e) {}
+    });
+}
+
 // 检测并处理作弊（同类型只上报一次，避免刷屏）
-// 检测到作弊：1) 上报服务器（服务器会自动封禁该玩法，管理员可解封）；2) 本地立即禁用该玩法（不等轮询）
+// 检测到作弊：1) 上报服务器（服务器会自动封禁该玩法，管理员可解封）；2) 本地立即禁用该玩法（不等轮询）；3) 本地持久化（刷新页面仍封禁）
 function handleCheatDetected(type, detail) {
     gameState._cheatReported = gameState._cheatReported || {};
     if (gameState._cheatReported[type]) return;
@@ -6313,8 +6367,9 @@ function handleCheatDetected(type, detail) {
     gameState.cheatDetected = true;
     const mode = currentPlayMode();
     reportCheat(type, detail, mode);
-    // 本地立即封禁当前玩法（服务器轮询/推送随后会同步权威状态）
+    // 本地立即封禁当前玩法（服务器轮询/推送随后会同步权威状态），并持久化到 localStorage
     const cheatBanReason = '反作弊系统自动封禁：检测到作弊行为。如有异议请联系管理员申诉解封。';
+    persistCheatBan(mode, cheatBanReason);
     setTimeout(() => {
         try {
             if (mode === 'multiplayer' && typeof setMultiplayerDisabled === 'function') {
@@ -13634,6 +13689,16 @@ function showSaveLoadMenu() {
 
 
 function completeLevel() {
+    // 反作弊：伪造通关检测——正常通关只可能发生在玩家位于出口且有移动记录时。
+    // 直接从控制台调用 completeLevel() / 瞬移修改位置等作弊会在这里被抓住。
+    if (!gameState.isPreviewMode) {
+        const _atExit = singlePlayerGame.player && singlePlayerGame.exit &&
+            singlePlayerGame.player.x === singlePlayerGame.exit.x &&
+            singlePlayerGame.player.y === singlePlayerGame.exit.y;
+        if (!_atExit || !singlePlayerGame.moveCount) {
+            handleCheatDetected('forged_complete', `伪造通关: ${_atExit ? '玩家在出口' : '玩家未到达出口'}，移动次数 ${singlePlayerGame.moveCount || 0}（关卡 ${gameState.currentLevel}）`);
+        }
+    }
     // 1. 停止所有计时器和动画
     clearInterval(singlePlayerGame.timerInterval);
     clearInterval(singlePlayerGame.movingTrapsInterval);
