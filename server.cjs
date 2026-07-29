@@ -844,6 +844,7 @@ app.post('/api/create-room', express.json(), (req, res) => {
                 lastActivity: Date.now(), // 添加最后活动时间戳
                 actualHost: null, // 存储实际的Socket ID
                 waitingSocket: false, // 等待房主连接
+                chatDisabled: false, // 房间级聊天开关（管理员可关闭）
         };
 
         rooms.set(roomId, newRoom);
@@ -979,7 +980,8 @@ io.on('connection', (socket) => {
                 inviteCode: inviteCode,
                 createdAt: Date.now(),
                 lastActivity: Date.now(), // 添加最后活动时间戳
-                maze: null // 保存迷宫数据
+                maze: null, // 保存迷宫数据
+                chatDisabled: false // 房间级聊天开关（管理员可关闭）
             };
             
             rooms.set(roomId, newRoom);
@@ -1260,7 +1262,9 @@ io.on('connection', (socket) => {
                 name: player.name || '玩家',
                 socketId: socket.id,
                 color: player.color || '#ffffff',
-                isHost: false,
+                clientId: player.clientId || null,
+                // 房主身份以服务器记录的 actualHost（房主 socketId）为准，避免客户端误报
+                isHost: socket.id === room.actualHost,
                 joinedAt: Date.now()
             });
             // 在线表统一用 clientId 作为键（与 player-online 一致），避免同一玩家出现两条（clientId + peerId）
@@ -1718,6 +1722,122 @@ app.post('/api/admin/rooms/:roomId/clear-room', requireAdminAuth, (req, res) => 
 
     } catch (error) {
         console.error('[API] 清空房间失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// ===== 新增：房间管理（管理员专用） =====
+// 1) 房间详情：返回房间信息 + 玩家列表（含坐标/clientId）+ 迷宫 + 聊天开关
+app.get('/api/admin/rooms/:roomId/detail', requireAdminAuth, (req, res) => {
+    try {
+        const room = rooms.get(req.params.roomId);
+        if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
+        const players = Array.from(room.players.values()).map(p => ({
+            id: p.id,
+            name: p.name,
+            isHost: !!p.isHost,
+            x: (typeof p.x === 'number') ? p.x : null,
+            y: (typeof p.y === 'number') ? p.y : null,
+            color: p.color || '#fff',
+            clientId: p.clientId || null,
+            socketId: !!p.socketId
+        }));
+        res.json({
+            success: true,
+            room: {
+                id: room.id,
+                name: room.name,
+                hostName: room.hostName,
+                status: room.status,
+                maxPlayers: room.maxPlayers,
+                private: !!room.private,
+                hasPassword: room.password !== undefined && room.password !== null,
+                chatDisabled: !!room.chatDisabled,
+                playerCount: room.players.size,
+                createdAt: room.createdAt,
+                maze: room.maze || null
+            },
+            players
+        });
+    } catch (error) {
+        console.error('[API] 获取房间详情失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 2) 关闭/开启房间聊天功能
+app.post('/api/admin/rooms/:roomId/disable-chat', requireAdminAuth, (req, res) => {
+    try {
+        const room = rooms.get(req.params.roomId);
+        if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
+        const disabled = req.body && req.body.disabled === true;
+        room.chatDisabled = disabled;
+        // 全局广播（玩家通知 socket 未 join socket.io 房间，必须全局 + 客户端按 roomId 过滤）
+        io.emit('admin-room-chat-disabled', { roomId: room.id, disabled });
+        broadcastRoomList();
+        res.json({ success: true, message: disabled ? '已关闭该房间聊天功能' : '已开启该房间聊天功能', disabled });
+    } catch (error) {
+        console.error('[API] 切换房间聊天失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 3) 更改地图：通知房主客户端重新生成迷宫并同步给所有玩家（复用客户端 generateMultiplayerMaze，最稳妥）
+app.post('/api/admin/rooms/:roomId/change-map', requireAdminAuth, (req, res) => {
+    try {
+        const room = rooms.get(req.params.roomId);
+        if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
+        io.emit('admin-regenerate-map', { roomId: room.id });
+        console.log(`[Admin] 已请求房主重新生成房间 ${room.id} 的地图`);
+        res.json({ success: true, message: '已发送重新生成地图指令（需房主在线以执行）' });
+    } catch (error) {
+        console.error('[API] 更改地图失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 4) 传送玩家到任意位置
+app.post('/api/admin/rooms/:roomId/teleport', requireAdminAuth, (req, res) => {
+    try {
+        const room = rooms.get(req.params.roomId);
+        if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
+        const { playerId, x, y } = req.body || {};
+        if (!playerId) return res.status(400).json({ success: false, message: '缺少 playerId' });
+        const px = parseInt(x), py = parseInt(y);
+        if (isNaN(px) || isNaN(py)) return res.status(400).json({ success: false, message: '坐标无效' });
+        const player = room.players.get(playerId);
+        if (!player) return res.status(404).json({ success: false, message: '房间内未找到该玩家' });
+        player.x = px;
+        player.y = py;
+        io.emit('admin-teleport', { roomId: room.id, playerId, x: px, y: py });
+        res.json({ success: true, message: `已将 ${player.name} 传送到 (${px}, ${py})` });
+    } catch (error) {
+        console.error('[API] 传送玩家失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 5) 更改房主（转移房主权限给指定玩家）
+app.post('/api/admin/rooms/:roomId/transfer-host', requireAdminAuth, (req, res) => {
+    try {
+        const room = rooms.get(req.params.roomId);
+        if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
+        const { playerId } = req.body || {};
+        if (!playerId) return res.status(400).json({ success: false, message: '缺少 playerId' });
+        const newHost = room.players.get(playerId);
+        if (!newHost) return res.status(404).json({ success: false, message: '房间内未找到该玩家' });
+        // 清除旧房主标记
+        for (const [, p] of room.players.entries()) {
+            if (p.isHost && p.id !== playerId) p.isHost = false;
+        }
+        newHost.isHost = true;
+        room.actualHost = newHost.socketId || room.actualHost;
+        room.hostName = newHost.name;
+        io.emit('admin-transfer-host', { roomId: room.id, newHostId: newHost.id, newHostName: newHost.name });
+        broadcastRoomList();
+        res.json({ success: true, message: `已将房主转移给 ${newHost.name}` });
+    } catch (error) {
+        console.error('[API] 转移房主失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
     }
 });
