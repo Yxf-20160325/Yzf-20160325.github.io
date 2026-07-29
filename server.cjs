@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15";
+const SERVER_VERSION = "1.15.1";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -57,7 +57,7 @@ const userLevels = new Map(); // 用户等级（按 userId 存储）
 // ===== 新增：管理后台数据（用户访问控制 / 功能控制 / 在线玩家映射 / 热门迷宫） =====
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
-const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool }，管理员封禁状态
+const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool, chat:bool, reasons:{} }，管理员封禁状态
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
@@ -1357,22 +1357,22 @@ app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
         if (!rawId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
         const userId = resolveUserId(rawId);
         const { type, banned, reason } = req.body || {};
-        if (type !== 'multiplayer' && type !== 'single' && type !== 'puzzle') return res.status(400).json({ success: false, message: '类型无效（应为 multiplayer、single 或 puzzle）' });
-        const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false, reasons: {} };
+        if (type !== 'multiplayer' && type !== 'single' && type !== 'puzzle' && type !== 'chat') return res.status(400).json({ success: false, message: '类型无效（应为 multiplayer、single、puzzle 或 chat）' });
+        const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
         if (!ban.reasons) ban.reasons = {};
         ban[type] = !!banned;
         // 记录/清除封禁理由（解封时清空）
         ban.reasons[type] = banned ? ((reason && String(reason).trim()) || '') : '';
         userBans.set(userId, ban);
-        const banLabel = type === 'multiplayer' ? '多人游戏' : (type === 'single' ? '单人游戏' : '解密游戏');
+        const banLabel = type === 'multiplayer' ? '多人游戏' : (type === 'single' ? '单人游戏' : (type === 'puzzle' ? '解密游戏' : '多人游戏聊天'));
         console.log(`[Admin] 用户 ${userId} 的${banLabel}已${banned ? '封禁' : '解封'}${banned && ban.reasons[type] ? '，理由: ' + ban.reasons[type] : ''}`);
         // 若该用户当前有实时 socket，立即推送最新封禁状态（REST 注册的玩家无 socket，由客户端定时拉取兜底）
         const socketId = onlineSockets.get(userId);
         if (socketId && socketId !== 'rest') {
             const sock = io.sockets.sockets.get(socketId);
             if (sock) sock.emit('ban-update', {
-                multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle,
-                multiplayerReason: ban.reasons.multiplayer || '', singleReason: ban.reasons.single || '', puzzleReason: ban.reasons.puzzle || ''
+                multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle, chat: !!ban.chat,
+                multiplayerReason: ban.reasons.multiplayer || '', singleReason: ban.reasons.single || '', puzzleReason: ban.reasons.puzzle || '', chatReason: ban.reasons.chat || ''
             });
         }
         res.json({ success: true, message: `已${banned ? '封禁' : '解封'}用户 ${userId} 的${banLabel}`, ban });
@@ -1386,18 +1386,19 @@ app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
 app.get('/api/my-ban', (req, res) => {
     try {
         const id = req.query.id;
-        if (!id) return res.json({ success: true, multiplayer: false, single: false, puzzle: false, multiplayerReason: '', singleReason: '', puzzleReason: '' });
-        const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, reasons: {} };
+        if (!id) return res.json({ success: true, multiplayer: false, single: false, puzzle: false, chat: false, multiplayerReason: '', singleReason: '', puzzleReason: '', chatReason: '' });
+        const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
         if (!ban.reasons) ban.reasons = {};
         res.json({
             success: true,
-            multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle,
+            multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle, chat: !!ban.chat,
             multiplayerReason: ban.reasons.multiplayer || '',
             singleReason: ban.reasons.single || '',
-            puzzleReason: ban.reasons.puzzle || ''
+            puzzleReason: ban.reasons.puzzle || '',
+            chatReason: ban.reasons.chat || ''
         });
     } catch (e) {
-        res.json({ success: true, multiplayer: false, single: false, puzzle: false, multiplayerReason: '', singleReason: '', puzzleReason: '' });
+        res.json({ success: true, multiplayer: false, single: false, puzzle: false, chat: false, multiplayerReason: '', singleReason: '', puzzleReason: '', chatReason: '' });
     }
 });
 
