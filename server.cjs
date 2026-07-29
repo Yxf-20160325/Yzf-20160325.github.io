@@ -1847,6 +1847,28 @@ app.post('/api/admin/rooms/:roomId/transfer-host', requireAdminAuth, (req, res) 
     }
 });
 
+// 6) 修改房间人数上限
+app.post('/api/admin/rooms/:roomId/change-max-players', requireAdminAuth, (req, res) => {
+    try {
+        const room = rooms.get(req.params.roomId);
+        if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
+        const raw = req.body && req.body.maxPlayers;
+        const max = parseInt(raw, 10);
+        if (isNaN(max) || max < 1 || max > 99) {
+            return res.status(400).json({ success: false, message: '人数上限需为 1~99 的整数' });
+        }
+        const old = room.maxPlayers;
+        room.maxPlayers = max;
+        // 通知房间内玩家与管理后台（若当前人数超过新上限，前端可选择提示，但服务器不强制踢人）
+        io.emit('room-max-players-changed', { roomId: room.id, maxPlayers: max, oldMaxPlayers: old });
+        broadcastRoomList();
+        res.json({ success: true, message: `已将人数上限从 ${old} 改为 ${max}`, maxPlayers: max });
+    } catch (error) {
+        console.error('[API] 修改人数上限失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
 // 所有玩家到达终点 → 删除房间（由房主客户端在检测到全员到达时调用）
 app.post('/api/rooms/:roomId/complete', (req, res) => {
     try {
