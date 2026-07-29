@@ -4561,9 +4561,9 @@ function applyServerCoins(serverCoins) {
     } catch (e) {}
     if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
     if (diff > 0) {
-        showNotification('💰 管理员发放了 ' + diff + ' 金币！', 3500);
+        showCoinGrantedModal(diff, true);
     } else {
-        showNotification('💰 管理员扣除了 ' + (-diff) + ' 金币', 3500);
+        showCoinGrantedModal(-diff, false);
     }
 }
 
@@ -4876,6 +4876,37 @@ function showRestoredModal(id, icon, title, message) {
     const btn = document.createElement('button');
     btn.textContent = '我知道了';
     btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,#4CAF50,#2E7D32);color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    box.appendChild(btn);
+    overlay.appendChild(box);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
+
+// 管理员发放/扣除金币时弹窗提示（与解封弹窗对称）
+function showCoinGrantedModal(amount, isGrant) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:20000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+    const accent = isGrant ? '#4CAF50' : '#FF9800';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.97);border:2px solid ' + accent + ';border-radius:15px;padding:30px;max-width:440px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+    const iconEl = document.createElement('div');
+    iconEl.style.cssText = 'font-size:54px;margin-bottom:15px;';
+    iconEl.textContent = isGrant ? '💰' : '💸';
+    box.appendChild(iconEl);
+    const h = document.createElement('h2');
+    h.style.cssText = 'color:' + accent + ';margin:0 0 12px 0;font-size:22px;';
+    h.textContent = isGrant ? '金币到账' : '金币被扣除';
+    box.appendChild(h);
+    const p = document.createElement('p');
+    p.style.cssText = 'color:#e0e0e0;margin:0 0 24px 0;font-size:16px;line-height:1.6;';
+    p.textContent = isGrant
+        ? '管理员向你发放了 ' + amount + ' 金币！'
+        : '管理员扣除了你 ' + amount + ' 金币。';
+    box.appendChild(p);
+    const btn = document.createElement('button');
+    btn.textContent = '我知道了';
+    btn.style.cssText = 'padding:12px 40px;background:linear-gradient(135deg,' + accent + ',' + (isGrant ? '#2E7D32' : '#E65100') + ');color:white;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
     btn.onclick = () => overlay.remove();
     box.appendChild(btn);
     overlay.appendChild(box);
