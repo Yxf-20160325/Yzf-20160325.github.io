@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>迷宫冒险 - 1.15</title>
+    <title>迷宫冒险 - 1.15.1</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         html {
@@ -3378,6 +3378,18 @@
         <div class="updates-container">
             <!-- 更新内容将由用户填写 -->
             <div class="update-item">
+                <div class="update-title">版本 1.15.1</div>
+                <div class="update-content">
+                    <ul>
+                        <li>新增解密游戏封禁功能（与多人/单人封禁对称）</li>
+                        <li>新增解密游戏导出/导入通关数据功能</li>
+                        <li>admin 发放金币功能实装（服务端账本 + 客户端同步）</li>
+                        <li>封禁支持填写理由并显示在玩家端</li>
+                        <li>解封改为弹窗提示</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="update-item">
                 <div class="update-title">版本 1.15</div>
                 <div class="update-content">
                     <ul>
@@ -4052,7 +4064,7 @@
     </div>
     
     <!-- 版本信息显示 -->
-    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15</div>
+    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.1</div>
     
     <!-- 管理员登录界面 -->
     <div id="adminLoginModal" class="hidden" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 99999; display: flex; justify-content: center; align-items: center;">
@@ -4087,7 +4099,7 @@
     </div>
     
     <script>
-const CLIENT_VERSION = "1.15";
+const CLIENT_VERSION = "1.15.1";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
@@ -4415,6 +4427,8 @@ async function registerPlayerOnline() {
     if (notificationSocket && notificationSocket.connected) {
         notificationSocket.emit('player-online', payload);
     }
+    // 注册后立即同步一次管理员发放的金币（轮询会兜底）
+    fetchMyCoins();
     console.log('[通知] 已注册玩家在线:', gameState.playerName, '(', gameState.clientId, ')');
 }
 async function unregisterPlayerOnline() {
@@ -4447,6 +4461,7 @@ let banCheckInterval = null;
 function setSinglePlayerDisabled(disabled, reason) {
     const wasDisabled = gameState.singlePlayerDisabled;
     gameState.singlePlayerDisabled = !!disabled;
+    gameState.singlePlayerDisabledReason = disabled ? (reason || '') : '';
     if (disabled && !wasDisabled) {
         showSinglePlayerDisabledModal(reason || '单人游戏功能已被禁用。');
     } else if (!disabled && wasDisabled) {
@@ -4458,6 +4473,7 @@ function setSinglePlayerDisabled(disabled, reason) {
 function setPuzzleDisabled(disabled, reason) {
     const wasDisabled = gameState.puzzleDisabled;
     gameState.puzzleDisabled = !!disabled;
+    gameState.puzzleDisabledReason = disabled ? (reason || '') : '';
     if (disabled && !wasDisabled) {
         showPuzzleDisabledModal(reason || '解密游戏功能已被禁用。');
     } else if (!disabled && wasDisabled) {
@@ -4472,7 +4488,7 @@ function applyBanState(ban) {
     // 多人游戏封禁
     if (mp) {
         gameState.multiplayerDisabledByAdmin = true;
-        if (!gameState.multiplayerDisabled) setMultiplayerDisabled(true, '你的多人游戏功能已被管理员封禁。');
+        if (!gameState.multiplayerDisabled) setMultiplayerDisabled(true, ban.multiplayerReason || '你的多人游戏功能已被管理员封禁。');
     } else if (gameState.multiplayerDisabledByAdmin) {
         gameState.multiplayerDisabledByAdmin = false;
         setMultiplayerDisabled(false);
@@ -4480,7 +4496,7 @@ function applyBanState(ban) {
     // 单人游戏封禁
     if (sp) {
         gameState.singleBannedByAdmin = true;
-        if (!gameState.singlePlayerDisabled) setSinglePlayerDisabled(true, '你的单人游戏功能已被管理员封禁。');
+        if (!gameState.singlePlayerDisabled) setSinglePlayerDisabled(true, ban.singleReason || '你的单人游戏功能已被管理员封禁。');
     } else if (gameState.singleBannedByAdmin) {
         gameState.singleBannedByAdmin = false;
         setSinglePlayerDisabled(false);
@@ -4488,7 +4504,7 @@ function applyBanState(ban) {
     // 解密游戏封禁
     if (pz) {
         gameState.puzzleBannedByAdmin = true;
-        if (!gameState.puzzleDisabled) setPuzzleDisabled(true, '你的解密游戏功能已被管理员封禁。');
+        if (!gameState.puzzleDisabled) setPuzzleDisabled(true, ban.puzzleReason || '你的解密游戏功能已被管理员封禁。');
     } else if (gameState.puzzleBannedByAdmin) {
         gameState.puzzleBannedByAdmin = false;
         setPuzzleDisabled(false);
@@ -4510,7 +4526,45 @@ async function fetchMyBanState() {
 function startBanStateCheck() {
     if (banCheckInterval) return;
     fetchMyBanState();
-    banCheckInterval = setInterval(fetchMyBanState, 15000);
+    fetchMyCoins();
+    banCheckInterval = setInterval(() => {
+        fetchMyBanState();
+        fetchMyCoins();
+    }, 15000);
+}
+
+// 拉取服务器金币账本（管理员发放/扣除），并把差额并入本地钱包
+async function fetchMyCoins() {
+    if (!gameState.clientId) return;
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/my-coins?id=' + encodeURIComponent(gameState.clientId));
+        const data = await resp.json();
+        if (data && data.success) applyServerCoins(data.coins || 0);
+    } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
+}
+
+// 将服务器金币账本（serverCoins）差额并入本地钱包：
+// 服务器账本为绝对权威，本地钱包 = 本地游戏内所得 + 服务器账本。
+// 通过 dbCoins 记录"已并入的服务器部分"，仅对差额做加减，刷新/重连不会重复计入。
+function applyServerCoins(serverCoins) {
+    const oldDb = (typeof gameState.dbCoins === 'number') ? gameState.dbCoins : 0;
+    const diff = serverCoins - oldDb;
+    if (diff === 0) return;
+    gameState.coins += diff;
+    if (gameState.coins < 0) gameState.coins = 0;
+    gameState.dbCoins = serverCoins;
+    gameState.playerData.coins = gameState.coins;
+    try {
+        localStorage.setItem('playerCoins', encryptCoins(gameState.coins));
+        localStorage.setItem('dbCoins', String(serverCoins));
+    } catch (e) {}
+    if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
+    if (diff > 0) {
+        showNotification('💰 管理员发放了 ' + diff + ' 金币！', 3500);
+    } else {
+        showNotification('💰 管理员扣除了 ' + (-diff) + ' 金币', 3500);
+    }
 }
 
 // 版本比较：a < b 返回 true（按点分数字逐段比较，如 1.15 < 1.16）
@@ -4841,7 +4895,13 @@ function getActiveBans() {
     if (gameState.singlePlayerDisabled) {
         bans.push({
             name: '🎮 单人游戏',
-            reason: '单人游戏功能已被禁用，无法通过正常入口进入。'
+            reason: gameState.singlePlayerDisabledReason || '单人游戏功能已被禁用。'
+        });
+    }
+    if (gameState.puzzleDisabled) {
+        bans.push({
+            name: '🔐 解密游戏',
+            reason: gameState.puzzleDisabledReason || '解密游戏功能已被禁用。'
         });
     }
     // 未来如有其它封禁标志（如某功能被禁用），在此 push 即可
@@ -5230,6 +5290,7 @@ let gameState = {
     sessionStartTime: Date.now(), // 当前会话开始时间
     lastSavedTime: Date.now(), // 最后保存时间
     coins: 0, // 玩家持有的金币数量
+    dbCoins: 0, // 服务器金币账本（管理员发放/扣除）已并入本地钱包的部分，避免刷新重复计入
     currentScreen: 'mainMenu',
     unlockedLevel: parseInt(localStorage.getItem('unlockedLevel')) || 1,
     completedLevels: JSON.parse(localStorage.getItem('completedLevels')) || [],
@@ -6071,6 +6132,12 @@ function syncCoinsFromStorage() {
             gameState.coins = decrypted;
             gameState.playerData.coins = decrypted;
         }
+    }
+    // 加载服务器金币账本已并入本地的部分（刷新后用于与服务器对账，避免重复发放）
+    const rawDb = localStorage.getItem('dbCoins');
+    if (rawDb !== null) {
+        const d = parseInt(rawDb, 10);
+        if (!isNaN(d)) gameState.dbCoins = d;
     }
     if (typeof updateCoinDisplay === 'function') updateCoinDisplay();
 }
@@ -7280,12 +7347,12 @@ function showScreen(screenId) {
             // 单人游戏被禁用时，拦截所有进入单人模式的入口（仅调试信息可恢复）
             if (gameState.singlePlayerDisabled &&
                 (screenId === 'singlePlayerLevelSelect' || screenId === 'singlePlayerGame')) {
-                showSinglePlayerDisabledModal('单人游戏功能已被禁用，无法通过正常入口进入。');
+                showSinglePlayerDisabledModal('单人游戏功能已被禁用。');
                 return;
             }
             // 解密游戏被禁用时，拦截进入解密游戏的入口（仅调试信息可恢复）
             if (gameState.puzzleDisabled && screenId === 'puzzleLevelSelect') {
-                showPuzzleDisabledModal('解密游戏功能已被禁用，无法通过正常入口进入。');
+                showPuzzleDisabledModal('解密游戏功能已被禁用。');
                 return;
             }
             // 不再显示存档提示
