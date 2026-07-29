@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15.2";
+const SERVER_VERSION = "1.15.3";
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -51,8 +51,10 @@ const rooms = new Map(); // 存储所有房间信息 {roomId: roomData}
 const players = new Map(); // 存储所有玩家信息 {socketId: playerData}
 const pendingRooms = new Map(); // 存储等待连接的房间
 const adminTokens = new Map(); // 存储管理员令牌
-const userCoins = new Map(); // 用户金币余额（按 userId 存储，供管理员金币管理）
-const userLevels = new Map(); // 用户等级（按 userId 存储）
+const userCoins = new Map(); // 用户金币余额（按 userId 存储，管理员发放/扣除的"账本"）
+const userLevels = new Map(); // 用户等级（预留；游戏当前无升级系统，恒为 1，仅供兼容）
+// 玩家真实金币（客户端上报，供管理员查看；与 userCoins 分开，避免覆盖管理员账本语义）
+const reportedCoins = new Map();
 
 // ===== 新增：管理后台数据（用户访问控制 / 功能控制 / 在线玩家映射 / 热门迷宫） =====
 const userAccess = new Map();      // userId -> 页面访问权限设置
@@ -351,6 +353,12 @@ app.get('/api/admin/stats', requireAdminAuth, (req, res) => {
     }
 });
 
+// 展示用金币：优先用客户端上报的真实值，未上报时回退到管理员账本
+function getDisplayCoins(id) {
+    if (reportedCoins.has(id)) return reportedCoins.get(id);
+    return userCoins.get(id) || 0;
+}
+
 // 聚合所有在线玩家，生成用户列表（服务器无独立账号系统，以在线玩家为准）
 // 优先使用 onlinePlayers（进入游戏即上线的玩家，含未进房与已进房），再用 room.players 兜底未覆盖者
 function getAllUsersList() {
@@ -367,7 +375,7 @@ function getAllUsersList() {
         userMap.set(player.id, {
             id: player.id,
             username: player.name || '未知用户',
-            coins: userCoins.get(player.id) || 0,
+            coins: getDisplayCoins(player.id),
             level: userLevels.get(player.id) || 1,
             roomId: roomId,
             roomName: roomName,
@@ -395,7 +403,7 @@ function getAllUsersList() {
             userMap.set(player.id, {
                 id: player.id,
                 username: player.name || '未知用户',
-                coins: userCoins.get(player.id) || 0,
+                coins: getDisplayCoins(player.id),
                 level: userLevels.get(player.id) || 1,
                 roomId: room.id,
                 roomName: room.name,
@@ -424,9 +432,12 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins, level } = req.body || {};
+        const { id, name, coins } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
         const existing = onlinePlayers.get(id) || {};
+        // 记录玩家上报的真实金币（供管理员查看）
+        const rc = parseInt(coins);
+        if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
@@ -881,11 +892,15 @@ app.get('/api/version-check', (req, res) => {
 
 // 1. 首先，创建一个 HTTP 服务器
 const server = http.createServer(app);
+// socket.io 使用独立 CORS 配置（与 REST 中间件解耦）。
+// origin: true 会反射请求的 Origin（含 file:// 的 null 与各类 http 来源），
+// 配合 credentials: true 可稳妥通过跨域校验（不能用 "*" + credentials 组合）。
 const io = new Server(server, {
     cors: {
-        origin: "*",
-        methods: ["GET", "POST"],
-        allowedHeaders: "*"
+        origin: true,
+        methods: ["GET", "POST", "OPTIONS"],
+        allowedHeaders: "*",
+        credentials: true
     }
 });
 
@@ -1199,15 +1214,17 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-            const { id, name } = data || {};
-            if (!id) return;
-            onlinePlayers.set(id, {
-                id: id,
-                name: (name && String(name).trim()) || '玩家',
-                socketId: socket.id,
-                roomId: null,
-                joinedAt: Date.now()
-            });
+        const { id, name, coins } = data || {};
+        if (!id) return;
+        onlinePlayers.set(id, {
+            id: id,
+            name: (name && String(name).trim()) || '玩家',
+            socketId: socket.id,
+            roomId: null,
+            joinedAt: Date.now()
+        });
+        const rc = parseInt(coins);
+        if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
             onlineSockets.set(id, socket.id);
             console.log(`[Online] 玩家 ${name} (${id}) 上线，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
