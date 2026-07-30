@@ -16,6 +16,69 @@ app.use(cors({
     allowedHeaders: '*', // 允许客户端自定义头（如 Client-Version、Admin-Auto-Connect），避免预检被拦
     credentials: true // 允许发送凭证信息
 }));
+
+// ===== 超级管理员 / 访问控制状态 =====
+const superAdminTokens = new Map();      // 超级管理员令牌
+let adminDisabled = false;               // 是否禁用普通管理员登录
+let gameAccessDisabled = false;          // 是否对游戏页面返回 403
+
+const SUPERADMIN_PASSWORD_PATH = path.join(__dirname, 'superadmin-password.txt');
+const ADMIN_STATE_FILE = path.join(__dirname, 'data', 'admin-state.json');
+const AUDIT_FILE = path.join(__dirname, 'data', 'admin-audit.log');
+
+// 超级管理员密码初始化（默认 11dev），仅首次启动创建一次
+function initializeSuperAdminPassword() {
+    if (!fs.existsSync(SUPERADMIN_PASSWORD_PATH)) {
+        const hashed = bcrypt.hashSync('11dev', 10);
+        fs.writeFileSync(SUPERADMIN_PASSWORD_PATH, hashed);
+        console.log('🔑 超级管理员密码已初始化: 11dev');
+    }
+}
+
+// 持久化读取/写入访问控制状态
+function loadAdminState() {
+    try {
+        if (fs.existsSync(ADMIN_STATE_FILE)) {
+            const s = JSON.parse(fs.readFileSync(ADMIN_STATE_FILE, 'utf8'));
+            if (typeof s.adminDisabled === 'boolean') adminDisabled = s.adminDisabled;
+            if (typeof s.gameAccessDisabled === 'boolean') gameAccessDisabled = s.gameAccessDisabled;
+        }
+    } catch (e) { console.error('[State] 加载管理状态失败:', e.message); }
+}
+function saveAdminState() {
+    try { fs.writeFileSync(ADMIN_STATE_FILE, JSON.stringify({ adminDisabled, gameAccessDisabled })); }
+    catch (e) { console.error('[State] 保存管理状态失败:', e.message); }
+}
+
+// 审计日志：记录谁(actor)在什么时间做了什么(action)
+function appendAudit(actor, action, detail) {
+    const entry = { ts: new Date().toISOString(), actor, action, detail: detail || '' };
+    try { fs.appendFileSync(AUDIT_FILE, JSON.stringify(entry) + '\n'); } catch (e) {}
+    console.log('[审计]', entry.ts, actor, action, detail || '');
+}
+function readAudit(limit) {
+    try {
+        if (!fs.existsSync(AUDIT_FILE)) return [];
+        const lines = fs.readFileSync(AUDIT_FILE, 'utf8').trim().split('\n').filter(Boolean);
+        const arr = lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+        return limit ? arr.slice(-limit) : arr;
+    } catch (e) { return []; }
+}
+
+// 访问控制：gameAccessDisabled 开启时，任何 GET 游戏页面请求返回 403（管理员/超管页面除外）
+// 必须在 express.static 之前注册，才能抢在静态文件返回游戏页之前拦截
+app.use((req, res, next) => {
+    if (gameAccessDisabled && req.method === 'GET') {
+        const p = req.path;
+        const isGamePage = p === '/' || (p.endsWith('.html') && p !== '/admin.html' && p !== '/superadmin.html');
+        if (isGamePage) {
+            res.status(403).type('text/plain; charset=utf-8').send('403 Forbidden - 游戏访问已被超级管理员关闭');
+            return;
+        }
+    }
+    next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
@@ -40,6 +103,10 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+// 管理后台与超级管理员后台页面（游戏 403 拦截已排除这两个路径）
+app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'superadmin.html')));
 
 // 定义服务器的版本号
 const SERVER_VERSION = "1.15.5";
@@ -118,13 +185,20 @@ function getRevokedKeys(userId) {
     const s = revokedAchievements.get(userId);
     return s ? Array.from(s) : [];
 }
-// 合并客户端上报的关卡进度（仅覆盖本次提供到的字段，其余保留）
+// 合并客户端上报的关卡进度：采用并集（保留双方已通关关卡），避免玩家下次上线
+// 上报本地进度时把管理员“全部通关”授予的进度整体覆盖掉。
 function mergeProgress(id, p) {
     if (!id || !p || typeof p !== 'object') return;
     const cur = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], lastReportedAt: null };
-    if (typeof p.unlockedLevel === 'number' && !isNaN(p.unlockedLevel)) cur.unlockedLevel = Math.max(1, p.unlockedLevel);
-    if (Array.isArray(p.completedLevels)) cur.completedLevels = p.completedLevels.slice(0, 200);
-    if (Array.isArray(p.puzzleCompletedLevels)) cur.puzzleCompletedLevels = p.puzzleCompletedLevels.slice(0, 200);
+    if (typeof p.unlockedLevel === 'number' && !isNaN(p.unlockedLevel)) cur.unlockedLevel = Math.max(cur.unlockedLevel || 1, p.unlockedLevel);
+    if (Array.isArray(p.completedLevels)) {
+        const set = new Set([...(cur.completedLevels || []), ...p.completedLevels]);
+        cur.completedLevels = Array.from(set).filter(n => typeof n === 'number' && n > 0).slice(0, 200);
+    }
+    if (Array.isArray(p.puzzleCompletedLevels)) {
+        const set = new Set([...(cur.puzzleCompletedLevels || []), ...p.puzzleCompletedLevels]);
+        cur.puzzleCompletedLevels = Array.from(set).filter(n => typeof n === 'number' && n > 0).slice(0, 200);
+    }
     cur.lastReportedAt = Date.now();
     reportedProgress.set(id, cur);
     autoEvaluateAchievements(id);
@@ -232,7 +306,34 @@ function requireAdminAuth(req, res, next) {
     if (!verifyAdminToken(token)) {
         return res.status(403).json({ success: false, message: '无效的管理员令牌' });
     }
-    
+
+    next();
+}
+
+// ===== 超级管理员令牌与鉴权 =====
+function verifySuperAdminToken(token) {
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        return superAdminTokens.has(decoded.tokenId);
+    } catch (err) {
+        return false;
+    }
+}
+function generateSuperAdminToken() {
+    const tokenId = 'superadmin_' + Date.now();
+    const token = jwt.sign({ tokenId }, JWT_SECRET, { expiresIn: '24h' });
+    superAdminTokens.set(tokenId, true);
+    return token;
+}
+function requireSuperAdminAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, message: '需要超级管理员身份验证' });
+    }
+    const token = authHeader.substring(7);
+    if (!verifySuperAdminToken(token)) {
+        return res.status(403).json({ success: false, message: '无效的超级管理员令牌' });
+    }
     next();
 }
 
@@ -386,7 +487,13 @@ app.post('/api/admin/login', async (req, res) => {
         if (!password) {
             return res.status(400).json({ success: false, message: '密码不能为空' });
         }
-        
+
+        // 管理员账号被超级管理员禁用时拒绝登录
+        if (adminDisabled) {
+            console.log('管理员登录被拒：账号已被超级管理员禁用');
+            return res.status(403).json({ success: false, message: '管理员账号已被超级管理员禁用' });
+        }
+
         const adminPasswordPath = path.join(__dirname, 'admin-password.txt');
         
         // 确保密码文件存在（首次启动由 initializeAdminPassword 创建）
@@ -400,9 +507,10 @@ app.post('/api/admin/login', async (req, res) => {
         
         if (isValid) {
             const token = generateAdminToken();
+            appendAudit('admin', 'login', '管理员登录');
             console.log('管理员登录成功');
-            return res.json({ 
-                success: true, 
+            return res.json({
+                success: true,
                 message: '登录成功',
                 token: token
             });
@@ -416,6 +524,92 @@ app.post('/api/admin/login', async (req, res) => {
         res.status(500).json({ success: false, message: '登录失败' });
     }
 });
+// ===================== 超级管理员 API =====================
+// 超级管理员登录（密码文件 superadmin-password.txt，初始 11dev）
+app.post('/api/superadmin/login', async (req, res) => {
+    try {
+        const { password } = req.body;
+        if (!password) return res.status(400).json({ success: false, message: '密码不能为空' });
+        if (!fs.existsSync(SUPERADMIN_PASSWORD_PATH)) initializeSuperAdminPassword();
+        const hashed = fs.readFileSync(SUPERADMIN_PASSWORD_PATH, 'utf8').trim();
+        const isValid = await bcrypt.compare(password, hashed);
+        if (isValid) {
+            const token = generateSuperAdminToken();
+            appendAudit('superadmin', 'login', '超级管理员登录');
+            return res.json({ success: true, token });
+        }
+        return res.status(401).json({ success: false, message: '密码错误' });
+    } catch (e) {
+        console.error('[SuperAdmin] 登录失败:', e);
+        res.status(500).json({ success: false, message: '登录失败' });
+    }
+});
+
+// 修改 superadmin / admin 密码
+app.post('/api/superadmin/change-password', requireSuperAdminAuth, async (req, res) => {
+    try {
+        const { target, newPassword } = req.body || {};
+        if (target !== 'superadmin' && target !== 'admin') {
+            return res.status(400).json({ success: false, message: 'target 必须为 superadmin 或 admin' });
+        }
+        if (!newPassword || String(newPassword).length < 1) {
+            return res.status(400).json({ success: false, message: '新密码不能为空' });
+        }
+        const filePath = target === 'admin' ? path.join(__dirname, 'admin-password.txt') : SUPERADMIN_PASSWORD_PATH;
+        fs.writeFileSync(filePath, bcrypt.hashSync(String(newPassword), 10));
+        if (target === 'admin') {
+            adminTokens.clear(); // 改密后使旧管理员令牌失效
+            appendAudit('superadmin', 'change-admin-password', '修改了管理员密码');
+        } else {
+            superAdminTokens.clear();
+            appendAudit('superadmin', 'change-superadmin-password', '修改了超级管理员密码');
+        }
+        res.json({ success: true, message: `已更新 ${target} 密码` });
+    } catch (e) {
+        console.error('[SuperAdmin] 改密失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 禁用 / 启用 管理员账号
+app.post('/api/superadmin/set-admin-disabled', requireSuperAdminAuth, (req, res) => {
+    try {
+        const { disabled } = req.body || {};
+        adminDisabled = !!disabled;
+        saveAdminState();
+        appendAudit('superadmin', 'set-admin-disabled', adminDisabled ? '禁用了管理员账号' : '启用了管理员账号');
+        res.json({ success: true, adminDisabled });
+    } catch (e) {
+        console.error('[SuperAdmin] 设置失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 开关游戏页面 403
+app.post('/api/superadmin/set-game-disabled', requireSuperAdminAuth, (req, res) => {
+    try {
+        const { disabled } = req.body || {};
+        gameAccessDisabled = !!disabled;
+        saveAdminState();
+        appendAudit('superadmin', 'set-game-disabled', gameAccessDisabled ? '已关闭游戏页面访问(403)' : '已恢复游戏页面访问');
+        res.json({ success: true, gameAccessDisabled });
+    } catch (e) {
+        console.error('[SuperAdmin] 设置失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 当前访问控制状态
+app.get('/api/superadmin/state', requireSuperAdminAuth, (req, res) => {
+    res.json({ success: true, adminDisabled, gameAccessDisabled });
+});
+
+// 审计日志
+app.get('/api/superadmin/audit', requireSuperAdminAuth, (req, res) => {
+    const limit = parseInt(req.query.limit) || 200;
+    res.json({ success: true, logs: readAudit(limit) });
+});
+
 // API:版本更新
 
 
@@ -506,19 +700,6 @@ function getAllUsersList() {
             });
         }
     }
-    // 3. 管理员账号也作为一个「用户」条目，便于在后台对自身执行“全部通关 / 成就”等操作
-    if (!userMap.has('admin')) {
-        userMap.set('admin', {
-            id: 'admin',
-            username: '👑 管理员 (Admin)',
-            coins: getDisplayCoins('admin'),
-            level: userLevels.get('admin') || 1,
-            roomId: null,
-            roomName: null,
-            online: true,
-            isAdmin: true
-        });
-    }
     return Array.from(userMap.values());
 }
 
@@ -559,7 +740,16 @@ app.post('/api/player-online', (req, res) => {
         });
         onlineSockets.set(id, 'rest');
         console.log(`[Online] 玩家 ${name} (${id}) 上线(REST)，当前在线 ${onlinePlayers.size} 人`);
-        res.json({ success: true });
+        // 把服务端已存（含管理员“全部通关”授予）的进度回传，客户端据此合入本地
+        const prog = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+        res.json({
+            success: true,
+            progress: {
+                unlockedLevel: prog.unlockedLevel || 1,
+                completedLevels: Array.isArray(prog.completedLevels) ? prog.completedLevels : [],
+                puzzleCompletedLevels: Array.isArray(prog.puzzleCompletedLevels) ? prog.puzzleCompletedLevels : []
+            }
+        });
     } catch (e) {
         res.json({ success: false, message: e.message });
     }
@@ -2180,7 +2370,15 @@ app.post('/api/admin/users/:userId/complete-all', requireAdminAuth, (req, res) =
         }
 
         io.emit('achievement-update', { clientId: userId, achievements: cur });
+        // 实时推送最新进度（已完成关卡 / 解密关卡 / 解锁关），让在线玩家的解密选关界面立即更新
+        io.emit('progress-update', {
+            clientId: userId,
+            unlockedLevel: MAX_SINGLE_LEVEL,
+            completedLevels: completedLevels,
+            puzzleCompletedLevels: puzzleCompletedLevels
+        });
         console.log(`[Admin] 已将 ${userId} 单人 / 解密全部通关，并授予 迷宫大师 + 解密高手`);
+        appendAudit('admin', 'complete-all', `将 ${userId} 单人/解密全部通关`);
         res.json({ success: true, message: `已将 ${userId} 单人、解密全部通关`, achievements: cur });
     } catch (error) {
         console.error('[API] 全部通关失败:', error);
@@ -2443,6 +2641,8 @@ setInterval(() => {
 // 在服务器启动时初始化管理员密码
 console.log('🚀 正在初始化服务器...');
 initializeAdminPassword();
+initializeSuperAdminPassword();
+loadAdminState();
 
 const PORT = process.env.PORT || 234;
 server.listen(PORT, () => {
