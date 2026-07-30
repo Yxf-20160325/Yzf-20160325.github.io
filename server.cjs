@@ -69,13 +69,26 @@ const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,descriptio
 const reportedProgress = new Map();
 // 玩家关卡权限（管理员设置）：clientId -> { "single:12": "forbidden"|"forced", "puzzle:5": "forbidden", ... }
 const levelPermissions = new Map();
+// 玩家成就数据（客户端上报 + 管理员授予）：clientId -> { allLevelsCompleted, multiplayerWins, trapHits, chineseEmojiUsed }
+const reportedAchievements = new Map();
+// 合并客户端上报的成就数据（仅覆盖本次提供到的字段，管理员授予的字段优先保留）
+function mergeAchievements(id, a) {
+    if (!id || !a || typeof a !== 'object') return;
+    const cur = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+    if (typeof a.allLevelsCompleted === 'boolean') cur.allLevelsCompleted = cur.allLevelsCompleted || a.allLevelsCompleted;
+    if (typeof a.multiplayerWins === 'number' && !isNaN(a.multiplayerWins)) cur.multiplayerWins = Math.max(cur.multiplayerWins, a.multiplayerWins);
+    if (typeof a.trapHits === 'number' && !isNaN(a.trapHits)) cur.trapHits = Math.max(cur.trapHits, a.trapHits);
+    if (typeof a.chineseEmojiUsed === 'boolean') cur.chineseEmojiUsed = cur.chineseEmojiUsed || a.chineseEmojiUsed;
+    reportedAchievements.set(id, cur);
+}
 // 合并客户端上报的关卡进度（仅覆盖本次提供到的字段，其余保留）
 function mergeProgress(id, p) {
     if (!id || !p || typeof p !== 'object') return;
-    const cur = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+    const cur = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], lastReportedAt: null };
     if (typeof p.unlockedLevel === 'number' && !isNaN(p.unlockedLevel)) cur.unlockedLevel = Math.max(1, p.unlockedLevel);
     if (Array.isArray(p.completedLevels)) cur.completedLevels = p.completedLevels.slice(0, 200);
     if (Array.isArray(p.puzzleCompletedLevels)) cur.puzzleCompletedLevels = p.puzzleCompletedLevels.slice(0, 200);
+    cur.lastReportedAt = Date.now();
     reportedProgress.set(id, cur);
 }
 const MAZES_FILE = path.join(__dirname, 'data', 'mazes.json');
@@ -445,7 +458,7 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels } = req.body || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
         const existing = onlinePlayers.get(id) || {};
         // 记录玩家上报的真实金币（供管理员查看）
@@ -453,6 +466,8 @@ app.post('/api/player-online', (req, res) => {
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
         // 记录玩家上报的关卡进度（供管理员查看过关历史）
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
+        // 记录玩家上报的成就数据（供管理员查看）
+        if (achievements) mergeAchievements(id, achievements);
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
@@ -1236,7 +1251,7 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels } = data || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements } = data || {};
         if (!id) return;
         onlinePlayers.set(id, {
             id: id,
@@ -1248,6 +1263,7 @@ io.on('connection', (socket) => {
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
+        if (achievements) mergeAchievements(id, achievements);
             onlineSockets.set(id, socket.id);
             console.log(`[Online] 玩家 ${name} (${id}) 上线，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
@@ -1902,13 +1918,14 @@ app.post('/api/admin/rooms/:roomId/change-max-players', requireAdminAuth, (req, 
 app.get('/api/admin/users/:userId/level-history', requireAdminAuth, (req, res) => {
     try {
         const userId = req.params.userId;
-        const p = reportedProgress.get(userId) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+        const p = reportedProgress.get(userId) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], lastReportedAt: null };
         res.json({
             success: true,
             userId: userId,
             unlockedLevel: p.unlockedLevel || 1,
             completedLevels: Array.isArray(p.completedLevels) ? p.completedLevels : [],
             puzzleCompletedLevels: Array.isArray(p.puzzleCompletedLevels) ? p.puzzleCompletedLevels : [],
+            lastReportedAt: p.lastReportedAt || null,
             maxSingle: 80,
             maxPuzzle: 60
         });
@@ -1955,6 +1972,70 @@ app.post('/api/admin/users/:userId/level-permission', requireAdminAuth, (req, re
         res.json({ success: true, message: `已更新 ${key} 为 ${state}`, levels: perms });
     } catch (error) {
         console.error('[API] 设置关卡权限失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// ===== 成就管理接口 =====
+
+// 玩家拉取自己的成就数据（含管理员授予的部分）
+app.get('/api/my-achievements', (req, res) => {
+    try {
+        const id = req.query.id;
+        if (!id) return res.status(400).json({ success: false, message: '缺少 id' });
+        const a = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        res.json({ success: true, achievements: a });
+    } catch (error) {
+        console.error('[API] 获取成就失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 管理员查看某玩家的成就
+app.get('/api/admin/users/:userId/achievements', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const a = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        res.json({
+            success: true,
+            achievements: {
+                allLevelsCompleted: !!a.allLevelsCompleted,
+                multiplayerWins: a.multiplayerWins || 0,
+                trapHits: a.trapHits || 0,
+                chineseEmojiUsed: !!a.chineseEmojiUsed
+            }
+        });
+    } catch (error) {
+        console.error('[API] 获取玩家成就失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 管理员授予/设置某玩家的某项成就
+// key: "allLevelsCompleted" | "multiplayerWins" | "trapHits" | "chineseEmojiUsed"
+// value: 对 bool 型传 true 即授予；对计数型传目标值（如 10/30）
+app.post('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { key, value } = req.body || {};
+        const validKeys = ['allLevelsCompleted', 'multiplayerWins', 'trapHits', 'chineseEmojiUsed'];
+        if (!validKeys.includes(key)) {
+            return res.status(400).json({ success: false, message: 'key 必须为 allLevelsCompleted / multiplayerWins / trapHits / chineseEmojiUsed' });
+        }
+        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        if (key === 'allLevelsCompleted' || key === 'chineseEmojiUsed') {
+            cur[key] = !!value;
+        } else {
+            const n = parseInt(value);
+            if (isNaN(n) || n < 0) return res.status(400).json({ success: false, message: '数值型成就需要非负整数 value' });
+            cur[key] = Math.max(cur[key] || 0, n);
+        }
+        reportedAchievements.set(userId, cur);
+        // 通知该玩家客户端即时应用
+        io.emit('achievement-update', { clientId: userId, achievements: cur });
+        res.json({ success: true, message: `已设置 ${key}`, achievements: cur });
+    } catch (error) {
+        console.error('[API] 设置玩家成就失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
     }
 });
