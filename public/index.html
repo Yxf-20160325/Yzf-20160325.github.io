@@ -4435,7 +4435,7 @@ function connectNotificationSocket() {
             if (!data || !gameState.clientId) return;
             if (data.clientId !== gameState.clientId) return;
             console.log('[通知] 收到成就更新:', data);
-            applyServerAchievements(data.achievements);
+            applyServerAchievements(data.achievements, data.revoked);
             // 如果管理员授予了成就，显示解锁提示
             if (data.achievements) {
                 if (data.achievements.allLevelsCompleted && gameState.achievements && gameState.achievements.allLevelsCompleted) {
@@ -4790,12 +4790,13 @@ async function fetchMyAchievements() {
     try {
         const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/my-achievements?id=' + encodeURIComponent(gameState.clientId));
         const data = await resp.json();
-        if (data && data.success && data.achievements) applyServerAchievements(data.achievements);
+        if (data && data.success && data.achievements) applyServerAchievements(data.achievements, data.revoked);
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
 }
 
 // 将服务器端成就合并到本地（管理员授予的不会覆盖玩家已获取的，取并集）
-function applyServerAchievements(serverAch) {
+// revoked：被管理员撤销的成就键数组，需将本地对应值强制清零
+function applyServerAchievements(serverAch, revoked) {
     if (!serverAch || typeof serverAch !== 'object') return;
     if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
     let changed = false;
@@ -4816,6 +4817,16 @@ function applyServerAchievements(serverAch) {
     if (typeof serverAch.trapHits === 'number' && serverAch.trapHits > (gameState.achievements.trapHits || 0)) {
         gameState.achievements.trapHits = serverAch.trapHits;
         changed = true;
+    }
+    // 管理员撤销：将对应成就强制清零
+    if (Array.isArray(revoked) && revoked.length) {
+        revoked.forEach(k => {
+            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed') {
+                if (gameState.achievements[k]) { gameState.achievements[k] = false; changed = true; }
+            } else if (k === 'multiplayerWins' || k === 'trapHits') {
+                if ((gameState.achievements[k] || 0) !== 0) { gameState.achievements[k] = 0; changed = true; }
+            }
+        });
     }
     if (changed) {
         try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch (e) {}
