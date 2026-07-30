@@ -87,23 +87,27 @@ const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,descriptio
 const reportedProgress = new Map();
 // 玩家关卡权限（管理员设置）：clientId -> { "single:12": "forbidden"|"forced", "puzzle:5": "forbidden", ... }
 const levelPermissions = new Map();
-// 玩家成就数据（客户端上报 + 管理员授予）：clientId -> { allLevelsCompleted, multiplayerWins, trapHits, chineseEmojiUsed }
+// 玩家成就数据（客户端上报 + 管理员授予）：clientId -> { allLevelsCompleted, multiplayerWins, trapHits, chineseEmojiUsed, puzzleMaster }
 const reportedAchievements = new Map();
+// 关卡总数上限（用于“全部通关”与“解密高手”自动判定）
+const MAX_SINGLE_LEVEL = 80;
+const MAX_PUZZLE_LEVEL = 60;
 // 被管理员删除（撤销）的成就键集合：userId -> Set(key)。被撤销的键不会因客户端重新上报而恢复
 const revokedAchievements = new Map();
 // 合并客户端上报的成就数据（仅覆盖本次提供到的字段，管理员授予的字段优先保留）
 function mergeAchievements(id, a) {
     if (!id || !a || typeof a !== 'object') return;
-    const cur = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+    const cur = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
     if (typeof a.allLevelsCompleted === 'boolean') cur.allLevelsCompleted = cur.allLevelsCompleted || a.allLevelsCompleted;
     if (typeof a.multiplayerWins === 'number' && !isNaN(a.multiplayerWins)) cur.multiplayerWins = Math.max(cur.multiplayerWins, a.multiplayerWins);
     if (typeof a.trapHits === 'number' && !isNaN(a.trapHits)) cur.trapHits = Math.max(cur.trapHits, a.trapHits);
     if (typeof a.chineseEmojiUsed === 'boolean') cur.chineseEmojiUsed = cur.chineseEmojiUsed || a.chineseEmojiUsed;
+    if (typeof a.puzzleMaster === 'boolean') cur.puzzleMaster = cur.puzzleMaster || a.puzzleMaster;
     // 管理员撤销的成就强制保持为初始值，避免客户端重新上报后“复活”
     const revoked = revokedAchievements.get(id);
     if (revoked) {
         revoked.forEach(k => {
-            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed') cur[k] = false;
+            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed' || k === 'puzzleMaster') cur[k] = false;
             else cur[k] = 0;
         });
     }
@@ -123,6 +127,29 @@ function mergeProgress(id, p) {
     if (Array.isArray(p.puzzleCompletedLevels)) cur.puzzleCompletedLevels = p.puzzleCompletedLevels.slice(0, 200);
     cur.lastReportedAt = Date.now();
     reportedProgress.set(id, cur);
+    autoEvaluateAchievements(id);
+}
+
+// 自动判定“解密高手”成就：当玩家通关全部解密关卡（1..MAX_PUZZLE_LEVEL）时授予
+function autoEvaluateAchievements(id) {
+    if (!id) return;
+    const prog = reportedProgress.get(id);
+    if (!prog) return;
+    const puzzleSet = new Set(Array.isArray(prog.puzzleCompletedLevels) ? prog.puzzleCompletedLevels : []);
+    for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) {
+        if (!puzzleSet.has(i)) return; // 尚有未通关的解密关卡
+    }
+    // 已被管理员撤销的成就不自动恢复
+    const revoked = revokedAchievements.get(id);
+    if (revoked && revoked.has('puzzleMaster')) return;
+    const cur = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
+    if (!cur.puzzleMaster) {
+        cur.puzzleMaster = true;
+        reportedAchievements.set(id, cur);
+        if (typeof io !== 'undefined' && io && io.emit) {
+            io.emit('achievement-update', { clientId: id, achievements: cur });
+        }
+    }
 }
 const MAZES_FILE = path.join(__dirname, 'data', 'mazes.json');
 function loadMazes() {
@@ -478,6 +505,19 @@ function getAllUsersList() {
                 online: true
             });
         }
+    }
+    // 3. 管理员账号也作为一个「用户」条目，便于在后台对自身执行“全部通关 / 成就”等操作
+    if (!userMap.has('admin')) {
+        userMap.set('admin', {
+            id: 'admin',
+            username: '👑 管理员 (Admin)',
+            coins: getDisplayCoins('admin'),
+            level: userLevels.get('admin') || 1,
+            roomId: null,
+            roomName: null,
+            online: true,
+            isAdmin: true
+        });
     }
     return Array.from(userMap.values());
 }
@@ -2023,7 +2063,7 @@ app.get('/api/my-achievements', (req, res) => {
     try {
         const id = req.query.id;
         if (!id) return res.status(400).json({ success: false, message: '缺少 id' });
-        const a = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        const a = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
         res.json({ success: true, achievements: a, revoked: getRevokedKeys(id) });
     } catch (error) {
         console.error('[API] 获取成就失败:', error);
@@ -2035,14 +2075,15 @@ app.get('/api/my-achievements', (req, res) => {
 app.get('/api/admin/users/:userId/achievements', requireAdminAuth, (req, res) => {
     try {
         const userId = req.params.userId;
-        const a = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        const a = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
         res.json({
             success: true,
             achievements: {
                 allLevelsCompleted: !!a.allLevelsCompleted,
                 multiplayerWins: a.multiplayerWins || 0,
                 trapHits: a.trapHits || 0,
-                chineseEmojiUsed: !!a.chineseEmojiUsed
+                chineseEmojiUsed: !!a.chineseEmojiUsed,
+                puzzleMaster: !!a.puzzleMaster
             },
             revoked: getRevokedKeys(userId)
         });
@@ -2059,12 +2100,12 @@ app.post('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) =>
     try {
         const userId = req.params.userId;
         const { key, value } = req.body || {};
-        const validKeys = ['allLevelsCompleted', 'multiplayerWins', 'trapHits', 'chineseEmojiUsed'];
+        const validKeys = ['allLevelsCompleted', 'multiplayerWins', 'trapHits', 'chineseEmojiUsed', 'puzzleMaster'];
         if (!validKeys.includes(key)) {
-            return res.status(400).json({ success: false, message: 'key 必须为 allLevelsCompleted / multiplayerWins / trapHits / chineseEmojiUsed' });
+            return res.status(400).json({ success: false, message: 'key 必须为 allLevelsCompleted / multiplayerWins / trapHits / chineseEmojiUsed / puzzleMaster' });
         }
-        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
-        if (key === 'allLevelsCompleted' || key === 'chineseEmojiUsed') {
+        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
+        if (key === 'allLevelsCompleted' || key === 'chineseEmojiUsed' || key === 'puzzleMaster') {
             cur[key] = !!value;
         } else {
             const n = parseInt(value);
@@ -2086,13 +2127,13 @@ app.delete('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) 
     try {
         const userId = req.params.userId;
         const { key } = req.body || {};
-        const validKeys = ['allLevelsCompleted', 'multiplayerWins', 'trapHits', 'chineseEmojiUsed'];
+        const validKeys = ['allLevelsCompleted', 'multiplayerWins', 'trapHits', 'chineseEmojiUsed', 'puzzleMaster'];
         if (!validKeys.includes(key)) {
-            return res.status(400).json({ success: false, message: 'key 必须为 allLevelsCompleted / multiplayerWins / trapHits / chineseEmojiUsed' });
+            return res.status(400).json({ success: false, message: 'key 必须为 allLevelsCompleted / multiplayerWins / trapHits / chineseEmojiUsed / puzzleMaster' });
         }
-        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
         // 重置为初始值
-        if (key === 'allLevelsCompleted' || key === 'chineseEmojiUsed') cur[key] = false;
+        if (key === 'allLevelsCompleted' || key === 'chineseEmojiUsed' || key === 'puzzleMaster') cur[key] = false;
         else cur[key] = 0;
         reportedAchievements.set(userId, cur);
         // 标记撤销，避免客户端重新上报后“复活”
@@ -2103,6 +2144,46 @@ app.delete('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) 
         res.json({ success: true, message: `已删除 ${key}`, achievements: cur, revoked: Array.from(revoked) });
     } catch (error) {
         console.error('[API] 删除玩家成就失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// ===== 管理员：将某玩家单人关卡 + 解密关卡全部标记为通关，并授予对应成就 =====
+// 同时清除这两个成就可能被管理员撤销的标记，确保“全部通关”结果能保留
+app.post('/api/admin/users/:userId/complete-all', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        if (!userId) return res.status(400).json({ success: false, message: '缺少 userId' });
+
+        // 单人关卡 1..MAX_SINGLE_LEVEL 全部完成
+        const completedLevels = [];
+        for (let i = 1; i <= MAX_SINGLE_LEVEL; i++) completedLevels.push(i);
+        // 解密关卡 1..MAX_PUZZLE_LEVEL 全部完成
+        const puzzleCompletedLevels = [];
+        for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) puzzleCompletedLevels.push(i);
+
+        mergeProgress(userId, { unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels });
+
+        // 授予成就：迷宫大师（全部单人通关）+ 解密高手（全部解密通关）
+        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
+        cur.allLevelsCompleted = true;
+        cur.puzzleMaster = true;
+        reportedAchievements.set(userId, cur);
+
+        // 解除这两个成就的“撤销”状态，避免玩家下次上报进度时被自动重置
+        const revoked = revokedAchievements.get(userId);
+        if (revoked) {
+            revoked.delete('allLevelsCompleted');
+            revoked.delete('puzzleMaster');
+            if (revoked.size === 0) revokedAchievements.delete(userId);
+            else revokedAchievements.set(userId, revoked);
+        }
+
+        io.emit('achievement-update', { clientId: userId, achievements: cur });
+        console.log(`[Admin] 已将 ${userId} 单人 / 解密全部通关，并授予 迷宫大师 + 解密高手`);
+        res.json({ success: true, message: `已将 ${userId} 单人、解密全部通关`, achievements: cur });
+    } catch (error) {
+        console.error('[API] 全部通关失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
     }
 });
