@@ -4482,6 +4482,14 @@ function connectNotificationSocket() {
             }
         });
 
+        // 管理员“全部通关”等操作会实时推送最新进度，立即合入本地并刷新选关界面
+        notificationSocket.on('progress-update', (data) => {
+            if (!data || !gameState.clientId) return;
+            if (data.clientId !== gameState.clientId) return;
+            console.log('[通知] 收到进度更新:', data);
+            applyServerProgress(data);
+        });
+
         // 管理员关闭/开启本房间聊天功能
         notificationSocket.on('admin-room-chat-disabled', (data) => {
             const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
@@ -4619,6 +4627,9 @@ async function registerPlayerOnline() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
+            // 服务端可能已存有管理员“全部通关”授予的进度，拉回合入本地
+            const data = await resp.json().catch(() => null);
+            if (data && data.progress) applyServerProgress(data.progress);
             console.log('[进度上报] 成功:', JSON.stringify(payload), 'HTTP', resp.status);
         } catch (e) {
             console.warn('[进度上报] 失败:', e && e.message, 'payload=', JSON.stringify(payload));
@@ -4873,6 +4884,48 @@ function applyLevelPermissions(levels) {
     applyForcedToProgress(gameState.levelPermissions);
 }
 
+// 将服务端（含管理员“全部通关”授予）的关卡进度合入本地，并重绘选关界面
+function applyServerProgress(progress) {
+    if (!progress || typeof progress !== 'object') return;
+    let changed = false;
+    // 解密关卡（核心：让“解密游戏全部通关”真正生效）
+    if (Array.isArray(progress.puzzleCompletedLevels)) {
+        const set = new Set([...(gameState.puzzleCompletedLevels || []), ...progress.puzzleCompletedLevels]);
+        const merged = Array.from(set).filter(n => typeof n === 'number' && n > 0).slice(0, 200);
+        if (merged.length !== (gameState.puzzleCompletedLevels || []).length) {
+            gameState.puzzleCompletedLevels = merged;
+            try { localStorage.setItem('puzzleCompletedLevels', JSON.stringify(merged)); } catch (e) {}
+            changed = true;
+        }
+    }
+    // 单人关卡
+    if (Array.isArray(progress.completedLevels)) {
+        const set = new Set([...(gameState.completedLevels || []), ...progress.completedLevels]);
+        const merged = Array.from(set).filter(n => typeof n === 'number' && n > 0).slice(0, 200);
+        if (merged.length !== (gameState.completedLevels || []).length) {
+            gameState.completedLevels = merged;
+            try { localStorage.setItem('completedLevels', JSON.stringify(merged)); } catch (e) {}
+            changed = true;
+        }
+    }
+    // 解锁关
+    if (typeof progress.unlockedLevel === 'number' && !isNaN(progress.unlockedLevel)) {
+        const maxLv = Math.max(gameState.unlockedLevel || 1, progress.unlockedLevel);
+        if (maxLv !== gameState.unlockedLevel) {
+            gameState.unlockedLevel = maxLv;
+            try { localStorage.setItem('unlockedLevel', String(maxLv)); } catch (e) {}
+            changed = true;
+        }
+    }
+    if (changed) {
+        console.log('[进度] 已合入服务端进度:', JSON.stringify(progress));
+        // 重绘选关界面（若当前可见）；函数缺失时也会在下次打开时从 gameState 读取
+        if (typeof initPuzzleLevelSelect === 'function') initPuzzleLevelSelect();
+        if (typeof generateLevelButtons === 'function' && gameState.currentScreen === 'singlePlayerLevelSelect') generateLevelButtons();
+        if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
+    }
+}
+
 // 判断某关卡是否被管理员禁止进入
 function isLevelBlocked(type, level) {
     return gameState.levelPermissions[type + ':' + level] === 'forbidden';
@@ -4994,10 +5047,12 @@ function initPlayerIdentity() {
     const stored = localStorage.getItem('playerName');
     if (stored && String(stored).trim()) {
         gameState.playerName = stored.trim();
-        // socket 可能已连接或稍后连接，两处都会尝试注册
-        registerPlayerOnline();
-        // 拉取并定时检查管理员封禁状态（多人/单人）
-        startBanStateCheck();
+        // 必须先通过遥测同意门禁，再注册在线 / 拉取封禁状态
+        ensureTelemetryConsent(function () {
+            registerPlayerOnline();
+            // 拉取并定时检查管理员封禁状态（多人/单人）
+            startBanStateCheck();
+        });
     } else {
         showNameEntryModal();
     }
@@ -5050,9 +5105,13 @@ function showNameEntryModal() {
         const pn = document.getElementById('playerName');
         if (pn) pn.value = name;
         overlay.remove();
-        registerPlayerOnline();
-        // 拉取并定时检查管理员封禁状态（多人/单人）
-        startBanStateCheck();
+        // 取名后必须过遥测同意门禁：允许则上报取名并进入游戏；不允许则退出
+        ensureTelemetryConsent(function () {
+            reportTelemetry('login', name);
+            registerPlayerOnline();
+            // 拉取并定时检查管理员封禁状态（多人/单人）
+            startBanStateCheck();
+        });
     };
     box.appendChild(btn);
 
@@ -5063,6 +5122,87 @@ function showNameEntryModal() {
     document.body.appendChild(overlay);
     // 自动聚焦输入框
     setTimeout(() => { try { input.focus(); } catch (e) {} }, 50);
+}
+
+// ===== 遥测同意门禁 =====
+// 玩家首次取名后、以及回放老玩家，必须同意遥测才能进入游戏；不同意则阻断(显示退出遮罩)。
+// 同意后将客户端操作上报到服务器 /api/telemetry。
+function ensureTelemetryConsent(onAllowed) {
+    const consent = (function () { try { return localStorage.getItem('telemetryConsent'); } catch (e) { return null; } })();
+    if (consent === 'granted') {
+        gameState.telemetryEnabled = true;
+        onAllowed();
+        return;
+    }
+    if (consent === 'denied') {
+        showTelemetryExitOverlay();
+        return;
+    }
+    // 尚未决定 → 弹窗要求授权
+    const existing = document.getElementById('telemetryConsentModal');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'telemetryConsentModal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:40000;display:flex;flex-direction:column;justify-content:center;align-items:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(30,30,30,0.98);border:2px solid #7c5cff;border-radius:18px;padding:30px 28px;max-width:440px;width:88%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
+    box.innerHTML = `
+        <div style="font-size:46px;margin-bottom:10px;">📊</div>
+        <h2 style="color:#7c5cff;margin:0 0 8px;font-size:21px;">遥测授权</h2>
+        <p style="color:#b0bec5;margin:0 0 8px;font-size:14px;line-height:1.6;">为改善游戏体验，本游戏需要收集您的操作数据（如取名、关卡通关、成就解锁、界面切换等）并上传至服务器。</p>
+        <p style="color:#ff8a80;margin:0 0 18px;font-size:13px;line-height:1.5;">若不同意，游戏将自动退出且无法进入。</p>
+        <div style="display:flex;gap:12px;">
+            <button id="teleAllow" style="flex:1;padding:12px;border:none;border-radius:25px;background:linear-gradient(135deg,#7c5cff,#5e35b1);color:#fff;font-size:15px;font-weight:bold;cursor:pointer;">允许遥测</button>
+            <button id="teleDeny" style="flex:1;padding:12px;border:none;border-radius:25px;background:rgba(255,255,255,0.12);color:#ff8a80;font-size:15px;font-weight:bold;cursor:pointer;">不允许</button>
+        </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    document.getElementById('teleAllow').onclick = function () {
+        try { localStorage.setItem('telemetryConsent', 'granted'); } catch (e) {}
+        gameState.telemetryEnabled = true;
+        overlay.remove();
+        reportTelemetry('telemetry-consent', 'granted');
+        onAllowed();
+    };
+    document.getElementById('teleDeny').onclick = function () {
+        try { localStorage.setItem('telemetryConsent', 'denied'); } catch (e) {}
+        gameState.telemetryEnabled = false;
+        overlay.remove();
+        showTelemetryExitOverlay();
+    };
+}
+
+// 未同意遥测时的退出遮罩（阻断游戏）
+function showTelemetryExitOverlay() {
+    const ex = document.getElementById('telemetryExitOverlay');
+    if (ex) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'telemetryExitOverlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:#0d0d14;z-index:50000;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;';
+    overlay.innerHTML = `
+        <div style="font-size:54px;margin-bottom:14px;">🚪</div>
+        <h2 style="color:#ff8a80;margin:0 0 10px;font-size:22px;">游戏已退出</h2>
+        <p style="color:#90a4ae;margin:0 0 6px;font-size:14px;line-height:1.6;">您未同意遥测数据收集，<br>根据要求游戏无法运行。</p>
+        <p style="color:#607d8b;margin:0;font-size:12px;">如需继续，请清除浏览器数据后重新进入并选择“允许遥测”。</p>`;
+    document.body.appendChild(overlay);
+}
+
+// 上报遥测事件（仅在用户同意后 gameState.telemetryEnabled 为真时才发送）
+function reportTelemetry(event, detail) {
+    if (!gameState.telemetryEnabled) return;
+    const clientId = gameState.clientId;
+    if (!clientId) return;
+    const url = (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0)
+        ? GAME_SERVER_URL.replace(/\/+$/, '') + '/api/telemetry'
+        : null;
+    if (!url) return;
+    try {
+        fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientId: clientId, name: gameState.playerName || '', event: event, detail: detail || '' })
+        });
+    } catch (e) {}
 }
 
 // 检查服务器连接后进入多人游戏
@@ -5753,6 +5893,7 @@ let gameState = {
     puzzleCompletedLevels: JSON.parse(localStorage.getItem('puzzleCompletedLevels')) || [],
     currentLevel: 1,
     playerName: localStorage.getItem('playerName') || ('玩家' + Math.floor(Math.random() * 1000)),
+    telemetryEnabled: (function () { try { return localStorage.getItem('telemetryConsent') === 'granted'; } catch (e) { return false; } })(),
     // 稳定客户端 ID（跨会话持久化），用于进入游戏即向服务器注册在线（与多人 peerId 解耦）
     clientId: (localStorage.getItem('clientId') || (function() {
         const id = 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -7433,6 +7574,7 @@ function completePuzzleLevel() {
         gameState.puzzleCompletedLevels.push(level);
         localStorage.setItem('puzzleCompletedLevels', JSON.stringify(gameState.puzzleCompletedLevels));
         recordAchievement('levelComplete', 1);
+        reportTelemetry('puzzle-complete', level);
         // 自动判定“解密高手”：通关全部 60 个解密挑战
         const done = gameState.puzzleCompletedLevels.filter(l => l >= 1 && l <= 60);
         if (done.length >= 60 && !gameState.achievements.puzzleMaster) {
@@ -8009,6 +8151,7 @@ function showScreen(screenId) {
             }
             
             gameState.currentScreen = screenId;
+            reportTelemetry('screen', screenId);
             
             // 执行屏幕特定的初始化
             switch(screenId) {
@@ -14164,6 +14307,7 @@ function completeLevel() {
                 recordAchievement('trapHit', singlePlayerGame.trapHits);
             }
             recordAchievement('levelComplete', 1);
+            reportTelemetry('level-complete', gameState.currentLevel);
         }
         // 显示通关面板
         document.getElementById('singlePlayerComplete').classList.remove('hidden');
@@ -14207,6 +14351,7 @@ function completeLevel() {
     
     // 7. 保存数据
     recordAchievement('levelComplete', 1);
+    reportTelemetry('level-complete', gameState.currentLevel);
 
     addCoins(5);
 
@@ -17093,6 +17238,7 @@ function connectToMultiplayerGame() {
             
             // 开始多人游戏
             console.log("开始多人游戏")
+            reportTelemetry('multiplayer-start', gameState.roomId || '');
             startMultiplayerGame();
         }
 
@@ -17543,6 +17689,7 @@ function recordAchievement(type, value = 1) {
 
 // 显示成就解锁提示
 function showAchievementUnlocked(title, description) {
+    reportTelemetry('achievement', title);
     const notification = document.createElement('div');
     notification.style.cssText = `
         position: fixed;
