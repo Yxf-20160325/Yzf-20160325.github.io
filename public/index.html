@@ -3316,6 +3316,22 @@
                 </div>
                 <div class="achievement-status" id="status4">未完成</div>
             </div>
+            
+            <!-- 成就5：解密高手 -->
+            <div class="achievement-item" id="achievement5">
+                <div class="achievement-icon">🧩</div>
+                <div class="achievement-info">
+                    <h3>解密高手</h3>
+                    <p>通关所有解密挑战</p>
+                    <div class="achievement-progress">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress5"></div>
+                        </div>
+                        <span id="progressText5">0/60</span>
+                    </div>
+                </div>
+                <div class="achievement-status" id="status5">未完成</div>
+            </div>
         </div>
     </div>
     
@@ -4460,6 +4476,9 @@ function connectNotificationSocket() {
                 if (data.achievements.trapHits >= 30) {
                     if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('陷阱专家', '管理员已为你解锁此成就！');
                 }
+                if (data.achievements.puzzleMaster) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('解密高手', '管理员已为你解锁此成就！');
+                }
             }
         });
 
@@ -4590,7 +4609,7 @@ async function registerPlayerOnline() {
         unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
         completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
         puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
-        achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false }
+        achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false }
     };
     // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
     if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
@@ -4776,7 +4795,7 @@ async function reportMyCoins() {
                 unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
                 completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
                 puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
-                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false }
+                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false }
             })
         });
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
@@ -4808,7 +4827,7 @@ async function fetchMyAchievements() {
 // revoked：被管理员撤销的成就键数组，需将本地对应值强制清零
 function applyServerAchievements(serverAch, revoked) {
     if (!serverAch || typeof serverAch !== 'object') return;
-    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
     let changed = false;
     // 布尔型成就：取并集（任一端为 true 即 true）
     if (serverAch.allLevelsCompleted && !gameState.achievements.allLevelsCompleted) {
@@ -4817,6 +4836,10 @@ function applyServerAchievements(serverAch, revoked) {
     }
     if (serverAch.chineseEmojiUsed && !gameState.achievements.chineseEmojiUsed) {
         gameState.achievements.chineseEmojiUsed = true;
+        changed = true;
+    }
+    if (serverAch.puzzleMaster && !gameState.achievements.puzzleMaster) {
+        gameState.achievements.puzzleMaster = true;
         changed = true;
     }
     // 计数型成就：取较大值
@@ -4831,7 +4854,7 @@ function applyServerAchievements(serverAch, revoked) {
     // 管理员撤销：将对应成就强制清零
     if (Array.isArray(revoked) && revoked.length) {
         revoked.forEach(k => {
-            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed') {
+            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed' || k === 'puzzleMaster') {
                 if (gameState.achievements[k]) { gameState.achievements[k] = false; changed = true; }
             } else if (k === 'multiplayerWins' || k === 'trapHits') {
                 if ((gameState.achievements[k] || 0) !== 0) { gameState.achievements[k] = 0; changed = true; }
@@ -5820,7 +5843,8 @@ let gameState = {
         allLevelsCompleted: false,
         multiplayerWins: 0,
         trapHits: 0,
-        chineseEmojiUsed: false
+        chineseEmojiUsed: false,
+        puzzleMaster: false
     },
     // 音乐播放器状态
     musicPlayer: {
@@ -7409,6 +7433,14 @@ function completePuzzleLevel() {
         gameState.puzzleCompletedLevels.push(level);
         localStorage.setItem('puzzleCompletedLevels', JSON.stringify(gameState.puzzleCompletedLevels));
         recordAchievement('levelComplete', 1);
+        // 自动判定“解密高手”：通关全部 60 个解密挑战
+        const done = gameState.puzzleCompletedLevels.filter(l => l >= 1 && l <= 60);
+        if (done.length >= 60 && !gameState.achievements.puzzleMaster) {
+            gameState.achievements.puzzleMaster = true;
+            try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch (e) {}
+            if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('解密高手', '恭喜你通关所有解密挑战！');
+            if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
+        }
     }
     
     // 金币奖励（随关卡递增）
@@ -13985,7 +14017,7 @@ function drawSinglePlayerMaze() {
 function saveGameData() {
     try {
         // 确保gameState对象及其属性存在
-        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
         if (!gameState.gameStats) gameState.gameStats = { timeChallengeBest: 0, puzzleLevelsCompleted: 0, totalLevelsCompleted: 0, totalPlayTime: 0, totalMoves: 0, totalTrapsTriggered: 0, totalCoinsCollected: 0 };
         if (!gameState.settings) gameState.settings = { autoSave: true };
         
@@ -17344,6 +17376,20 @@ function updateAchievementProgress() {
         achievement4.classList.add('completed');
         achievement4.classList.remove('hidden');
         document.getElementById('status4').textContent = '已完成';
+    }
+    
+    // 更新成就5：解密高手（通关所有解密挑战，共 60 关）
+    const maxPuzzle = 60;
+    const puzzleDone = (Array.isArray(gameState.puzzleCompletedLevels)
+        ? gameState.puzzleCompletedLevels.filter(l => l >= 1 && l <= maxPuzzle).length
+        : 0);
+    const progress5 = gameState.achievements.puzzleMaster ? 100 : Math.min(puzzleDone / maxPuzzle * 100, 100);
+    document.getElementById('progress5').style.width = progress5 + '%';
+    document.getElementById('progressText5').textContent = gameState.achievements.puzzleMaster ? '60/60' : puzzleDone + '/60';
+    
+    if (gameState.achievements.puzzleMaster) {
+        document.getElementById('achievement5').classList.add('completed');
+        document.getElementById('status5').textContent = '已完成';
     }
 }
 
