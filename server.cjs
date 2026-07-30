@@ -1,3 +1,4 @@
+
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
@@ -71,6 +72,8 @@ const reportedProgress = new Map();
 const levelPermissions = new Map();
 // 玩家成就数据（客户端上报 + 管理员授予）：clientId -> { allLevelsCompleted, multiplayerWins, trapHits, chineseEmojiUsed }
 const reportedAchievements = new Map();
+// 被管理员删除（撤销）的成就键集合：userId -> Set(key)。被撤销的键不会因客户端重新上报而恢复
+const revokedAchievements = new Map();
 // 合并客户端上报的成就数据（仅覆盖本次提供到的字段，管理员授予的字段优先保留）
 function mergeAchievements(id, a) {
     if (!id || !a || typeof a !== 'object') return;
@@ -79,7 +82,20 @@ function mergeAchievements(id, a) {
     if (typeof a.multiplayerWins === 'number' && !isNaN(a.multiplayerWins)) cur.multiplayerWins = Math.max(cur.multiplayerWins, a.multiplayerWins);
     if (typeof a.trapHits === 'number' && !isNaN(a.trapHits)) cur.trapHits = Math.max(cur.trapHits, a.trapHits);
     if (typeof a.chineseEmojiUsed === 'boolean') cur.chineseEmojiUsed = cur.chineseEmojiUsed || a.chineseEmojiUsed;
+    // 管理员撤销的成就强制保持为初始值，避免客户端重新上报后“复活”
+    const revoked = revokedAchievements.get(id);
+    if (revoked) {
+        revoked.forEach(k => {
+            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed') cur[k] = false;
+            else cur[k] = 0;
+        });
+    }
     reportedAchievements.set(id, cur);
+}
+// 返回某用户被撤销的成就键数组
+function getRevokedKeys(userId) {
+    const s = revokedAchievements.get(userId);
+    return s ? Array.from(s) : [];
 }
 // 合并客户端上报的关卡进度（仅覆盖本次提供到的字段，其余保留）
 function mergeProgress(id, p) {
@@ -1984,7 +2000,7 @@ app.get('/api/my-achievements', (req, res) => {
         const id = req.query.id;
         if (!id) return res.status(400).json({ success: false, message: '缺少 id' });
         const a = reportedAchievements.get(id) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
-        res.json({ success: true, achievements: a });
+        res.json({ success: true, achievements: a, revoked: getRevokedKeys(id) });
     } catch (error) {
         console.error('[API] 获取成就失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
@@ -2003,7 +2019,8 @@ app.get('/api/admin/users/:userId/achievements', requireAdminAuth, (req, res) =>
                 multiplayerWins: a.multiplayerWins || 0,
                 trapHits: a.trapHits || 0,
                 chineseEmojiUsed: !!a.chineseEmojiUsed
-            }
+            },
+            revoked: getRevokedKeys(userId)
         });
     } catch (error) {
         console.error('[API] 获取玩家成就失败:', error);
@@ -2036,6 +2053,32 @@ app.post('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) =>
         res.json({ success: true, message: `已设置 ${key}`, achievements: cur });
     } catch (error) {
         console.error('[API] 设置玩家成就失败:', error);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 管理员删除（撤销）某玩家的某项成就
+app.delete('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { key } = req.body || {};
+        const validKeys = ['allLevelsCompleted', 'multiplayerWins', 'trapHits', 'chineseEmojiUsed'];
+        if (!validKeys.includes(key)) {
+            return res.status(400).json({ success: false, message: 'key 必须为 allLevelsCompleted / multiplayerWins / trapHits / chineseEmojiUsed' });
+        }
+        const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+        // 重置为初始值
+        if (key === 'allLevelsCompleted' || key === 'chineseEmojiUsed') cur[key] = false;
+        else cur[key] = 0;
+        reportedAchievements.set(userId, cur);
+        // 标记撤销，避免客户端重新上报后“复活”
+        const revoked = revokedAchievements.get(userId) || new Set();
+        revoked.add(key);
+        revokedAchievements.set(userId, revoked);
+        io.emit('achievement-update', { clientId: userId, achievements: cur, revoked: Array.from(revoked) });
+        res.json({ success: true, message: `已删除 ${key}`, achievements: cur, revoked: Array.from(revoked) });
+    } catch (error) {
+        console.error('[API] 删除玩家成就失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
     }
 });
