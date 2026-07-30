@@ -347,7 +347,9 @@ app.get('/api/admin/rooms', requireAdminAuth, (req, res) => {
 //         res.status(500).json({ success: false, message: '登录失败' });
 //     }
 // });
-// 在 server.cjs 中找到登录API，临时修改为：
+// API: 管理员登录
+// 使用 bcrypt 校验 admin-password.txt 中的密码哈希，避免明文硬编码密码的安全隐患，
+// 且管理员可通过修改该文件真正改密（明文比较时改密文件完全失效）。
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { password } = req.body;
@@ -358,11 +360,18 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(400).json({ success: false, message: '密码不能为空' });
         }
         
-        // 临时：明文比较（仅用于调试）
-        const adminPassword = 'admin123';
+        const adminPasswordPath = path.join(__dirname, 'admin-password.txt');
         
-        // 临时：使用明文比较
-        if (password === 'admin123') {
+        // 确保密码文件存在（首次启动由 initializeAdminPassword 创建）
+        if (!fs.existsSync(adminPasswordPath)) {
+            initializeAdminPassword();
+        }
+        
+        const hashedPassword = fs.readFileSync(adminPasswordPath, 'utf8').trim();
+        
+        const isValid = await bcrypt.compare(password, hashedPassword);
+        
+        if (isValid) {
             const token = generateAdminToken();
             console.log('管理员登录成功');
             return res.json({ 
@@ -934,15 +943,18 @@ app.get('/api/version-check', (req, res) => {
         latestClientVersion = String(clientVersion);
     }
 
-    const matched = clientVersion === SERVER_VERSION;
+    // 是否“过时”：仅当客户端版本低于“已知最新客户端版本(latestClientVersion)”时才算过时。
+    // 旧逻辑用 clientVersion === SERVER_VERSION 判断，会导致【比服务器版本更高的客户端】被误判为
+    // “过时”并要求用户“刷新/更新”（实为降级），与上方设计注释（按 latestClientVersion 自动发现新版本）相悖。
+    const outdated = !!(clientVersion && cmpVersion(clientVersion, latestClientVersion) < 0);
     // 始终返回最新客户端版本，客户端据此判断是否弹“有更新”弹窗
     const responseData = {
-        status: matched ? 'ok' : 'outdated',
+        status: outdated ? 'outdated' : 'ok',
         version: SERVER_VERSION,
         serverVersion: SERVER_VERSION,
         latestClientVersion: latestClientVersion,
         clientVersion: clientVersion || null,
-        message: matched ? '服务器在线，版本匹配' : '检测到版本不匹配，请更新客户端或刷新页面。'
+        message: outdated ? '检测到版本不匹配，请更新客户端或刷新页面。' : '服务器在线，版本匹配'
     };
 
     // 将处理好的数据以 JSON 格式返回给客户端
