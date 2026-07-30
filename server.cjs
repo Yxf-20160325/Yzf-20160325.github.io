@@ -25,6 +25,7 @@ let gameAccessDisabled = false;          // 是否对游戏页面返回 403
 const SUPERADMIN_PASSWORD_PATH = path.join(__dirname, 'superadmin-password.txt');
 const ADMIN_STATE_FILE = path.join(__dirname, 'data', 'admin-state.json');
 const AUDIT_FILE = path.join(__dirname, 'data', 'admin-audit.log');
+const TELEMETRY_FILE = path.join(__dirname, 'data', 'telemetry.log');
 
 // 超级管理员密码初始化（默认 11dev），仅首次启动创建一次
 function initializeSuperAdminPassword() {
@@ -61,6 +62,20 @@ function readAudit(limit) {
         if (!fs.existsSync(AUDIT_FILE)) return [];
         const lines = fs.readFileSync(AUDIT_FILE, 'utf8').trim().split('\n').filter(Boolean);
         const arr = lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+        return limit ? arr.slice(-limit) : arr;
+    } catch (e) { return []; }
+}
+
+// 遥测数据：记录客户端上报的用户操作（需用户同意后才会上报）
+function appendTelemetry(entry) {
+    try { fs.appendFileSync(TELEMETRY_FILE, JSON.stringify(entry) + '\n'); } catch (e) {}
+}
+function readTelemetry(limit, clientId) {
+    try {
+        if (!fs.existsSync(TELEMETRY_FILE)) return [];
+        const lines = fs.readFileSync(TELEMETRY_FILE, 'utf8').trim().split('\n').filter(Boolean);
+        let arr = lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+        if (clientId) arr = arr.filter(e => e.clientId === clientId);
         return limit ? arr.slice(-limit) : arr;
     } catch (e) { return []; }
 }
@@ -610,6 +625,33 @@ app.get('/api/superadmin/audit', requireSuperAdminAuth, (req, res) => {
     res.json({ success: true, logs: readAudit(limit) });
 });
 
+// 遥测：客户端上报操作数据（需用户在客户端同意遥测后才会调用；要求携带 clientId）
+app.post('/api/telemetry', (req, res) => {
+    try {
+        const { clientId, name, event, detail } = req.body || {};
+        if (!clientId || !event) {
+            return res.status(400).json({ success: false, message: '缺少 clientId 或 event' });
+        }
+        appendTelemetry({
+            ts: new Date().toISOString(),
+            clientId: String(clientId),
+            name: name ? String(name).slice(0, 30) : '',
+            event: String(event).slice(0, 60),
+            detail: detail != null ? String(detail).slice(0, 500) : ''
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '上报失败' });
+    }
+});
+
+// 遥测查看（管理员专用）：可指定 clientId 查看单个用户，或留空查看全部
+app.get('/api/admin/telemetry', requireAdminAuth, (req, res) => {
+    const limit = parseInt(req.query.limit) || 500;
+    const clientId = req.query.clientId || '';
+    res.json({ success: true, logs: readTelemetry(limit, clientId || null) });
+});
+
 // API:版本更新
 
 
@@ -787,6 +829,7 @@ app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
         userCoins.set(userId, updated);
 
         console.log(`[Admin] 用户 ${userId} 金币变更 ${delta >= 0 ? '+' : ''}${delta}，当前余额 ${updated}`);
+        appendAudit('admin', 'coins', `用户 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 金币，余额 ${updated}`);
 
         res.json({
             success: true,
@@ -890,6 +933,7 @@ app.delete('/api/admin/rooms/:roomId', requireAdminAuth, (req, res) => {
         roomChats.delete(roomId);
         
         console.log(`[Admin] 房间 ${roomId} 已被管理员删除`);
+        appendAudit('admin', 'delete-room', `删除房间 ${roomId}`);
         
         // 广播更新后的房间列表
         broadcastRoomList();
@@ -934,6 +978,7 @@ app.post('/api/admin/rooms/:roomId/kick-all', requireAdminAuth, (req, res) => {
         room.status = 'waiting';
         
         console.log(`[Admin] 房间 ${roomId} 的所有玩家已被请出，共 ${kickedPlayersCount} 人`);
+        appendAudit('admin', 'kick-all', `房间 ${roomId} 请出全部玩家，共 ${kickedPlayersCount} 人`);
         
         // 广播更新后的房间列表
         broadcastRoomList();
@@ -964,6 +1009,7 @@ app.patch('/api/admin/rooms/:roomId/privacy', requireAdminAuth, (req, res) => {
         room.private = isPrivate;
         
         console.log(`[Admin] 房间 ${roomId} 私密状态已切换为: ${isPrivate}`);
+        appendAudit('admin', 'room-privacy', `房间 ${roomId} 设为${isPrivate ? '私密' : '公开'}`);
         
         res.json({ 
             success: true, 
@@ -1063,6 +1109,7 @@ app.post('/api/admin/rooms/:roomId/chat-delete', requireAdminAuth, (req, res) =>
         if (idx !== -1) list.splice(idx, 1);
         io.emit('admin-chat-delete', { roomId, messageId });
         console.log(`[Admin] 删除房间 ${roomId} 的消息 ${messageId}`);
+        appendAudit('admin', 'chat-delete', `删除房间 ${roomId} 的聊天消息 ${messageId}`);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, message: '删除失败' });
@@ -1659,6 +1706,7 @@ app.post('/api/admin/rooms/:roomId/system-message', requireAdminAuth, (req, res)
         });
 
         console.log(`[Admin] 房间 ${roomId} 收到系统消息: ${message}`);
+        appendAudit('admin', 'system-message', `房间 ${roomId} 发送系统消息: ${String(message).slice(0, 80)}`);
         
         res.json({ success: true, message: '消息发送成功' });
 
@@ -1685,6 +1733,7 @@ app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
         });
 
         console.log(`[Admin] 已发送全局弹窗: ${title}`);
+        appendAudit('admin', 'popup', `发送全局弹窗: ${String(title).slice(0, 80)}`);
         res.json({ success: true, message: '弹窗已发送给所有在线玩家' });
     } catch (error) {
         console.error('[API] 发送弹窗失败:', error);
@@ -1839,6 +1888,7 @@ app.post('/api/admin/ban', requireAdminAuth, (req, res) => {
         userBans.set(userId, ban);
         const banLabel = type === 'multiplayer' ? '多人游戏' : (type === 'single' ? '单人游戏' : (type === 'puzzle' ? '解密游戏' : '多人游戏聊天'));
         console.log(`[Admin] 用户 ${userId} 的${banLabel}已${banned ? '封禁' : '解封'}${banned && ban.reasons[type] ? '，理由: ' + ban.reasons[type] : ''}`);
+        appendAudit('admin', 'ban', `用户 ${userId} 的${banLabel}${banned ? '封禁' : '解封'}${banned && ban.reasons[type] ? '，理由: ' + ban.reasons[type] : ''}`);
         // 若该用户当前有实时 socket，立即推送最新封禁状态（REST 注册的玩家无 socket，由客户端定时拉取兜底）
         const socketId = onlineSockets.get(userId);
         if (socketId && socketId !== 'rest') {
@@ -1966,6 +2016,7 @@ app.delete('/api/admin/rooms/:roomId/players/:playerId', requireAdminAuth, (req,
 
         // 从房间玩家列表中移除
         room.players.delete(playerIdToKick);
+        appendAudit('admin', 'kick-player', `房间 ${roomId} 踢出玩家 ${playerToKick.name} (${playerIdToKick})`);
 
         // 广播给房间内其他玩家谁被踢了
         io.to(roomId).emit('player-kicked-by-admin', {
@@ -2034,6 +2085,7 @@ app.post('/api/admin/rooms/:roomId/clear-room', requireAdminAuth, (req, res) => 
         room.actualHost = null; // 清除房主信息
 
         console.log(`[Admin] 房间 ${roomId} 已被管理员清空并重置。共踢出 ${kickedPlayersCount} 人。`);
+        appendAudit('admin', 'clear-room', `清空并重置房间 ${roomId}，共请出 ${kickedPlayersCount} 人`);
         
         broadcastRoomList();
 
@@ -2093,6 +2145,7 @@ app.post('/api/admin/rooms/:roomId/disable-chat', requireAdminAuth, (req, res) =
         room.chatDisabled = disabled;
         // 全局广播（玩家通知 socket 未 join socket.io 房间，必须全局 + 客户端按 roomId 过滤）
         io.emit('admin-room-chat-disabled', { roomId: room.id, disabled });
+        appendAudit('admin', 'room-chat', `房间 ${room.id} ${disabled ? '关闭' : '开启'}聊天功能`);
         broadcastRoomList();
         res.json({ success: true, message: disabled ? '已关闭该房间聊天功能' : '已开启该房间聊天功能', disabled });
     } catch (error) {
@@ -2108,6 +2161,7 @@ app.post('/api/admin/rooms/:roomId/change-map', requireAdminAuth, (req, res) => 
         if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
         io.emit('admin-regenerate-map', { roomId: room.id });
         console.log(`[Admin] 已请求房主重新生成房间 ${room.id} 的地图`);
+        appendAudit('admin', 'change-map', `房间 ${room.id} 请求重新生成地图`);
         res.json({ success: true, message: '已发送重新生成地图指令（需房主在线以执行）' });
     } catch (error) {
         console.error('[API] 更改地图失败:', error);
@@ -2129,6 +2183,7 @@ app.post('/api/admin/rooms/:roomId/teleport', requireAdminAuth, (req, res) => {
         player.x = px;
         player.y = py;
         io.emit('admin-teleport', { roomId: room.id, playerId, x: px, y: py });
+        appendAudit('admin', 'teleport', `将房间 ${room.id} 玩家 ${player.name} (${playerId}) 传送到 (${px}, ${py})`);
         res.json({ success: true, message: `已将 ${player.name} 传送到 (${px}, ${py})` });
     } catch (error) {
         console.error('[API] 传送玩家失败:', error);
@@ -2153,6 +2208,7 @@ app.post('/api/admin/rooms/:roomId/transfer-host', requireAdminAuth, (req, res) 
         room.actualHost = newHost.socketId || room.actualHost;
         room.hostName = newHost.name;
         io.emit('admin-transfer-host', { roomId: room.id, newHostId: newHost.id, newHostName: newHost.name });
+        appendAudit('admin', 'transfer-host', `房间 ${room.id} 房主转移给 ${newHost.name} (${newHost.id})`);
         broadcastRoomList();
         res.json({ success: true, message: `已将房主转移给 ${newHost.name}` });
     } catch (error) {
@@ -2175,6 +2231,7 @@ app.post('/api/admin/rooms/:roomId/change-max-players', requireAdminAuth, (req, 
         room.maxPlayers = max;
         // 通知房间内玩家与管理后台（若当前人数超过新上限，前端可选择提示，但服务器不强制踢人）
         io.emit('room-max-players-changed', { roomId: room.id, maxPlayers: max, oldMaxPlayers: old });
+        appendAudit('admin', 'change-max-players', `房间 ${room.id} 人数上限从 ${old} 改为 ${max}`);
         broadcastRoomList();
         res.json({ success: true, message: `已将人数上限从 ${old} 改为 ${max}`, maxPlayers: max });
     } catch (error) {
@@ -2239,6 +2296,7 @@ app.post('/api/admin/users/:userId/level-permission', requireAdminAuth, (req, re
         else levelPermissions.set(userId, perms);
         // 通知该玩家客户端即时应用（按 clientId 过滤；非在线则下次拉取生效）
         io.emit('level-permission-update', { clientId: userId, levels: perms });
+        appendAudit('admin', 'level-permission', `用户 ${userId} 的关卡 ${key} 设为 ${state}`);
         res.json({ success: true, message: `已更新 ${key} 为 ${state}`, levels: perms });
     } catch (error) {
         console.error('[API] 设置关卡权限失败:', error);
@@ -2305,6 +2363,7 @@ app.post('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) =>
         reportedAchievements.set(userId, cur);
         // 通知该玩家客户端即时应用
         io.emit('achievement-update', { clientId: userId, achievements: cur });
+        appendAudit('admin', 'grant-achievement', `向用户 ${userId} 授予/设置成就 ${key}`);
         res.json({ success: true, message: `已设置 ${key}`, achievements: cur });
     } catch (error) {
         console.error('[API] 设置玩家成就失败:', error);
@@ -2331,6 +2390,7 @@ app.delete('/api/admin/users/:userId/achievement', requireAdminAuth, (req, res) 
         revoked.add(key);
         revokedAchievements.set(userId, revoked);
         io.emit('achievement-update', { clientId: userId, achievements: cur, revoked: Array.from(revoked) });
+        appendAudit('admin', 'revoke-achievement', `撤销用户 ${userId} 的成就 ${key}`);
         res.json({ success: true, message: `已删除 ${key}`, achievements: cur, revoked: Array.from(revoked) });
     } catch (error) {
         console.error('[API] 删除玩家成就失败:', error);
