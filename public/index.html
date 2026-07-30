@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>迷宫冒险 - 1.15.3</title>
+    <title>迷宫冒险 - 1.15.5</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         html {
@@ -3378,6 +3378,14 @@
         <div class="updates-container">
             <!-- 更新内容将由用户填写 -->
             <div class="update-item">
+                <div class="update-title">版本 1.15.5</div>
+                <div class="update-content">
+                    <ul>
+                        <li>版本同步更新至 1.15.5（服务器/客户端版本号对齐）</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="update-item">
                 <div class="update-title">版本 1.15.3</div>
                 <div class="update-content">
                     <ul>
@@ -4077,7 +4085,7 @@
     </div>
     
     <!-- 版本信息显示 -->
-    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.3</div>
+    <div id="versionInfo" class="version-info" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 100;">迷宫冒险 - 1.15.5</div>
     
     <!-- 管理员登录界面 -->
     <div id="adminLoginModal" class="hidden" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.9); z-index: 99999; display: flex; justify-content: center; align-items: center;">
@@ -4112,7 +4120,7 @@
     </div>
     
     <script>
-const CLIENT_VERSION = "1.15.3";
+const CLIENT_VERSION = "1.15.5";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
@@ -4157,8 +4165,9 @@ async function checkServerVersion() {
                 showNotification(`✅ 版本检查成功！当前版本: ${data.version}`, 4000);
                 break;
             case 'outdated':
-                 // 如果需要，可以在这里显示更详细的服务器版本
-                 const serverVerMsg = data.serverVersion ? `\n服务器最新版本: ${data.serverVersion}` : '';
+                 // 显示服务端记录的最新客户端版本（自动发现），回退到 serverVersion
+                 const newestVer = data.latestClientVersion || data.serverVersion || data.version;
+                 const serverVerMsg = newestVer ? `\n最新版本: ${newestVer}` : '';
                  const message = `⚠️ 提示: 您的游戏版本已过时！${serverVerMsg}\n\n请刷新页面或联系管理员更新游戏。`;
                  alert(message);
                  showNotification('请立即更新游戏以保证体验！', 7000);
@@ -4213,8 +4222,9 @@ async function autoConnectToServer() {
             console.log('管理员登录成功:', adminSession);
         }
 
-        // 版本更新检测：客户端版本低于服务器版本时弹窗提示（不影响正常游戏）
-        const latestVersion = data.serverVersion || data.version;
+        // 版本更新检测：客户端版本低于“最新客户端版本”时弹窗提示（不影响正常游戏）
+        // 优先用服务端返回的 latestClientVersion（自动发现的新发布版本），回退到 serverVersion/version
+        const latestVersion = data.latestClientVersion || data.serverVersion || data.version;
         if (latestVersion && isVersionLower(CLIENT_VERSION, latestVersion)) {
             showUpdateAvailableModal(CLIENT_VERSION, latestVersion);
         }
@@ -4931,7 +4941,7 @@ function showUpdateAvailableModal(currentVersion, latestVersion) {
     if (existing) existing.remove();
     const overlay = document.createElement('div');
     overlay.id = 'updateAvailableModal';
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:20000;display:flex;justify-content:center;align-items:center;';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:40000;display:flex;justify-content:center;align-items:center;';
     const box = document.createElement('div');
     box.style.cssText = 'background:rgba(35,35,35,0.98);border:2px solid #ffb300;border-radius:15px;padding:30px;max-width:440px;width:85%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);';
     const icon = document.createElement('div');
