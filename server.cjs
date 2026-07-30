@@ -42,7 +42,24 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15.3";
+const SERVER_VERSION = "1.15.5";
+// 服务端记住“见过的最高客户端版本号”。正常情况下等于 SERVER_VERSION；
+// 一旦有更高版本的客户端连入（即发布了新客户端），会自动记录为最新，
+// 从而让仍使用旧版（缓存）的客户端在进游戏时收到“有更新”的弹窗。
+let latestClientVersion = SERVER_VERSION;
+
+// 版本比较：a < b 返回 -1，a === b 返回 0，a > b 返回 1（按点分数字逐段比较，如 1.15 < 1.16）
+function cmpVersion(a, b) {
+    const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const x = pa[i] || 0, y = pb[i] || 0;
+        if (x < y) return -1;
+        if (x > y) return 1;
+    }
+    return 0;
+}
 
 // JWT 配置
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -912,26 +929,21 @@ app.get('/api/version-check', (req, res) => {
 
     console.log(`服务器版本: ${SERVER_VERSION}, 客户端版本: ${clientVersion}`);
 
-    let responseData = {};
-
-    if (clientVersion === SERVER_VERSION) {
-        // 情况1: 版本匹配
-        console.log(`[版本检查] 成功: 客户端版本 ${clientVersion} 与服务器版本 ${SERVER_VERSION} 匹配。`);
-        responseData = {
-            status: 'ok',
-            version: SERVER_VERSION,
-        message: '服务器在线，版本匹配'
-        };
-    } else {
-        // 情况2: 版本不匹配
-        console.log(`[版本检查] 失败: 客户端版本 ${clientVersion} 与服务器版本 ${SERVER_VERSION} 不匹配。`);
-        responseData = {
-            status: 'outdated',
-            clientVersion: clientVersion,
-            serverVersion: SERVER_VERSION,
-            message: '检测到版本不匹配，请更新客户端或刷新页面。'
-        };
+    // 记录见过的最高客户端版本（自动发现新发布的客户端，无需改服务端即可提示老玩家刷新）
+    if (clientVersion && cmpVersion(latestClientVersion, clientVersion) < 0) {
+        latestClientVersion = String(clientVersion);
     }
+
+    const matched = clientVersion === SERVER_VERSION;
+    // 始终返回最新客户端版本，客户端据此判断是否弹“有更新”弹窗
+    const responseData = {
+        status: matched ? 'ok' : 'outdated',
+        version: SERVER_VERSION,
+        serverVersion: SERVER_VERSION,
+        latestClientVersion: latestClientVersion,
+        clientVersion: clientVersion || null,
+        message: matched ? '服务器在线，版本匹配' : '检测到版本不匹配，请更新客户端或刷新页面。'
+    };
 
     // 将处理好的数据以 JSON 格式返回给客户端
     res.json(responseData);
