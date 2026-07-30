@@ -4430,6 +4430,29 @@ function connectNotificationSocket() {
             applyLevelPermissions(data.levels);
         });
 
+        // 管理员授予/设置成就
+        notificationSocket.on('achievement-update', (data) => {
+            if (!data || !gameState.clientId) return;
+            if (data.clientId !== gameState.clientId) return;
+            console.log('[通知] 收到成就更新:', data);
+            applyServerAchievements(data.achievements);
+            // 如果管理员授予了成就，显示解锁提示
+            if (data.achievements) {
+                if (data.achievements.allLevelsCompleted && gameState.achievements && gameState.achievements.allLevelsCompleted) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('迷宫大师', '管理员已为你解锁此成就！');
+                }
+                if (data.achievements.chineseEmojiUsed && gameState.achievements && gameState.achievements.chineseEmojiUsed) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('伟大的国家，勿忘国耻', '管理员已为你解锁此成就！');
+                }
+                if (data.achievements.multiplayerWins >= 10) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('社交达人', '管理员已为你解锁此成就！');
+                }
+                if (data.achievements.trapHits >= 30) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('陷阱专家', '管理员已为你解锁此成就！');
+                }
+            }
+        });
+
         // 管理员关闭/开启本房间聊天功能
         notificationSocket.on('admin-room-chat-disabled', (data) => {
             const myRoom = (typeof gameState !== 'undefined' && gameState.multiplayer && gameState.multiplayer.roomCode) ? gameState.multiplayer.roomCode : null;
@@ -4556,17 +4579,23 @@ async function registerPlayerOnline() {
         coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0,
         unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
         completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
-        puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : []
+        puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
+        achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false }
     };
     // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
     if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
         try {
-            await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-online', {
+            const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-online', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-        } catch (e) { /* 网络失败可忽略，下次心跳或重连会重试 */ }
+            console.log('[进度上报] 成功:', JSON.stringify(payload), 'HTTP', resp.status);
+        } catch (e) {
+            console.warn('[进度上报] 失败:', e && e.message, 'payload=', JSON.stringify(payload));
+        }
+    } else {
+        console.warn('[进度上报] 跳过：GAME_SERVER_URL 无效', GAME_SERVER_URL);
     }
     // 2) socket 冗余（websocket 可用时双写，便于实时）
     if (notificationSocket && notificationSocket.connected) {
@@ -4711,11 +4740,13 @@ function startBanStateCheck() {
     fetchMyCoins();
     reportMyCoins();
     fetchMyLevelPermissions();
+    fetchMyAchievements();
     banCheckInterval = setInterval(() => {
         fetchMyBanState();
         fetchMyCoins();
         reportMyCoins();
         fetchMyLevelPermissions();
+        fetchMyAchievements();
     }, 15000);
 }
 
@@ -4734,7 +4765,8 @@ async function reportMyCoins() {
                 coins: (typeof gameState.coins === 'number') ? gameState.coins : 0,
                 unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
                 completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
-                puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : []
+                puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
+                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false }
             })
         });
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
@@ -4747,13 +4779,54 @@ async function fetchMyLevelPermissions() {
     try {
         const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/my-level-permissions?id=' + encodeURIComponent(gameState.clientId));
         const data = await resp.json();
-        if (data && data.success) gameState.levelPermissions = data.levels || {};
+        if (data && data.success) applyLevelPermissions(data.levels || {});
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
+}
+
+// 拉取服务器端成就数据（含管理员授予的部分），合并到本地
+async function fetchMyAchievements() {
+    if (!gameState.clientId) return;
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/my-achievements?id=' + encodeURIComponent(gameState.clientId));
+        const data = await resp.json();
+        if (data && data.success && data.achievements) applyServerAchievements(data.achievements);
+    } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
+}
+
+// 将服务器端成就合并到本地（管理员授予的不会覆盖玩家已获取的，取并集）
+function applyServerAchievements(serverAch) {
+    if (!serverAch || typeof serverAch !== 'object') return;
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false };
+    let changed = false;
+    // 布尔型成就：取并集（任一端为 true 即 true）
+    if (serverAch.allLevelsCompleted && !gameState.achievements.allLevelsCompleted) {
+        gameState.achievements.allLevelsCompleted = true;
+        changed = true;
+    }
+    if (serverAch.chineseEmojiUsed && !gameState.achievements.chineseEmojiUsed) {
+        gameState.achievements.chineseEmojiUsed = true;
+        changed = true;
+    }
+    // 计数型成就：取较大值
+    if (typeof serverAch.multiplayerWins === 'number' && serverAch.multiplayerWins > (gameState.achievements.multiplayerWins || 0)) {
+        gameState.achievements.multiplayerWins = serverAch.multiplayerWins;
+        changed = true;
+    }
+    if (typeof serverAch.trapHits === 'number' && serverAch.trapHits > (gameState.achievements.trapHits || 0)) {
+        gameState.achievements.trapHits = serverAch.trapHits;
+        changed = true;
+    }
+    if (changed) {
+        try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch (e) {}
+        if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
+    }
 }
 
 // 应用管理员下发的关卡权限（供通知推送即时调用）
 function applyLevelPermissions(levels) {
     gameState.levelPermissions = levels && typeof levels === 'object' ? levels : {};
+    applyForcedToProgress(gameState.levelPermissions);
 }
 
 // 判断某关卡是否被管理员禁止进入
@@ -4763,6 +4836,33 @@ function isLevelBlocked(type, level) {
 // 判断某关卡是否被管理员强制解锁
 function isLevelForced(type, level) {
     return gameState.levelPermissions[type + ':' + level] === 'forced';
+}
+
+// 管理员「强制解锁」单人关卡：直接把该关并入本地"已通关"进度并提升已解锁层数，
+// 这样玩家在原有"已完成关卡"列表即可进入，无需额外的选关网格。
+function applyForcedToProgress(perms) {
+    if (!perms || typeof perms !== 'object') return;
+    let changed = false;
+    for (const key in perms) {
+        if (perms[key] !== 'forced') continue;
+        const m = /^single:(\d+)$/.exec(key);
+        if (!m) continue;
+        const lvl = parseInt(m[1], 10);
+        if (lvl >= 1 && lvl <= 80 && !gameState.completedLevels.includes(lvl)) {
+            gameState.completedLevels.push(lvl);
+            changed = true;
+        }
+        if (lvl >= 1 && gameState.unlockedLevel < lvl + 1) {
+            gameState.unlockedLevel = lvl + 1;
+            changed = true;
+        }
+    }
+    if (changed) {
+        try {
+            localStorage.setItem('completedLevels', JSON.stringify(gameState.completedLevels));
+            localStorage.setItem('unlockedLevel', String(gameState.unlockedLevel));
+        } catch (e) {}
+    }
 }
 
 // 拉取服务器金币账本（管理员发放/扣除），并把差额并入本地钱包
@@ -5606,6 +5706,7 @@ let gameState = {
     currentScreen: 'mainMenu',
     unlockedLevel: parseInt(localStorage.getItem('unlockedLevel')) || 1,
     completedLevels: JSON.parse(localStorage.getItem('completedLevels')) || [],
+    puzzleCompletedLevels: JSON.parse(localStorage.getItem('puzzleCompletedLevels')) || [],
     currentLevel: 1,
     playerName: localStorage.getItem('playerName') || ('玩家' + Math.floor(Math.random() * 1000)),
     // 稳定客户端 ID（跨会话持久化），用于进入游戏即向服务器注册在线（与多人 peerId 解耦）
@@ -6851,6 +6952,12 @@ function initPuzzleLevelSelect() {
         
         grid.appendChild(btn);
     }
+
+    // 进入解密游戏选关界面：立即把解密游玩数据（已通关关卡）上传到管理员
+    if (typeof registerPlayerOnline === 'function') {
+        console.log('[解密上报] 进入选关界面，上传解密游玩数据:', JSON.stringify(gameState.puzzleCompletedLevels));
+        registerPlayerOnline();
+    }
 }
 
 // 开始指定关卡的解密游戏
@@ -6860,6 +6967,8 @@ function startPuzzleLevel(level) {
         if (typeof showNotification === 'function') showNotification('🚫 解密第 ' + level + ' 关已被管理员禁止进入', 4000);
         return;
     }
+    // 进入解密关卡：立即上报最新进度（双保险）
+    if (typeof registerPlayerOnline === 'function') registerPlayerOnline();
     gameState.isCustomMaze = true;
     gameState.isPreviewMode = false;
     gameState.currentLevel = 'puzzle';
@@ -7852,6 +7961,10 @@ function showScreen(screenId) {
             switch(screenId) {
                 case 'singlePlayerLevelSelect':
                     generateLevelButtons();
+                    // 进入选关界面时主动拉取最新关卡权限（强制解锁/禁止进入），拉到后若仍停留在此界面则重绘网格
+                    fetchMyLevelPermissions().then(function() {
+                        if (gameState.currentScreen === 'singlePlayerLevelSelect') generateLevelButtons();
+                    });
                     break;
                 case 'singlePlayerGame':
                 initSinglePlayerGame(gameState.isLoadingSave || false);
@@ -12546,7 +12659,9 @@ function initSinglePlayerGame(isLoadingSave = false) {
     }
     // 每次进入游戏从 localStorage 同步金币
     syncCoinsFromStorage();
-    
+    // 进入单人游戏：立即把最新关卡进度上报给服务器（双保险，覆盖 15s 轮询的延迟）
+    if (typeof registerPlayerOnline === 'function') registerPlayerOnline();
+
     window.removeEventListener('keydown', handleSinglePlayerKeyDown);
     singlePlayerGame.canvas = document.getElementById('singlePlayerCanvas');
     singlePlayerGame.ctx = singlePlayerGame.canvas.getContext('2d');
