@@ -1144,9 +1144,10 @@ app.get('/api/admin/role', requireAnyAdminAuth, (req, res) => {
 });
 
 // API: 设置玩家角色（user / admin / superadmin）
-// 权限规则：
-//  - 设为 管理员 / 超级管理员，或更改/取消 已有的 管理员/超级管理员 —— 仅超级管理员可执行
-//  - 其余（普通用户之间的调整）—— 管理员即可
+// 权限规则（后台运营视角）：
+//  - 任何已登录管理员（管理员令牌或超级管理员令牌）均可直接将用户设为 超级管理员 / 管理员，或降级为用户
+//  - 仅保留最高层级保护：普通管理员不能更改/取消 已有的 超级管理员 角色（超级管理员角色由超级管理员管理）
+//  - 层级：超级管理员 > 管理员 > 用户；超级管理员角色的管辖对象为「角色=管理员」的玩家
 // 管理员：读取某玩家的 UI 设置（生效值 + 是否被管理员覆盖 + 客户端上报的原值）
 app.get('/api/admin/users/:userId/settings', requireAdminAuth, (req, res) => {
     try {
@@ -1190,13 +1191,10 @@ app.post('/api/admin/users/:userId/role', requireAnyAdminAuth, (req, res) => {
         if (!allowed.includes(role)) return res.status(400).json({ success: false, message: '无效的角色' });
         const operator = getOperatorRole(req);
         const current = getUserRole(userId);
-        // 授予“超级管理员”角色，必须由超级管理员操作
-        if (role === 'superadmin' && operator !== 'superadmin') {
-            return res.status(403).json({ success: false, message: '只有超级管理员可以授予 超级管理员 角色' });
-        }
-        // 更改/取消 已有的 管理员 或 超级管理员 角色（即目标当前非普通用户），必须由超级管理员操作
-        if (current !== 'user' && operator !== 'superadmin') {
-            return res.status(403).json({ success: false, message: '只有超级管理员可以更改或取消 管理员 / 超级管理员 的角色' });
+        // 授予“超级管理员”角色：后台运营（管理员或超级管理员令牌）均可直接授予（满足“后台可直接设为超级管理员”）。
+        // 仅保留最高层级保护：普通管理员不能更改/取消 已有的 超级管理员 角色（防止管理员撤销超级管理员）。
+        if (current === 'superadmin' && operator !== 'superadmin') {
+            return res.status(403).json({ success: false, message: '只有超级管理员可以更改或取消 超级管理员 的角色' });
         }
         if (role === 'user') {
             userRoles.delete(userId);
@@ -2261,6 +2259,60 @@ io.on('connection', (socket) => {
             socket.emit('admin-kick-result', { success: true, message: `已踢出 ${playerToKick.name}` });
         } catch (e) {
             console.error('[kick] admin-kick-player 处理出错:', e.message);
+        }
+    });
+
+    // ===== 新增：游戏内超级管理员管理面板 =====
+    // 获取当前所有在线玩家（id / name / 当前角色），供游戏内超管面板列出可管理对象
+    socket.on('admin-get-online-users', (data) => {
+        try {
+            const { requesterId } = data || {};
+            // 仅游戏内超级管理员可查询
+            if (requesterId && getUserRole(requesterId) !== 'superadmin') return;
+            const users = [];
+            for (const [pid, p] of onlinePlayers) {
+                if (!pid) continue;
+                users.push({
+                    id: pid,
+                    name: (p && p.name) || '玩家',
+                    role: (p && p.role) || getUserRole(pid),
+                    roomId: (p && p.roomId) || null
+                });
+            }
+            socket.emit('online-users-list', { users });
+        } catch (e) {
+            console.error('[role] admin-get-online-users 处理出错:', e.message);
+        }
+    });
+
+    // 游戏内超级管理员改其他玩家角色（与 REST /api/admin/users/:id/role 同源逻辑，但由游戏内角色鉴权）
+    socket.on('admin-set-role', (data) => {
+        try {
+            const { requesterId, targetId, role } = data || {};
+            if (!requesterId || !targetId || !role) return;
+            const allowed = ['user', 'admin', 'superadmin'];
+            if (!allowed.includes(role)) return;
+            // 仅游戏内超级管理员可经此通道改角色（普通管理员/用户无权）
+            const opRole = getUserRole(requesterId);
+            if (opRole !== 'superadmin') return;
+            // 与 REST 端点一致：user 表示清除角色，其余写入 userRoles
+            if (role === 'user') {
+                userRoles.delete(targetId);
+            } else {
+                userRoles.set(targetId, { role, setBy: 'superadmin(client)', setAt: new Date().toISOString() });
+            }
+            saveUserRoles();
+            // 若目标在线，实时推送最新角色给其客户端（开放/收回调试信息与踢人权限）
+            const sockId = onlineSockets.get(targetId);
+            if (sockId && sockId !== 'rest') {
+                const s = io.sockets.sockets.get(sockId);
+                if (s) s.emit('role-info', { role });
+            }
+            appendAudit('admin', 'set-role', `（游戏内超级管理员 ${requesterId}）用户 ${targetId} 角色变更为 ${role}`);
+            socket.emit('admin-set-role-result', { success: true, targetId, role, message: `已将 ${targetId} 设为 ${role}` });
+        } catch (e) {
+            console.error('[role] admin-set-role 处理出错:', e.message);
+            socket.emit('admin-set-role-result', { success: false, message: e.message });
         }
     });
 
