@@ -4565,6 +4565,23 @@ function connectNotificationSocket() {
             }
         });
 
+        // ===== 游戏内超级管理员管理面板：实时事件 =====
+        // 请求在线玩家列表（服务端仅对超级管理员返回）
+        notificationSocket.on('online-users-list', (data) => {
+            if (!data) return;
+            renderSuperadminUserList(data.users || []);
+        });
+        // 改角色结果（成功/失败），刷新列表并提示
+        notificationSocket.on('admin-set-role-result', (data) => {
+            if (!data) return;
+            if (data.success) {
+                showNotification('✅ ' + (data.message || '角色已更新'), 2500);
+            } else {
+                showNotification('❌ 操作失败: ' + (data.message || ''), 3000);
+            }
+            refreshSuperadminUserList();
+        });
+
         // 管理员远程修改了本玩家的 UI 设置（仅当管理员覆盖时下发，立即生效）
         notificationSocket.on('settings-update', (data) => {
             if (!data || !data.uiSettings) return;
@@ -4801,6 +4818,7 @@ async function registerPlayerOnline() {
             if (data && data.progress) applyServerProgress(data.progress);
             // 服务器下发的游戏内角色（管理员/超级管理员 → 开放调试信息与踢人权限）
             if (data && data.role) gameState.myRole = data.role;
+            if (typeof refreshSuperadminUI === 'function') refreshSuperadminUI();
             // 若管理员已远程覆盖 UI 设置，连接时即采用（避免覆盖玩家本地自行修改的值，仅在有覆盖时应用）
             if (data && data.adminOverridden && data.uiSettings) applyServerUISettings(data.uiSettings);
             // 若本机 IP 已被封禁，强制弹出全屏封禁框（永久）
@@ -12019,6 +12037,7 @@ function showMessageToSelf(message) {
         // 根据开发者模式显示/隐藏“调试信息”按钮
         // 管理员 / 超级管理员 角色同样开放调试信息（角色由服务器下发）
         function refreshDevUI() {
+            if (typeof refreshSuperadminUI === 'function') refreshSuperadminUI();
             const btn = document.getElementById('debugInfoBtn');
             if (!btn) return;
             const roleUnlocked = (gameState.myRole === 'admin' || gameState.myRole === 'superadmin');
@@ -12042,6 +12061,91 @@ function showMessageToSelf(message) {
                 panel.classList.add('hidden');
                 stopDebugFps();
             }
+        }
+
+        // ===== 游戏内超级管理员管理面板（仅 myRole==='superadmin' 可见）=====
+        function saEscapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // 根据当前角色显示/隐藏右上角“超管管理”按钮
+        function refreshSuperadminUI() {
+            let btn = document.getElementById('superadminManageBtn');
+            const isSA = gameState.myRole === 'superadmin';
+            if (isSA) {
+                if (!btn) {
+                    btn = document.createElement('button');
+                    btn.id = 'superadminManageBtn';
+                    btn.textContent = '🛡️ 超管管理';
+                    btn.style.cssText = 'position:fixed;top:10px;right:10px;z-index:50000;padding:8px 14px;background:#e83e8c;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.4);';
+                    btn.onclick = openSuperadminPanel;
+                    document.body.appendChild(btn);
+                }
+                btn.style.display = '';
+            } else if (btn) {
+                btn.style.display = 'none';
+            }
+        }
+
+        function openSuperadminPanel() {
+            if (gameState.myRole !== 'superadmin') return;
+            let modal = document.getElementById('superadminPanel');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'superadminPanel';
+                modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:55000;display:flex;align-items:center;justify-content:center;';
+                modal.innerHTML = `
+                    <div style="background:#1e1e2f;color:#e8e8ef;border-radius:10px;padding:20px;width:420px;max-height:80vh;overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.5);">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                            <h3 style="margin:0;font-size:16px;">🛡️ 超管管理面板</h3>
+                            <button onclick="closeSuperadminPanel()" style="background:none;border:none;color:#b6b6cc;font-size:20px;cursor:pointer;">×</button>
+                        </div>
+                        <div style="font-size:12px;color:#8a8aa3;margin-bottom:10px;">仅游戏内超级管理员可见。可把任意在线玩家设为 用户 / 管理员 / 超级管理员。</div>
+                        <div id="superadminUserList" style="max-height:50vh;overflow:auto;">加载中...</div>
+                    </div>`;
+                document.body.appendChild(modal);
+            }
+            modal.style.display = 'flex';
+            refreshSuperadminUserList();
+        }
+
+        function closeSuperadminPanel() {
+            const modal = document.getElementById('superadminPanel');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function refreshSuperadminUserList() {
+            if (gameState.clientId && typeof notificationSocket !== 'undefined' && notificationSocket && notificationSocket.connected) {
+                notificationSocket.emit('admin-get-online-users', { requesterId: gameState.clientId });
+            }
+        }
+
+        function renderSuperadminUserList(users) {
+            const box = document.getElementById('superadminUserList');
+            if (!box) return;
+            if (!users.length) { box.innerHTML = '<p style="color:#8a8aa3;text-align:center;">当前无在线玩家</p>'; return; }
+            box.innerHTML = users.map(u => {
+                const roleName = { user: '👤 用户', admin: '🛡️ 管理员', superadmin: '👑 超级管理员' }[u.role] || '👤 用户';
+                const me = u.id === gameState.clientId ? ' (我)' : '';
+                const mkBtn = (label, role, color) => `<button onclick="superadminSetRole('${encodeURIComponent(u.id)}','${role}')" style="margin:2px;padding:4px 8px;background:${color};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">${label}</button>`;
+                return `
+                    <div style="padding:8px;border-bottom:1px solid #3a3a55;">
+                        <div style="font-weight:bold;">${saEscapeHtml(u.name || '玩家')}${me}</div>
+                        <div style="font-size:12px;color:#b6b6cc;margin:2px 0;">当前：${roleName} <span style="color:#8a8aa3;">(ID: ${saEscapeHtml(u.id || '')})</span></div>
+                        <div>${mkBtn('设为用户', 'user', '#6c757d')}${mkBtn('管理员', 'admin', '#007bff')}${mkBtn('超管', 'superadmin', '#e83e8c')}</div>
+                    </div>`;
+            }).join('');
+        }
+
+        function superadminSetRole(encId, role) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            if (targetId === gameState.clientId) { showNotification('不能修改自己的角色', 2000); return; }
+            const label = role === 'user' ? '用户' : role === 'admin' ? '管理员' : '超级管理员';
+            if (!confirm('确定将该玩家设为「' + label + '」吗？')) return;
+            notificationSocket.emit('admin-set-role', { requesterId: gameState.clientId, targetId: targetId, role: role });
         }
 
         function startDebugFps() {
