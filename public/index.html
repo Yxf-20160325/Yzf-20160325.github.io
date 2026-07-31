@@ -12043,6 +12043,12 @@ function showMessageToSelf(message) {
             const roleUnlocked = (gameState.myRole === 'admin' || gameState.myRole === 'superadmin');
             if (gameState.developerMode || gameState.devMode || roleUnlocked) {
                 btn.classList.remove('hidden');
+                // 避免与右上角最上方的“超管管理”按钮重叠：超管可见时把调试信息按钮放到其下方
+                const saBtn = document.getElementById('superadminManageBtn');
+                const saVisible = saBtn && saBtn.style.display !== 'none';
+                btn.style.top = saVisible ? '52px' : '10px';
+                const panel = document.getElementById('debugInfoPanel');
+                if (panel) panel.style.top = saVisible ? '94px' : '52px';
             } else {
                 btn.classList.add('hidden');
                 if (debugPanelVisible) toggleDebugPanel(false);
