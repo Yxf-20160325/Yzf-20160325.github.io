@@ -4610,14 +4610,34 @@ function unregisterSelfWithServer() {
 //       socket.io 仅作为冗余通道（环境支持 websocket 时双写）。clientId 作为稳定标识，与多人 peerId 解耦。
 async function registerPlayerOnline() {
     if (!gameState.playerName || !gameState.clientId) return;
+    const gs = gameState;
     const payload = {
-        id: gameState.clientId,
-        name: gameState.playerName,
-        coins: (typeof gameState.coins !== 'undefined') ? gameState.coins : 0,
-        unlockedLevel: (typeof gameState.unlockedLevel === 'number') ? gameState.unlockedLevel : 1,
-        completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
-        puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
-        achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false }
+        id: gs.clientId,
+        name: gs.playerName,
+        coins: (typeof gs.coins !== 'undefined') ? gs.coins : 0,
+        unlockedLevel: (typeof gs.unlockedLevel === 'number') ? gs.unlockedLevel : 1,
+        completedLevels: Array.isArray(gs.completedLevels) ? gs.completedLevels : [],
+        puzzleCompletedLevels: Array.isArray(gs.puzzleCompletedLevels) ? gs.puzzleCompletedLevels : [],
+        achievements: gs.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false },
+        // 上报给管理后台「玩家信息」用的数据
+        totalPlayTime: (typeof gs.totalPlayTime === 'number') ? gs.totalPlayTime : 0,
+        gameStats: (gs.gameStats && typeof gs.gameStats === 'object') ? gs.gameStats : null,
+        gamestate: {
+            currentScreen: gs.currentScreen,
+            developerMode: !!gs.developerMode,
+            devMode: !!gs.devMode,
+            coins: (typeof gs.coins !== 'undefined') ? gs.coins : 0,
+            unlockedLevel: (typeof gs.unlockedLevel === 'number') ? gs.unlockedLevel : 1,
+            currentLevel: (typeof gs.currentLevel === 'number') ? gs.currentLevel : 1,
+            completedLevelsCount: Array.isArray(gs.completedLevels) ? gs.completedLevels.length : 0,
+            roomId: gs.roomId || null,
+            controlsReversed: !!gs.controlsReversed,
+            invincible: !!gs.invincible,
+            multiplayerDisabled: !!gs.multiplayerDisabled,
+            singlePlayerDisabled: !!gs.singlePlayerDisabled,
+            puzzleDisabled: !!gs.puzzleDisabled,
+            chatDisabled: !!gs.chatDisabled
+        }
     };
     // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
     if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
@@ -4975,9 +4995,22 @@ async function fetchMyCoins() {
 
 // 将服务器金币账本（serverCoins）差额并入本地钱包：
 // 服务器账本为绝对权威，本地钱包 = 本地游戏内所得 + 服务器账本。
-// 通过 dbCoins 记录"已并入的服务器部分"，仅对差额做加减，刷新/重连不会重复计入。
+// 通过 localStorage.dbCoins 记录"已并入的服务器部分"（以 localStorage 为唯一真相，
+// 避免刷新/重连时 gameState 重建导致 dbCoins 归零而重复计入）。
+function readPersistedDbCoins() {
+    try {
+        const raw = localStorage.getItem('dbCoins');
+        if (raw !== null) {
+            const d = parseInt(raw, 10);
+            if (!isNaN(d)) return d;
+        }
+    } catch (e) {}
+    return 0;
+}
+
 function applyServerCoins(serverCoins) {
-    const oldDb = (typeof gameState.dbCoins === 'number') ? gameState.dbCoins : 0;
+    // 以 localStorage 持久值为去重基准，确保刷新/重连/初始化时序错乱都不会重复计入
+    const oldDb = readPersistedDbCoins();
     const diff = serverCoins - oldDb;
     if (diff === 0) return;
     gameState._adminCoinOp = true; // 标记管理端发放，避免被数值突变检测误判
@@ -6261,7 +6294,10 @@ function buyItem(itemKey) {
         saveCoinsSecure();
         updateShopButtons(); // 更新按钮状态
         showNotification(`成功购买 ${item.name}！`);
-        
+
+        // 上报遥测：道具购买（后台可筛选「道具购买」单独查看谁买了什么）
+        reportTelemetry('item_purchase', `道具:${item.name} 价格:${item.price}金币`);
+
         // 道具添加到背包，这里简化处理，直接激活效果
         // 在实际中，你可能需要一个背包系统来存储道具
         activateItem(itemKey);
