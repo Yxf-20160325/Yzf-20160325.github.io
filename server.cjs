@@ -61,6 +61,135 @@ function saveAdminState() {
     catch (e) { console.error('[State] 保存管理状态失败:', e.message); }
 }
 
+// ===== 玩家角色（游戏内权限：user / admin / superadmin）=====
+const USER_ROLES_FILE = path.join(DATA_DIR, 'user-roles.json');
+function loadUserRoles() {
+    try {
+        if (fs.existsSync(USER_ROLES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(USER_ROLES_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(r => {
+                if (r && r.userId && ['user', 'admin', 'superadmin'].includes(r.role)) {
+                    userRoles.set(r.userId, { role: r.role, setBy: r.setBy || 'admin', setAt: r.setAt || new Date().toISOString() });
+                }
+            });
+        }
+    } catch (e) { console.error('[Roles] 加载玩家角色失败:', e.message); }
+}
+function saveUserRoles() {
+    ensureDataDir();
+    try {
+        const arr = [];
+        for (const [userId, v] of userRoles) arr.push({ userId, role: v.role, setBy: v.setBy, setAt: v.setAt });
+        fs.writeFileSync(USER_ROLES_FILE, JSON.stringify(arr, null, 2));
+    } catch (e) { console.error('[Roles] 保存玩家角色失败:', e.message); }
+}
+function getUserRole(userId) {
+    const v = userRoles.get(userId);
+    return v ? v.role : 'user';
+}
+
+// ===== 玩家 UI 设置（客户端上传 + 管理员远程查看/修改）=====
+const USER_SETTINGS_FILE = path.join(DATA_DIR, 'user-settings.json');
+// 一次定义“已知设置字段”，用于清洗与默认值
+const DEFAULT_UI_SETTINGS = {
+    showControls: true,
+    controlsPosition: 'bottom-left',
+    controlsSize: 100,
+    controlsOpacity: 60,
+    showGameInfo: true,
+    showLevelInfo: true,
+    showTimeInfo: true,
+    showMoveInfo: true,
+    showKeyInfo: true,
+    showRoomInfo: true,
+    customX: null,
+    customY: null,
+    showPlayerList: true,
+    musicEnabled: true,
+    musicVolume: 50,
+    musicSelected: 'game-music-1',
+    customMusic: [],
+    joystickEnabled: false,
+    joystickSensitivity: 5,
+    joystickDeadZone: 15,
+    joystickRadius: 70,
+    joystickPosition: 'bottom-right'
+};
+// 结构：userId -> { admin: <obj|null>, client: <obj|null> }
+// admin 为管理员远程设置的覆盖项；client 为客户端最近一次上报的设置。
+// 生效值 = 默认值 <- client <- admin（admin 优先）
+const userSettings = new Map();
+function sanitizeUISettings(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const out = {};
+    for (const k of Object.keys(DEFAULT_UI_SETTINGS)) {
+        if (k === 'customMusic') {
+            out.customMusic = Array.isArray(obj.customMusic)
+                ? obj.customMusic.filter(m => m && typeof m === 'object')
+                    .map(m => ({ id: m.id, name: String(m.name || ''), url: String(m.url || '') }))
+                    .slice(0, 50)
+                : [];
+        } else {
+            const v = obj[k];
+            if (v === undefined) continue;
+            out[k] = v;
+        }
+    }
+    return out;
+}
+function getEffectiveUISettings(userId) {
+    const rec = userSettings.get(userId) || {};
+    const base = Object.assign({}, DEFAULT_UI_SETTINGS);
+    if (rec.client && typeof rec.client === 'object') Object.assign(base, rec.client);
+    if (rec.admin && typeof rec.admin === 'object') Object.assign(base, rec.admin);
+    return base;
+}
+function setClientUISettings(userId, obj) {
+    const rec = userSettings.get(userId) || { admin: null, client: null };
+    const clean = sanitizeUISettings(obj);
+    if (clean) rec.client = clean;
+    userSettings.set(userId, rec);
+    saveUserSettings();
+}
+function setAdminUISettings(userId, obj) {
+    const rec = userSettings.get(userId) || { admin: null, client: null };
+    rec.admin = (obj === null) ? null : (sanitizeUISettings(obj) || {});
+    userSettings.set(userId, rec);
+    saveUserSettings();
+}
+function loadUserSettings() {
+    try {
+        if (fs.existsSync(USER_SETTINGS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(USER_SETTINGS_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(r => {
+                if (r && r.userId) {
+                    userSettings.set(r.userId, { admin: r.admin || null, client: r.client || null });
+                }
+            });
+        }
+    } catch (e) { console.error('[Settings] 加载用户设置失败:', e.message); }
+}
+function saveUserSettings() {
+    ensureDataDir();
+    try {
+        const arr = [];
+        for (const [userId, v] of userSettings) arr.push({ userId, admin: v.admin || null, client: v.client || null });
+        fs.writeFileSync(USER_SETTINGS_FILE, JSON.stringify(arr, null, 2));
+    } catch (e) { console.error('[Settings] 保存用户设置失败:', e.message); }
+}
+// 由请求头 Bearer 令牌判断操作者身份：superadmin / admin / null
+function getOperatorRole(req) {
+    const auth = (req.headers && req.headers.authorization) || '';
+    const m = auth.match(/^Bearer\s+(.+)$/);
+    if (!m) return null;
+    try {
+        const decoded = jwt.verify(m[1], JWT_SECRET);
+        if (superAdminTokens.has(decoded.tokenId)) return 'superadmin';
+        if (adminTokens.has(decoded.tokenId)) return 'admin';
+    } catch (e) { /* 无效令牌 */ }
+    return null;
+}
+
 // 审计日志：记录谁(actor)在什么时间做了什么(action)
 function appendAudit(actor, action, detail) {
     const entry = { ts: new Date().toISOString(), actor, action, detail: detail || '' };
@@ -185,6 +314,12 @@ function getClientIp(req) {
     } catch (e) { return ''; }
 }
 
+// 判断某 IP 是否已被管理员封禁
+function isIPBanned(ip) {
+    if (!ip) return false;
+    return bannedIPs.has(String(ip));
+}
+
 // 合并/更新玩家档案（保留历史 IP 与最近一次上报的字段）
 function savePlayerProfile(id, fields) {
     try {
@@ -199,6 +334,9 @@ function savePlayerProfile(id, fields) {
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
 const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool, chat:bool, reasons:{} }，管理员封禁状态
+const bannedIPs = new Map();     // ip -> { reason, bannedAt }，管理员按 IP 封禁（所有功能禁用 + 客户端强制全屏弹窗）
+// 玩家角色（游戏内权限）：userId -> { role:'user'|'admin'|'superadmin', setBy, setAt }
+const userRoles = new Map();
 const cheatReports = [];           // 反作弊上报记录：{ id, clientId, type, detail, time }
 const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, message, image, isAdmin, time}]，房间聊天记录（客户端镜像上报，供管理员监管），每房间上限 200 条
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
@@ -349,19 +487,19 @@ function generateAdminToken() {
     return token;
 }
 
-// 检查管理员权限中间件
+// 检查管理员权限中间件（管理员 或 超级管理员 令牌均可，超级管理员为管理员的上位身份）
 function requireAdminAuth(req, res, next) {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ success: false, message: '需要管理员身份验证' });
     }
-    
+
     const token = authHeader.substring(7);
-    if (!verifyAdminToken(token)) {
-        return res.status(403).json({ success: false, message: '无效的管理员令牌' });
+    if (verifyAdminToken(token) || verifySuperAdminToken(token)) {
+        return next();
     }
 
-    next();
+    return res.status(403).json({ success: false, message: '无效的管理员令牌' });
 }
 
 // ===== 超级管理员令牌与鉴权 =====
@@ -803,8 +941,10 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate } = req.body || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
+        // 客户端上报的 UI 设置（供管理员后台查看/修改）
+        if (uiSettings) setClientUISettings(id, uiSettings);
         const existing = onlinePlayers.get(id) || {};
         // 记录玩家上报的真实金币（供管理员查看）
         const rc = parseInt(coins);
@@ -814,29 +954,53 @@ app.post('/api/player-online', (req, res) => {
         // 记录玩家上报的成就数据（供管理员查看）
         if (achievements) mergeAchievements(id, achievements);
         const ip = getClientIp(req);
+        const role = getUserRole(id);
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
             socketId: existing.socketId || null,   // 保留 socket 通道写入的连接标识
             roomId: existing.roomId || null,
             joinedAt: existing.joinedAt || Date.now(),
-            ip: ip
+            ip: ip,
+            role: role
         });
         onlineSockets.set(id, 'rest');
         // 持久化玩家档案（IP / 金币 / 时长 / 统计 / 游戏状态），供管理后台查看
+        // 若管理员已锁定统计（手动改过），则客户端上报不再覆盖 gameStats / totalPlayTime，保留管理员的数值
+        const _prof0 = playerProfiles.get(id) || {};
+        const _locked = _prof0.statsAdminLocked === true;
+        const _gsLocked = _prof0.gamestateAdminLocked === true;
         savePlayerProfile(id, {
             ip: ip,
             coins: isNaN(rc) ? (prevCoins(id)) : Math.max(0, rc),
-            totalPlayTime: (typeof totalPlayTime === 'number') ? totalPlayTime : (prevPlayTime(id)),
-            gameStats: (gameStats && typeof gameStats === 'object') ? gameStats : (prevStats(id)),
-            gamestate: (gamestate && typeof gamestate === 'object') ? gamestate : (prevGamestate(id)),
+            totalPlayTime: _locked ? prevPlayTime(id) : ((typeof totalPlayTime === 'number') ? totalPlayTime : (prevPlayTime(id))),
+            gameStats: _locked ? prevStats(id) : ((gameStats && typeof gameStats === 'object') ? gameStats : (prevStats(id))),
+            gamestate: _gsLocked ? prevGamestate(id) : ((gamestate && typeof gamestate === 'object') ? gamestate : (prevGamestate(id))),
             username: (name && String(name).trim()) || existing.name || '玩家'
         });
+        // 若客户端 IP 已被封禁，则对该用户启用全部功能封禁，并通知客户端弹全屏封禁框
+        let ipBanned = false, ipBanReason = '';
+        if (isIPBanned(ip)) {
+            const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+            if (!ban.reasons) ban.reasons = {};
+            const rec = bannedIPs.get(String(ip)) || {};
+            ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
+            const reason = (rec.reason && String(rec.reason).trim()) || '';
+            const msg = 'IP 封禁：' + (reason || '管理员封禁此 IP');
+            ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
+            userBans.set(id, ban);
+            ipBanned = true; ipBanReason = msg;
+        }
         console.log(`[Online] 玩家 ${name} (${id}) 上线(REST)，IP ${ip}，当前在线 ${onlinePlayers.size} 人`);
         // 把服务端已存（含管理员“全部通关”授予）的进度回传，客户端据此合入本地
         const prog = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
         res.json({
             success: true,
+            ipBanned: ipBanned,
+            ipBanReason: ipBanReason,
+            role: role,
+            uiSettings: getEffectiveUISettings(id),
+            adminOverridden: !!(userSettings.get(id) || {}).admin,
             progress: {
                 unlockedLevel: prog.unlockedLevel || 1,
                 completedLevels: Array.isArray(prog.completedLevels) ? prog.completedLevels : [],
@@ -853,6 +1017,22 @@ function prevCoins(id) { const p = playerProfiles.get(id); return p && typeof p.
 function prevPlayTime(id) { const p = playerProfiles.get(id); return p && typeof p.totalPlayTime === 'number' ? p.totalPlayTime : 0; }
 function prevStats(id) { const p = playerProfiles.get(id); return p && p.gameStats ? p.gameStats : null; }
 function prevGamestate(id) { const p = playerProfiles.get(id); return p && p.gamestate ? p.gamestate : null; }
+
+// API: 客户端上传自己的 UI 设置（开放接口，供管理员后台查看；管理员覆盖项不受影响）
+app.post('/api/user/settings', (req, res) => {
+    try {
+        const { id, uiSettings } = req.body || {};
+        if (!id) return res.json({ success: false, message: '缺少 id' });
+        setClientUISettings(id, uiSettings);
+        res.json({
+            success: true,
+            uiSettings: getEffectiveUISettings(id),
+            adminOverridden: !!(userSettings.get(id) || {}).admin
+        });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
 
 // API: 玩家下线（开放接口）
 app.post('/api/player-offline', (req, res) => {
@@ -907,16 +1087,23 @@ app.get('/api/admin/users/:userId/info', requireAdminAuth, (req, res) => {
         if (!ban.reasons) ban.reasons = {};
         const prof = playerProfiles.get(userId) || {};
         const p = onlinePlayers.get(userId);
+        const ipNow = prof.ip || (p && p.ip) || '';
+        const ipRec = bannedIPs.get(String(ipNow)) || null;
         res.json({
             success: true,
             clientId: userId,
             username: prof.username || (p && p.name) || '',
             online: !!p,
-            ip: prof.ip || (p && p.ip) || '',
+            role: getUserRole(userId),
+            ip: ipNow,
+            ipBanned: isIPBanned(ipNow),
+            ipBanReason: ipRec ? (ipRec.reason || '') : '',
             coins: (typeof prof.coins === 'number') ? prof.coins : (reportedCoins.get(userId) || 0),
             totalPlayTime: (typeof prof.totalPlayTime === 'number') ? prof.totalPlayTime : 0,
             gameStats: prof.gameStats || null,
             gamestate: prof.gamestate || null,
+            statsAdminLocked: !!prof.statsAdminLocked,
+            gamestateAdminLocked: !!prof.gamestateAdminLocked,
             bans: {
                 multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle, chat: !!ban.chat,
                 reasons: {
@@ -929,6 +1116,315 @@ app.get('/api/admin/users/:userId/info', requireAdminAuth, (req, res) => {
         });
     } catch (e) {
         res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 鉴权中间件：管理员 或 超级管理员 均可（用于角色管理等需要两种身份的操作）
+function requireAnyAdminAuth(req, res, next) {
+    const auth = (req.headers && req.headers.authorization) || '';
+    const m = auth.match(/^Bearer\s+(.+)$/);
+    if (!m) return res.status(401).json({ success: false, message: '需要身份验证' });
+    try {
+        const decoded = jwt.verify(m[1], JWT_SECRET);
+        if (superAdminTokens.has(decoded.tokenId)) return next();
+        if (adminTokens.has(decoded.tokenId)) return next();
+        return res.status(403).json({ success: false, message: '无效的管理员令牌' });
+    } catch (e) {
+        return res.status(403).json({ success: false, message: '无效的管理员令牌' });
+    }
+}
+
+// API: 查询当前操作者身份（admin / superadmin），供后台 UI 控制可用操作
+app.get('/api/admin/role', requireAnyAdminAuth, (req, res) => {
+    try {
+        res.json({ success: true, role: getOperatorRole(req) });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// API: 设置玩家角色（user / admin / superadmin）
+// 权限规则：
+//  - 设为 管理员 / 超级管理员，或更改/取消 已有的 管理员/超级管理员 —— 仅超级管理员可执行
+//  - 其余（普通用户之间的调整）—— 管理员即可
+// 管理员：读取某玩家的 UI 设置（生效值 + 是否被管理员覆盖 + 客户端上报的原值）
+app.get('/api/admin/users/:userId/settings', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const rec = userSettings.get(userId) || { admin: null, client: null };
+        res.json({
+            success: true,
+            settings: getEffectiveUISettings(userId),
+            adminOverridden: !!rec.admin,
+            clientSettings: rec.client || null
+        });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
+
+// 管理员：设置/清除某玩家的 UI 设置（settings:null 表示清除管理员覆盖，恢复客户端上报值）
+app.post('/api/admin/users/:userId/settings', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const body = req.body || {};
+        setAdminUISettings(userId, (body.settings === null ? null : body.settings));
+        const eff = getEffectiveUISettings(userId);
+        // 若该玩家在线，实时推送使其立即生效
+        const p = onlinePlayers.get(userId);
+        if (p && p.socketId && p.socketId !== 'rest') {
+            try { io.to(p.socketId).emit('settings-update', { uiSettings: eff, adminOverridden: true }); } catch (_) {}
+        }
+        appendAudit('admin', 'user-settings', `修改用户 ${userId} 的 UI 设置`);
+        res.json({ success: true, settings: eff, adminOverridden: !!(userSettings.get(userId) || {}).admin });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
+
+app.post('/api/admin/users/:userId/role', requireAnyAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { role } = req.body || {};
+        const allowed = ['user', 'admin', 'superadmin'];
+        if (!allowed.includes(role)) return res.status(400).json({ success: false, message: '无效的角色' });
+        const operator = getOperatorRole(req);
+        const current = getUserRole(userId);
+        // 授予“超级管理员”角色，必须由超级管理员操作
+        if (role === 'superadmin' && operator !== 'superadmin') {
+            return res.status(403).json({ success: false, message: '只有超级管理员可以授予 超级管理员 角色' });
+        }
+        // 更改/取消 已有的 管理员 或 超级管理员 角色（即目标当前非普通用户），必须由超级管理员操作
+        if (current !== 'user' && operator !== 'superadmin') {
+            return res.status(403).json({ success: false, message: '只有超级管理员可以更改或取消 管理员 / 超级管理员 的角色' });
+        }
+        if (role === 'user') {
+            userRoles.delete(userId);
+        } else {
+            userRoles.set(userId, { role, setBy: operator || 'admin', setAt: new Date().toISOString() });
+        }
+        saveUserRoles();
+        // 若该玩家在线，实时推送最新角色给其客户端
+        const sockId = onlineSockets.get(userId);
+        if (sockId && sockId !== 'rest') {
+            const s = io.sockets.sockets.get(sockId);
+            if (s) s.emit('role-info', { role });
+        }
+        appendAudit('admin', 'set-role', `用户 ${userId} 角色变更为 ${role}（操作者: ${operator}）`);
+        res.json({ success: true, role: role, message: `已将角色设置为 ${role}` });
+    } catch (e) {
+        console.error('[API] 设置角色失败:', e.message);
+        res.status(500).json({ success: false, message: '设置失败' });
+    }
+});
+
+// API: 管理员修改玩家昵称（不消耗金币）
+app.post('/api/admin/users/:userId/rename', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { name } = req.body || {};
+        if (!name || !String(name).trim()) return res.status(400).json({ success: false, message: '昵称不能为空' });
+        const newName = String(name).trim().slice(0, 30);
+        // 更新在线表（管理后台用户列表的权威来源）
+        const op = onlinePlayers.get(userId);
+        if (op) { op.name = newName; onlinePlayers.set(userId, op); }
+        // 同步房间内玩家名字（多人游戏列表实时显示）
+        for (const room of rooms.values()) {
+            if (room.players && room.players.has(userId)) {
+                const rp = room.players.get(userId);
+                rp.name = newName;
+                room.players.set(userId, rp);
+            }
+        }
+        // 持久化到玩家档案（供离线 / 玩家信息面板查看）
+        savePlayerProfile(userId, { username: newName });
+        // 实时推送给在线客户端（无需重新登录即生效）
+        const sockId = onlineSockets.get(userId);
+        if (sockId && sockId !== 'rest') {
+            const s = io.sockets.sockets.get(sockId);
+            if (s) s.emit('name-changed', { name: newName, byAdmin: true });
+        }
+        appendAudit('admin', 'rename', `将玩家 ${userId} 改名为 ${newName}`);
+        res.json({ success: true, username: newName, message: '改名成功' });
+    } catch (e) {
+        console.error('[API] 改名失败:', e.message);
+        res.status(500).json({ success: false, message: '改名失败' });
+    }
+});
+
+// API: 管理员按 IP 封禁（该 IP 下所有玩家全部功能禁用，并强制弹出全屏封禁框）
+app.post('/api/admin/ban-ip', requireAdminAuth, (req, res) => {
+    try {
+        const { ip, reason } = req.body || {};
+        if (!ip || !String(ip).trim()) return res.status(400).json({ success: false, message: '缺少 ip' });
+        const ipKey = String(ip).trim();
+        bannedIPs.set(ipKey, { reason: (reason && String(reason).trim()) || '', bannedAt: new Date().toISOString() });
+        // 对当前在线的同 IP 玩家：全部功能封禁 + 推送全屏封禁框
+        const msg = 'IP 封禁：' + ((reason && String(reason).trim()) || '管理员封禁此 IP');
+        for (const [uid, pl] of onlinePlayers.entries()) {
+            if (pl && pl.ip === ipKey) {
+                const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+                if (!ban.reasons) ban.reasons = {};
+                ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
+                ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
+                userBans.set(uid, ban);
+                const sockId = onlineSockets.get(uid);
+                if (sockId && sockId !== 'rest') {
+                    const sock = io.sockets.sockets.get(sockId);
+                    if (sock) sock.emit('ip-banned', { reason: msg, permanent: true });
+                }
+            }
+        }
+        appendAudit('admin', 'ban-ip', `封禁 IP ${ipKey}${reason ? '，理由: ' + reason : ''}`);
+        res.json({ success: true, ip: ipKey, bannedIPs: Array.from(bannedIPs.keys()) });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '封禁失败' });
+    }
+});
+
+// API: 管理员解除 IP 封禁
+app.post('/api/admin/unban-ip', requireAdminAuth, (req, res) => {
+    try {
+        const { ip } = req.body || {};
+        if (!ip || !String(ip).trim()) return res.status(400).json({ success: false, message: '缺少 ip' });
+        const ipKey = String(ip).trim();
+        bannedIPs.delete(ipKey);
+        // 对当前在线的同 IP 玩家：解除全部封禁 + 通知客户端关闭全屏框
+        for (const [uid, pl] of onlinePlayers.entries()) {
+            if (pl && pl.ip === ipKey) {
+                const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+                if (!ban.reasons) ban.reasons = {};
+                ban.multiplayer = ban.single = ban.puzzle = ban.chat = false;
+                ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = '';
+                userBans.set(uid, ban);
+                const sockId = onlineSockets.get(uid);
+                if (sockId && sockId !== 'rest') {
+                    const sock = io.sockets.sockets.get(sockId);
+                    if (sock) sock.emit('ip-unbanned', {});
+                }
+            }
+        }
+        appendAudit('admin', 'unban-ip', `解封 IP ${ipKey}`);
+        res.json({ success: true, ip: ipKey, bannedIPs: Array.from(bannedIPs.keys()) });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '解封失败' });
+    }
+});
+
+// API: 管理员查看已封禁 IP 列表
+app.get('/api/admin/banned-ips', requireAdminAuth, (req, res) => {
+    try {
+        const list = Array.from(bannedIPs.entries()).map(([ip, v]) => ({ ip, reason: v.reason || '', bannedAt: v.bannedAt || '' }));
+        res.json({ success: true, bannedIPs: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// API: 管理员修改玩家 gamestate（合并更新；修改后锁定，客户端上报不再覆盖）
+app.post('/api/admin/users/:userId/gamestate', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { gamestate } = req.body || {};
+        if (!gamestate || typeof gamestate !== 'object') return res.status(400).json({ success: false, message: '缺少 gamestate' });
+        const prof = playerProfiles.get(userId) || {};
+        const cur = (prof.gamestate && typeof prof.gamestate === 'object') ? prof.gamestate : {};
+        const merged = Object.assign({}, cur);
+        // 仅合并客户端原本上报过的字段（白名单），避免写入无关键
+        const allowed = ['currentScreen', 'developerMode', 'devMode', 'coins', 'unlockedLevel', 'currentLevel', 'roomId', 'controlsReversed', 'invincible', 'multiplayerDisabled', 'singlePlayerDisabled', 'puzzleDisabled', 'chatDisabled', 'completedLevelsCount'];
+        for (const k of allowed) {
+            if (k in gamestate) {
+                let v = gamestate[k];
+                if (typeof v === 'string') v = v.trim();
+                if (typeof v === 'number' && isNaN(v)) v = 0;
+                merged[k] = v;
+            }
+        }
+        const next = Object.assign({}, prof, { gamestate: merged, gamestateAdminLocked: true, lastSeen: Date.now() });
+        playerProfiles.set(userId, next);
+        appendAudit('admin', 'edit-gamestate', `修改玩家 ${userId} gamestate`);
+        res.json({ success: true, gamestate: merged, gamestateAdminLocked: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '修改失败' });
+    }
+});
+
+// API: 管理员解除 gamestate 锁定，恢复客户端上报同步
+app.post('/api/admin/users/:userId/gamestate/unlock', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const prof = playerProfiles.get(userId) || {};
+        prof.gamestateAdminLocked = false;
+        prof.lastSeen = Date.now();
+        playerProfiles.set(userId, prof);
+        appendAudit('admin', 'unlock-gamestate', `恢复玩家 ${userId} 客户端 gamestate 同步`);
+        res.json({ success: true, gamestateAdminLocked: false });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// API: 管理员修改玩家统计数据（合并更新；修改后锁定，客户端上报不再覆盖）
+app.post('/api/admin/users/:userId/stats', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { totalPlayTime, gameStats } = req.body || {};
+        const prof = playerProfiles.get(userId) || {};
+        const next = Object.assign({}, prof);
+        if (typeof totalPlayTime === 'number' && totalPlayTime >= 0) {
+            next.totalPlayTime = Math.round(totalPlayTime);
+            if (next.gameStats && typeof next.gameStats === 'object') next.gameStats.totalPlayTime = next.totalPlayTime;
+        }
+        if (gameStats && typeof gameStats === 'object') {
+            const cur = (next.gameStats && typeof next.gameStats === 'object') ? next.gameStats : {};
+            const merged = Object.assign({}, cur);
+            const allowed = ['timeChallengeBest', 'puzzleLevelsCompleted', 'totalLevelsCompleted', 'totalPlayTime', 'totalMoves', 'totalTrapsTriggered', 'totalCoinsCollected', 'averageMovesPerLevel', 'completionRate'];
+            for (const k of allowed) {
+                if (typeof gameStats[k] === 'number') merged[k] = Math.max(0, Math.round(gameStats[k]));
+            }
+            next.gameStats = merged;
+        }
+        next.statsAdminLocked = true; // 管理员已接管，客户端上报不再覆盖
+        next.lastSeen = Date.now();
+        playerProfiles.set(userId, next);
+        appendAudit('admin', 'edit-stats', `修改玩家 ${userId} 统计数据`);
+        res.json({ success: true, totalPlayTime: next.totalPlayTime, gameStats: next.gameStats, statsAdminLocked: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '修改失败' });
+    }
+});
+
+// API: 管理员重置玩家统计数据为 0（并锁定，客户端上报不再覆盖）
+app.post('/api/admin/users/:userId/stats/reset', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const prof = playerProfiles.get(userId) || {};
+        const zeroStats = {
+            timeChallengeBest: 0, puzzleLevelsCompleted: 0, totalLevelsCompleted: 0,
+            totalPlayTime: 0, totalMoves: 0, totalTrapsTriggered: 0,
+            totalCoinsCollected: 0, averageMovesPerLevel: 0, completionRate: 0
+        };
+        const next = Object.assign({}, prof, { totalPlayTime: 0, gameStats: zeroStats, statsAdminLocked: true, lastSeen: Date.now() });
+        playerProfiles.set(userId, next);
+        appendAudit('admin', 'reset-stats', `重置玩家 ${userId} 统计数据`);
+        res.json({ success: true, totalPlayTime: 0, gameStats: zeroStats, statsAdminLocked: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '重置失败' });
+    }
+});
+
+// API: 管理员解除统计锁定，恢复客户端上报同步（下次玩家上线会用客户端真实值覆盖）
+app.post('/api/admin/users/:userId/stats/unlock', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const prof = playerProfiles.get(userId) || {};
+        prof.statsAdminLocked = false;
+        prof.lastSeen = Date.now();
+        playerProfiles.set(userId, prof);
+        appendAudit('admin', 'unlock-stats', `恢复玩家 ${userId} 客户端统计同步`);
+        res.json({ success: true, statsAdminLocked: false });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '操作失败' });
     }
 });
 
@@ -1658,30 +2154,55 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate } = data || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = data || {};
         if (!id) return;
-        const ip = getClientIp(req);
+        const ip = getClientIp(socket.request);
+        const role = getUserRole(id);
+        // 客户端上报的 UI 设置（供管理员后台查看/修改）
+        if (uiSettings) setClientUISettings(id, uiSettings);
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || '玩家',
             socketId: socket.id,
             roomId: null,
             joinedAt: Date.now(),
-            ip: ip
+            ip: ip,
+            role: role
         });
+        // 实时把当前角色推送给客户端（管理员/超级管理员据此开放调试信息与踢人权限）
+        socket.emit('role-info', { role: role });
+        // 若管理员已远程覆盖该玩家设置，连接时即下发，使其立即生效
+        if ((userSettings.get(id) || {}).admin) {
+            socket.emit('settings-update', { uiSettings: getEffectiveUISettings(id), adminOverridden: true });
+        }
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
         if (achievements) mergeAchievements(id, achievements);
+        const _prof0 = playerProfiles.get(id) || {};
+        const _locked = _prof0.statsAdminLocked === true;
+        const _gsLocked = _prof0.gamestateAdminLocked === true;
         savePlayerProfile(id, {
             ip: ip,
             coins: isNaN(rc) ? prevCoins(id) : Math.max(0, rc),
-            totalPlayTime: (typeof totalPlayTime === 'number') ? totalPlayTime : prevPlayTime(id),
-            gameStats: (gameStats && typeof gameStats === 'object') ? gameStats : prevStats(id),
-            gamestate: (gamestate && typeof gamestate === 'object') ? gamestate : prevGamestate(id),
+            totalPlayTime: _locked ? prevPlayTime(id) : ((typeof totalPlayTime === 'number') ? totalPlayTime : prevPlayTime(id)),
+            gameStats: _locked ? prevStats(id) : ((gameStats && typeof gameStats === 'object') ? gameStats : prevStats(id)),
+            gamestate: _gsLocked ? prevGamestate(id) : ((gamestate && typeof gamestate === 'object') ? gamestate : prevGamestate(id)),
             username: (name && String(name).trim()) || '玩家'
         });
             onlineSockets.set(id, socket.id);
+            // 若客户端 IP 已被封禁，则对该用户启用全部功能封禁，并立即推送全屏封禁框
+            if (isIPBanned(ip)) {
+                const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+                if (!ban.reasons) ban.reasons = {};
+                const rec = bannedIPs.get(String(ip)) || {};
+                ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
+                const reason = (rec.reason && String(rec.reason).trim()) || '';
+                const msg = 'IP 封禁：' + (reason || '管理员封禁此 IP');
+                ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
+                userBans.set(id, ban);
+                socket.emit('ip-banned', { reason: msg, permanent: true });
+            }
             console.log(`[Online] 玩家 ${name} (${id}) 上线，IP ${ip}，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
             console.error('[Online] player-online 处理出错:', e.message);
@@ -1699,6 +2220,47 @@ io.on('connection', (socket) => {
             console.log(`[Online] 玩家 ${id} 下线，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
             console.error('[Online] player-offline 处理出错:', e.message);
+        }
+    });
+
+    // 游戏内管理员/超级管理员踢人：无需房主身份，由角色鉴权
+    socket.on('admin-kick-player', (data) => {
+        try {
+            const { requesterId, targetId, reason } = data || {};
+            if (!requesterId || !targetId) return;
+            if (requesterId === targetId) return; // 不能踢自己
+            const rRole = getUserRole(requesterId);
+            if (rRole !== 'admin' && rRole !== 'superadmin') return; // 仅管理员/超管可踢
+            // 查找目标所在房间（room.players 以 player.id 为键）
+            let found = null;
+            for (const [roomId, room] of rooms) {
+                if (room.players && room.players.has(targetId)) { found = { roomId, room }; break; }
+            }
+            if (!found) {
+                socket.emit('admin-kick-result', { success: false, message: '目标玩家不在任何房间中' });
+                return;
+            }
+            const { roomId, room } = found;
+            const playerToKick = room.players.get(targetId);
+            const playerSocket = io.sockets.sockets.get(playerToKick.socketId);
+            if (playerSocket) {
+                playerSocket.emit('kicked-by-admin', { message: reason || '你已被管理员踢出。' });
+                playerSocket.disconnect(true);
+            }
+            room.players.delete(targetId);
+            appendAudit('admin', 'kick-player', `（角色 ${rRole}）房间 ${roomId} 踢出玩家 ${playerToKick.name} (${targetId})`);
+            io.to(roomId).emit('player-kicked-by-admin', { playerName: playerToKick.name });
+            // 房主交接（如被踢者是房主）
+            if (playerToKick.isHost && playerToKick.socketId === room.actualHost && room.players.size > 0) {
+                const newHost = room.players.values().next().value;
+                newHost.isHost = true;
+                room.actualHost = newHost.socketId;
+                io.to(newHost.socketId).emit('promoted-to-host', { roomId: room.id, message: '原房主被踢出，你已成为新任房主。' });
+                io.to(roomId).emit('room-updated', { type: 'host-changed', newHostName: newHost.name });
+            }
+            socket.emit('admin-kick-result', { success: true, message: `已踢出 ${playerToKick.name}` });
+        } catch (e) {
+            console.error('[kick] admin-kick-player 处理出错:', e.message);
         }
     });
 
@@ -2803,6 +3365,8 @@ console.log('🚀 正在初始化服务器...');
 initializeAdminPassword();
 initializeSuperAdminPassword();
 loadAdminState();
+loadUserRoles();
+loadUserSettings();
 
 const PORT = process.env.PORT || 234;
 server.listen(PORT, () => {
