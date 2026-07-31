@@ -2796,6 +2796,64 @@
     #browseMazesList p, #popularMazesList p {
         animation: pulse 1.5s ease-in-out infinite;
     }
+    
+    /* ===== 虚拟摇杆样式 ===== */
+    #joystickContainer {
+        position: fixed;
+        z-index: 50;
+        display: none;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+    }
+    #joystickContainer.visible {
+        display: block;
+    }
+    .joystick-base {
+        position: relative;
+        border-radius: 50%;
+        background: radial-gradient(circle at 50% 50%, rgba(76,175,80,0.18), rgba(0,0,0,0.45));
+        border: 2px solid rgba(76,175,80,0.6);
+        box-shadow: 0 0 18px rgba(76,175,80,0.25), inset 0 0 12px rgba(0,0,0,0.5);
+        transition: box-shadow 0.15s, border-color 0.15s, transform 0.08s;
+        touch-action: none;
+        box-sizing: border-box;
+    }
+    .joystick-base.joystick-pressed {
+        border-color: rgba(76,175,80,0.95);
+        box-shadow: 0 0 28px rgba(76,175,80,0.55), inset 0 0 16px rgba(0,0,0,0.55);
+        transform: scale(1.04);
+    }
+    .joystick-base.joystick-returning .joystick-knob {
+        transition: transform 0.18s cubic-bezier(0.2,0.8,0.3,1);
+    }
+    .joystick-knob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 35%, #7ef0a0, #2E7D32);
+        border: 2px solid rgba(255,255,255,0.65);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+        transform: translate(-50%, -50%);
+        transition: transform 0.04s linear, opacity 0.15s;
+        pointer-events: none;
+        box-sizing: border-box;
+    }
+    .range-val {
+        display: inline-block;
+        min-width: 38px;
+        text-align: right;
+        color: #9fe6b3;
+        font-size: 13px;
+    }
+    .setting-hint {
+        margin: 8px 0 0 0;
+        font-size: 12px;
+        color: #8a8a8a;
+        line-height: 1.4;
+    }
     </style>
 </head>
 
@@ -3810,6 +3868,9 @@
         </div>
     </div>
 
+    <!-- 虚拟摇杆容器（由 JS 动态创建 base/knob） -->
+    <div id="joystickContainer"></div>
+
     <!-- 游戏说明弹窗 -->
     <div id="instructionsModal" class="instructions-modal hidden">
         <h2>游戏说明</h2>
@@ -3873,6 +3934,38 @@
                 <label for="controlsOpacity">透明度:</label>
                 <input type="range" id="controlsOpacity" min="30" max="100" value="60">
             </div>
+        </div>
+        
+        <div class="setting-group">
+            <h3>虚拟摇杆</h3>
+            <label for="joystickEnabledCheckbox">
+                <input type="checkbox" id="joystickEnabledCheckbox"> 启用虚拟摇杆
+            </label>
+            <div class="setting-row">
+                <label for="joystickSensitivity">灵敏度:</label>
+                <input type="range" id="joystickSensitivity" min="1" max="10" value="5">
+                <span id="joystickSensitivityVal" class="range-val">5</span>
+            </div>
+            <div class="setting-row">
+                <label for="joystickDeadZone">死区范围:</label>
+                <input type="range" id="joystickDeadZone" min="0" max="40" value="15">
+                <span id="joystickDeadZoneVal" class="range-val">15%</span>
+            </div>
+            <div class="setting-row">
+                <label for="joystickRadius">摇杆半径:</label>
+                <input type="range" id="joystickRadius" min="40" max="140" value="70">
+                <span id="joystickRadiusVal" class="range-val">70px</span>
+            </div>
+            <div class="setting-row">
+                <label for="joystickPosition">位置:</label>
+                <select id="joystickPosition">
+                    <option value="bottom-right">右下角</option>
+                    <option value="bottom-left">左下角</option>
+                    <option value="top-right">右上角</option>
+                    <option value="top-left">左上角</option>
+                </select>
+            </div>
+            <p class="setting-hint">启用后将在游戏内显示虚拟摇杆，支持触摸与鼠标拖拽控制移动。</p>
         </div>
         
         <div class="setting-group">
@@ -3969,7 +4062,7 @@
 
         <div class="buttons">
             <button onclick="saveUISettings()">保存</button>
-            <button onclick="document.getElementById('uiSettingsModal').classList.add('hidden')">取消</button>
+            <button onclick="closeUISettingsModal()">取消</button>
             <button onclick="checkServerVersion()">检查版本</button>
         </div>
     </div>
@@ -4448,6 +4541,60 @@ function connectNotificationSocket() {
             applyBanState(data);
         });
 
+        // 管理员按 IP 封禁：强制弹出全屏封禁框（无法关闭，提示永久封禁）
+        notificationSocket.on('ip-banned', (data) => {
+            console.log('[通知] 收到 IP 封禁:', data);
+            showIPBannedModal((data && data.reason) || '');
+        });
+        // 管理员解除 IP 封禁：关闭全屏封禁框
+        notificationSocket.on('ip-unbanned', () => {
+            console.log('[通知] 收到 IP 解封');
+            hideIPBannedModal();
+        });
+
+        // 服务器下发的游戏内角色变更（管理员/超级管理员）
+        notificationSocket.on('role-info', (data) => {
+            if (!data) return;
+            const newRole = data.role || 'user';
+            if (newRole !== gameState.myRole) {
+                gameState.myRole = newRole;
+                console.log('[通知] 角色更新为:', newRole);
+                // 角色变化可能影响调试按钮与踢人按钮的可见性
+                if (typeof refreshDevUI === 'function') refreshDevUI();
+                if (gameState.currentScreen === 'multiplayerGame' && typeof updatePlayerList === 'function') updatePlayerList();
+            }
+        });
+
+        // 管理员远程修改了本玩家的 UI 设置（仅当管理员覆盖时下发，立即生效）
+        notificationSocket.on('settings-update', (data) => {
+            if (!data || !data.uiSettings) return;
+            applyServerUISettings(data.uiSettings);
+            console.log('[通知] 管理员已更新你的界面设置');
+        });
+
+        // 管理员在后台修改了本玩家的昵称（不消耗金币，实时生效，无需重新登录）
+        notificationSocket.on('name-changed', (data) => {
+            if (!data || !data.name) return;
+            const nm = String(data.name).trim();
+            if (!nm) return;
+            gameState.playerName = nm;
+            try { localStorage.setItem('playerName', nm); } catch (e) {}
+            const pn = document.getElementById('playerName');
+            if (pn) pn.value = nm;
+            showNotification('管理员已将你的昵称修改为：' + nm, 4000);
+            console.log('[通知] 昵称被管理员修改为:', nm);
+        });
+
+        // 游戏内管理员/超级管理员踢人结果反馈
+        notificationSocket.on('admin-kick-result', (data) => {
+            if (!data) return;
+            if (data.success) {
+                addChatMessage('系统', data.message || '已踢出玩家', '#4CAF50');
+            } else {
+                alert('踢出失败：' + (data.message || '未知错误'));
+            }
+        });
+
         // 管理员更新了本玩家的关卡权限（即时应用；若玩家以 REST 注册无 socket，则靠 15s 轮询兜底）
         notificationSocket.on('level-permission-update', (data) => {
             if (!data || !gameState.clientId) return;
@@ -4639,6 +4786,8 @@ async function registerPlayerOnline() {
             chatDisabled: !!gs.chatDisabled
         }
     };
+    // 同时上报 UI 设置，供管理员后台查看
+    payload.uiSettings = (gameState.uiSettings && typeof gameState.uiSettings === 'object') ? gameState.uiSettings : null;
     // 1) REST 优先（与主游戏服务器同源可达，不依赖 socket.io 传输）
     if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
         try {
@@ -4650,6 +4799,12 @@ async function registerPlayerOnline() {
             // 服务端可能已存有管理员“全部通关”授予的进度，拉回合入本地
             const data = await resp.json().catch(() => null);
             if (data && data.progress) applyServerProgress(data.progress);
+            // 服务器下发的游戏内角色（管理员/超级管理员 → 开放调试信息与踢人权限）
+            if (data && data.role) gameState.myRole = data.role;
+            // 若管理员已远程覆盖 UI 设置，连接时即采用（避免覆盖玩家本地自行修改的值，仅在有覆盖时应用）
+            if (data && data.adminOverridden && data.uiSettings) applyServerUISettings(data.uiSettings);
+            // 若本机 IP 已被封禁，强制弹出全屏封禁框（永久）
+            if (data && data.ipBanned) showIPBannedModal(data.ipBanReason || '');
             console.log('[进度上报] 成功:', JSON.stringify(payload), 'HTTP', resp.status);
         } catch (e) {
             console.warn('[进度上报] 失败:', e && e.message, 'payload=', JSON.stringify(payload));
@@ -5218,6 +5373,36 @@ function showTelemetryExitOverlay() {
         <p style="color:#90a4ae;margin:0 0 6px;font-size:14px;line-height:1.6;">您未同意遥测数据收集，<br>根据要求游戏无法运行。</p>
         <p style="color:#607d8b;margin:0;font-size:12px;">如需继续，请清除浏览器数据后重新进入并选择“允许遥测”。</p>`;
     document.body.appendChild(overlay);
+}
+
+// IP 被封禁时的强制全屏遮罩（无法关闭，提示永久封禁）
+function showIPBannedModal(reason) {
+    if (document.getElementById('ipBannedOverlay')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'ipBannedOverlay';
+    // 最高层级、阻断一切交互、不可关闭
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,10,16,0.97);z-index:60000;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:24px;';
+    const emoji = document.createElement('div');
+    emoji.style.cssText = 'font-size:64px;margin-bottom:16px;';
+    emoji.textContent = '🚫';
+    const title = document.createElement('h2');
+    title.style.cssText = 'color:#ff5252;margin:0 0 12px;font-size:26px;letter-spacing:1px;';
+    title.textContent = '你的IP已被封禁（永久）';
+    const reasonP = document.createElement('p');
+    reasonP.style.cssText = 'color:#cfd8dc;margin:0 0 8px;font-size:15px;line-height:1.7;max-width:520px;';
+    reasonP.textContent = reason ? ('封禁理由：' + String(reason)) : '管理员已封禁你的 IP 地址，所有功能均不可用。';
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:#78909c;margin:8px 0 0;font-size:13px;';
+    hint.textContent = '如有疑问，请联系管理员申诉。';
+    overlay.appendChild(emoji);
+    overlay.appendChild(title);
+    overlay.appendChild(reasonP);
+    overlay.appendChild(hint);
+    document.body.appendChild(overlay);
+}
+function hideIPBannedModal() {
+    const ex = document.getElementById('ipBannedOverlay');
+    if (ex) ex.remove();
 }
 
 // 上报遥测事件（仅在用户同意后 gameState.telemetryEnabled 为真时才发送）
@@ -5942,6 +6127,7 @@ let gameState = {
     lastPortal: null, // 上一次使用的传送门
     lastPathLength: 0, // 上一次的路径长度
     developerMode: false, // 开发者模式标志
+    myRole: 'user', // 当前玩家在服务器侧的游戏内角色：user / admin / superadmin（由服务器下发，决定调试信息与踢人权限）
     playerData: {
         coins: 0,
         skins: {
@@ -6008,6 +6194,12 @@ let gameState = {
         musicSelected: 'game-music-1',
         // 自定义音乐数组
         customMusic: [],
+        // 虚拟摇杆设置
+        joystickEnabled: false,
+        joystickSensitivity: 5,   // 1~10，越大移动越快
+        joystickDeadZone: 15,     // 0~40，死区半径占摇杆半径的百分比
+        joystickRadius: 70,       // 40~140，摇杆基础半径(px)
+        joystickPosition: 'bottom-right', // bottom-left/bottom-right/top-left/top-right
         // 添加自定义位置的x和y坐标
         customX: null,
         customY: null
@@ -8141,6 +8333,9 @@ function drawSinglePlayerMaze() {
             if (playerList) {
                 playerList.style.display = gameState.uiSettings.showPlayerList ? 'block' : 'none';
             }
+
+            // 应用虚拟摇杆设置（创建/销毁 + 显隐）
+            applyJoystickSettings();
         }
 // 全局showScreen函数
 function showScreen(screenId) {
@@ -9615,6 +9810,23 @@ function showScreen(screenId) {
         // 踢出玩家
         function kickPlayer(playerId, playerName) {
             if (confirm(`确定要踢出玩家 "${playerName}" 吗？`)) {
+                // 管理员/超级管理员：经由服务器踢人（无需房主身份，由角色鉴权）
+                const canKickByRole = (gameState.myRole === 'admin' || gameState.myRole === 'superadmin');
+                if (canKickByRole && notificationSocket && notificationSocket.connected) {
+                    notificationSocket.emit('admin-kick-player', {
+                        requesterId: gameState.clientId,
+                        targetId: playerId,
+                        reason: '你已被管理员踢出。'
+                    });
+                    // 本地乐观移除
+                    delete gameState.multiplayer.players[playerId];
+                    delete gameState.multiplayer.connections[playerId];
+                    updatePlayerList();
+                    closeKickPlayerModal();
+                    addChatMessage('系统', `玩家 ${playerName} 已被踢出房间`, '#FF5252');
+                    return;
+                }
+                // 房主：原 P2P 踢人逻辑
                 // 发送踢出消息
                 const kickMessage = {
                     type: 'kick-player',
@@ -10419,6 +10631,39 @@ function saveUiSettings() {
     }
 }
 
+// 应用服务器下发的 UI 设置（管理员远程修改 / 连接时回传），合并到本地并持久化、应用
+function applyServerUISettings(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    const base = (gameState.uiSettings && typeof gameState.uiSettings === 'object') ? gameState.uiSettings : {};
+    const merged = Object.assign({}, base, obj);
+    if (Array.isArray(obj.customMusic)) merged.customMusic = obj.customMusic;
+    gameState.uiSettings = merged;
+    try {
+        localStorage.setItem('uiSettings', JSON.stringify(Object.assign({}, merged, { customMusic: [] })));
+    } catch (e) {
+        try { localStorage.setItem('uiSettings', JSON.stringify({ showControls: merged.showControls })); } catch (_) {}
+    }
+    if (typeof applyUISettings === 'function') applyUISettings();
+    // 若当前正打开设置面板，刷新控件显示以反映新值
+    const modal = document.getElementById('uiSettingsModal');
+    if (modal && !modal.classList.contains('hidden') && typeof showUISettings === 'function') {
+        try { showUISettings(); } catch (_) {}
+    }
+}
+
+// 把当前 UI 设置上传到服务器（供管理员后台查看），失败静默忽略
+function uploadUISettingsToServer() {
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    if (!gameState.clientId) return;
+    try {
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/user/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: gameState.clientId, uiSettings: gameState.uiSettings })
+        }).catch(() => {});
+    } catch (_) {}
+}
+
 function showUISettings() {
             
             let settings;
@@ -10548,12 +10793,37 @@ function showUISettings() {
                 }
             };
             
+            // 加载虚拟摇杆设置
+            document.getElementById('joystickEnabledCheckbox').checked = !!settings.joystickEnabled;
+            document.getElementById('joystickSensitivity').value = settings.joystickSensitivity;
+            document.getElementById('joystickDeadZone').value = settings.joystickDeadZone;
+            document.getElementById('joystickRadius').value = settings.joystickRadius;
+            document.getElementById('joystickPosition').value = settings.joystickPosition || 'bottom-right';
+            document.getElementById('joystickSensitivityVal').textContent = settings.joystickSensitivity;
+            document.getElementById('joystickDeadZoneVal').textContent = settings.joystickDeadZone + '%';
+            document.getElementById('joystickRadiusVal').textContent = settings.joystickRadius + 'px';
+
+            // 摇杆参数实时数值预览
+            const bindRangePreview = function (id, valId, suffix) {
+                const el = document.getElementById(id);
+                const valEl = document.getElementById(valId);
+                if (el && valEl) {
+                    el.addEventListener('input', function () {
+                        valEl.textContent = this.value + (suffix || '');
+                    });
+                }
+            };
+            bindRangePreview('joystickSensitivity', 'joystickSensitivityVal', '');
+            bindRangePreview('joystickDeadZone', 'joystickDeadZoneVal', '%');
+            bindRangePreview('joystickRadius', 'joystickRadiusVal', 'px');
+
             // 显示UI设置模态框
             const uiSettingsModal = document.getElementById('uiSettingsModal');
             
             if (uiSettingsModal) {
                 uiSettingsModal.classList.remove('hidden');
-                
+                // 打开设置时隐藏摇杆，避免误触
+                if (typeof updateJoystickVisibility === 'function') updateJoystickVisibility();
             } else {
                 console.error('uiSettingsModal元素不存在');
             }
@@ -11198,6 +11468,12 @@ function showUISettings() {
                 showKeyInfo: document.getElementById('showKeyInfo').checked,
                 showRoomInfo: document.getElementById('showRoomInfo').checked,
             showPlayerList: document.getElementById('showPlayerListCheckbox').checked,
+            // 保存虚拟摇杆设置
+            joystickEnabled: document.getElementById('joystickEnabledCheckbox').checked,
+            joystickSensitivity: parseInt(document.getElementById('joystickSensitivity').value) || 5,
+            joystickDeadZone: parseInt(document.getElementById('joystickDeadZone').value) || 15,
+            joystickRadius: parseInt(document.getElementById('joystickRadius').value) || 70,
+            joystickPosition: document.getElementById('joystickPosition').value || 'bottom-right',
             // 保存音乐设置
             musicEnabled: document.getElementById('musicEnabledCheckbox').checked,
             musicVolume: parseInt(document.getElementById('musicVolume').value),
@@ -11209,6 +11485,8 @@ function showUISettings() {
             // 保存自定义音乐，如果存在的话
             customMusic: oldSettings.customMusic || []
             };
+            // 把新设置上传到服务器（供管理员后台查看/覆盖）
+            uploadUISettingsToServer();
             try {
                 saveUiSettings();
                 document.getElementById('uiSettingsModal').classList.add('hidden');
@@ -11739,10 +12017,12 @@ function showMessageToSelf(message) {
         let debugFpsRafId = null;
 
         // 根据开发者模式显示/隐藏“调试信息”按钮
+        // 管理员 / 超级管理员 角色同样开放调试信息（角色由服务器下发）
         function refreshDevUI() {
             const btn = document.getElementById('debugInfoBtn');
             if (!btn) return;
-            if (gameState.developerMode || gameState.devMode) {
+            const roleUnlocked = (gameState.myRole === 'admin' || gameState.myRole === 'superadmin');
+            if (gameState.developerMode || gameState.devMode || roleUnlocked) {
                 btn.classList.remove('hidden');
             } else {
                 btn.classList.add('hidden');
@@ -14664,6 +14944,259 @@ function movePlayer(rawKey, isFromSystem = false) {
     }
     else if (gameState.currentScreen === 'multiplayerGame') {
         handleMultiplayerMoveLogic(newX, newY);
+    }
+}
+
+// ===== 虚拟摇杆模块 =====
+// 全局状态：记录当前激活方向与自动重复计时器
+// 摇杆持续按住某一方向满该时长（毫秒）则移动一格；继续按住则每满一次再移动一格
+const JOYSTICK_STEP_HOLD_MS = 4000;
+const joystickState = {
+    activeDir: null,
+    holdTimer: null
+};
+let joystickInstance = null;
+
+// 根据开关 + 当前屏幕 + 设置弹窗是否打开 决定是否显示摇杆
+function updateJoystickVisibility() {
+    const container = document.getElementById('joystickContainer');
+    if (!container) return;
+    const s = gameState.uiSettings;
+    const onGameScreen = gameState.currentScreen === 'singlePlayerGame' ||
+                         gameState.currentScreen === 'multiplayerGame';
+    const modalOpen = (function () {
+        const m = document.getElementById('uiSettingsModal');
+        return !!(m && !m.classList.contains('hidden'));
+    })();
+    const show = !!s.joystickEnabled && onGameScreen && !modalOpen;
+    container.classList.toggle('visible', show);
+    if (show) {
+        initJoystick();
+    } else {
+        destroyJoystick();
+    }
+}
+
+// applyUISettings 调用入口
+function applyJoystickSettings() {
+    updateJoystickVisibility();
+}
+
+// 关闭 UI 设置弹窗并恢复摇杆显隐状态
+function closeUISettingsModal() {
+    const m = document.getElementById('uiSettingsModal');
+    if (m) m.classList.add('hidden');
+    applyJoystickSettings();
+}
+
+// 创建/重建摇杆（读取当前配置）
+function initJoystick() {
+    teardownJoystickInstance();
+    const container = document.getElementById('joystickContainer');
+    if (!container) return;
+    const s = gameState.uiSettings;
+
+    const radius = Math.max(40, Math.min(140, Number(s.joystickRadius) || 70));
+    const deadZone = Math.max(0, Math.min(0.6, (Number(s.joystickDeadZone) || 15) / 100));
+    const sensitivity = Math.max(1, Math.min(10, Number(s.joystickSensitivity) || 5));
+
+    // 构建 DOM：基础圆 + 摇杆头
+    container.innerHTML = '';
+    const base = document.createElement('div');
+    base.className = 'joystick-base';
+    base.style.width = (radius * 2) + 'px';
+    base.style.height = (radius * 2) + 'px';
+    const knob = document.createElement('div');
+    knob.className = 'joystick-knob';
+    const knobSize = Math.round(radius * 0.5);
+    knob.style.width = knobSize + 'px';
+    knob.style.height = knobSize + 'px';
+    base.appendChild(knob);
+    container.appendChild(base);
+
+    // 位置（与现有控制面板一致）
+    container.style.left = container.style.right = container.style.top = container.style.bottom = '';
+    switch (s.joystickPosition) {
+        case 'bottom-left':  container.style.left = '20px';  container.style.bottom = '20px'; break;
+        case 'top-left':     container.style.left = '20px';  container.style.top = '20px'; break;
+        case 'top-right':    container.style.right = '20px'; container.style.top = '20px'; break;
+        default:             container.style.right = '20px'; container.style.bottom = '20px'; break; // bottom-right
+    }
+
+    joystickInstance = new Joystick(base, knob, {
+        radius: radius,
+        deadZone: deadZone,
+        sensitivity: sensitivity,
+        onStart: function () { base.classList.add('joystick-pressed'); },
+        onMove: function (info) {
+            positionKnob(knob, info.x, info.y);
+            handleJoystickDirection(info.direction);
+        },
+        onEnd: function () {
+            base.classList.remove('joystick-pressed');
+            base.classList.add('joystick-returning');
+            positionKnob(knob, 0, 0);
+            setTimeout(function () { base.classList.remove('joystick-returning'); }, 200);
+            handleJoystickDirection(null);
+        }
+    });
+}
+
+// 摇杆头定位（基于基础圆心偏移）
+function positionKnob(knob, x, y) {
+    knob.style.transform = 'translate(calc(-50% + ' + x + 'px), calc(-50% + ' + y + 'px))';
+}
+
+// 方向变化处理：仅在方向改变时触发。
+// 行为：将摇杆持续按住某一方向满 JOYSTICK_STEP_HOLD_MS 才移动一格；
+//       若一直按住则每满一次（每 4 秒）再移动一格（短暂轻推不会移动）。
+function handleJoystickDirection(dir) {
+    if (dir === joystickState.activeDir) return;
+    joystickState.activeDir = dir;
+    if (joystickState.holdTimer) {
+        clearTimeout(joystickState.holdTimer);
+        joystickState.holdTimer = null;
+    }
+    if (dir) {
+        scheduleJoystickStep();
+    }
+}
+
+// 持续按住某方向满指定时长移动一格，并保持按住则每满一次再移动一格
+function scheduleJoystickStep() {
+    if (!joystickState.activeDir) return;
+    joystickState.holdTimer = setTimeout(function () {
+        if (joystickState.activeDir && typeof movePlayer === 'function') {
+            movePlayer(joystickState.activeDir);
+        }
+        scheduleJoystickStep();
+    }, JOYSTICK_STEP_HOLD_MS);
+}
+
+// 仅卸载摇杆实例与事件/计时器，不改动容器可见性
+function teardownJoystickInstance() {
+    if (joystickState.holdTimer) {
+        clearTimeout(joystickState.holdTimer);
+        joystickState.holdTimer = null;
+    }
+    joystickState.activeDir = null;
+    if (joystickInstance) {
+        joystickInstance.destroy();
+        joystickInstance = null;
+    }
+    const container = document.getElementById('joystickContainer');
+    if (container) {
+        container.innerHTML = '';
+    }
+}
+
+// 完全销毁摇杆（隐藏并停止所有事件/计时器）
+function destroyJoystick() {
+    teardownJoystickInstance();
+    const container = document.getElementById('joystickContainer');
+    if (container) {
+        container.classList.remove('visible');
+    }
+}
+
+// 摇杆类：统一处理触摸与鼠标（Pointer Events），支持拖拽、方向检测、力度感应
+class Joystick {
+    constructor(base, knob, opts) {
+        this.base = base;
+        this.knob = knob;
+        this.opts = opts || {};
+        this.radius = opts.radius || 70;
+        this.deadZone = (opts.deadZone != null) ? opts.deadZone : 0.15; // 0~1
+        this.pointerId = null;
+        this.base.style.touchAction = 'none';
+        this._onDown = this.onDown.bind(this);
+        this._onMove = this.onMove.bind(this);
+        this._onUp = this.onUp.bind(this);
+        this.base.addEventListener('pointerdown', this._onDown);
+    }
+
+    onDown(e) {
+        if (this.pointerId !== null) return;
+        this.pointerId = e.pointerId;
+        // 仍尝试捕获，提升触摸体验；但释放事件改挂到 window，
+        // 避免 setPointerCapture 失败/丢失时，在摇杆外松开鼠标导致一直卡在激活态。
+        try { this.base.setPointerCapture(e.pointerId); } catch (_) {}
+        window.addEventListener('pointermove', this._onMove, { passive: false });
+        window.addEventListener('pointerup', this._onUp);
+        window.addEventListener('pointercancel', this._onUp);
+        e.preventDefault();
+        this.process(e);
+        if (this.opts.onStart) this.opts.onStart();
+    }
+
+    onMove(e) {
+        if (e.pointerId !== this.pointerId) return;
+        e.preventDefault();
+        this.process(e);
+    }
+
+    onUp(e) {
+        if (e.pointerId !== this.pointerId) return;
+        this.cleanup();
+        if (this.opts.onEnd) this.opts.onEnd();
+    }
+
+    // 计算相对圆心的偏移、力度、方向，并回调
+    process(e) {
+        const rect = this.base.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        let dx = e.clientX - cx;
+        let dy = e.clientY - cy;
+        const dist = Math.hypot(dx, dy);
+        const maxDist = this.radius;
+
+        // 限制摇杆头在基础圆范围内
+        let clampedX = dx, clampedY = dy;
+        if (dist > maxDist) {
+            clampedX = (dx / dist) * maxDist;
+            clampedY = (dy / dist) * maxDist;
+        }
+
+        const magnitude = Math.min(1, dist / maxDist);
+
+        // 死区：小于死区半径不触发方向
+        let direction = null;
+        if (dist > this.deadZone * maxDist) {
+            direction = this.computeDirection(dx, dy);
+        }
+
+        if (this.opts.onMove) {
+            this.opts.onMove({
+                x: clampedX,
+                y: clampedY,
+                magnitude: magnitude,
+                angle: Math.atan2(dy, dx),
+                direction: direction
+            });
+        }
+    }
+
+    // 网格移动为 4 向：取主轴上绝对值较大的方向
+    computeDirection(dx, dy) {
+        if (Math.abs(dx) >= Math.abs(dy)) {
+            return dx > 0 ? 'ArrowRight' : 'ArrowLeft';
+        }
+        return dy > 0 ? 'ArrowDown' : 'ArrowUp';
+    }
+
+    cleanup() {
+        const pid = this.pointerId;
+        this.pointerId = null;
+        window.removeEventListener('pointermove', this._onMove, { passive: false });
+        window.removeEventListener('pointerup', this._onUp);
+        window.removeEventListener('pointercancel', this._onUp);
+        if (pid != null) { try { this.base.releasePointerCapture(pid); } catch (_) {} }
+    }
+
+    destroy() {
+        this.cleanup();
+        this.base.removeEventListener('pointerdown', this._onDown);
     }
 }
 
@@ -19546,20 +20079,21 @@ window.addEventListener('load', initializeNewFeatures);
                 `;
                 
                 div.appendChild(playerInfo);
-                
-                // 如果是房主且不是自己，显示踢出按钮
-                if (gameState.multiplayer.isHost && 
+
+                // 房主 或 管理员/超级管理员（角色由服务器下发）可踢出他人
+                const canKickByRole = (gameState.myRole === 'admin' || gameState.myRole === 'superadmin');
+                if ((gameState.multiplayer.isHost || canKickByRole) &&
                     gameState.multiplayer.currentPlayerId !== playerId) {
                     const kickButton = document.createElement('button');
                     kickButton.className = 'kick-button';
-                    kickButton.textContent = '踢出';
+                    kickButton.textContent = canKickByRole && !gameState.multiplayer.isHost ? '⛔ 踢出' : '踢出';
                     kickButton.onclick = () => {
                         if (confirm(`确定要踢出玩家 ${player.name} 吗？`)) {
                             // 检查玩家是否受保护
                             if (gameState.multiplayer.protectedPlayers[playerId]) {
                                 alert('踢出失败：err75937 (玩家受保护)');
                             } else {
-                                kickPlayer(playerId, '被管理员踢出');
+                                kickPlayer(playerId, player.name);
                             }
                         }
                     };
