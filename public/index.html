@@ -4581,6 +4581,21 @@ function connectNotificationSocket() {
             }
             refreshSuperadminUserList();
         });
+        // 游戏内超级管理员各类操作（改名/踢出/封禁/全部通关/设置）的统一结果回执
+        notificationSocket.on('admin-action-result', (data) => {
+            if (!data) return;
+            if (data.success) {
+                showNotification('✅ ' + (data.message || '操作成功'), 2500);
+            } else {
+                showNotification('❌ ' + (data.message || '操作失败'), 3000);
+            }
+            refreshSuperadminUserList();
+        });
+        // 游戏内超级管理员读取到的某玩家设置（用于设置弹窗回填）
+        notificationSocket.on('admin-user-settings', (data) => {
+            if (!data || !data.targetId) return;
+            renderSuperadminSettingsForm(data.targetId, data.settings || {}, !!data.adminOverridden);
+        });
 
         // 管理员远程修改了本玩家的 UI 设置（仅当管理员覆盖时下发，立即生效）
         notificationSocket.on('settings-update', (data) => {
@@ -4700,6 +4715,28 @@ function connectNotificationSocket() {
             if (typeof drawMultiplayerMaze === 'function') drawMultiplayerMaze();
             if (typeof updatePlayerList === 'function') updatePlayerList();
             if (typeof showNotification === 'function') showNotification('👑 房主已变更为 ' + (data.newHostName || '新玩家'), 3000);
+        });
+
+        // 后台「踢出」按钮：管理员从后台踢出此玩家 → 尝试关闭标签页，并显示全屏遮罩兜底
+        notificationSocket.on('admin-kick-tab', (data) => {
+            const msg = (data && data.message) ? data.message : '你已被管理员踢出。';
+            // 浏览器通常禁止脚本关闭用户手动打开的页面，先尝试，失败由遮罩兜底
+            try { window.close(); } catch (_) {}
+            // 全屏不可关闭遮罩，提示玩家手动关闭其标签页
+            let ov = document.getElementById('adminKickOverlay');
+            if (!ov) {
+                ov = document.createElement('div');
+                ov.id = 'adminKickOverlay';
+                ov.style.cssText = 'position:fixed;inset:0;z-index:60000;background:rgba(0,0,0,0.96);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;font-family:system-ui,sans-serif;';
+                document.body.appendChild(ov);
+            }
+            ov.innerHTML = ''
+                + '<div style="font-size:26px;color:#FF5252;margin-bottom:16px;">🚫 你已被管理员踢出</div>'
+                + '<div id="adminKickMsg" style="font-size:15px;color:#ddd;max-width:80%;margin-bottom:24px;"></div>'
+                + '<button onclick="window.close();" style="padding:10px 24px;font-size:15px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭此页面</button>'
+                + '<div style="font-size:12px;color:#888;margin-top:14px;">若页面未自动关闭，请手动关闭此标签页。</div>';
+            const msgEl = ov.querySelector('#adminKickMsg');
+            if (msgEl) msgEl.textContent = msg; // 用 textContent 防注入
         });
 
         // 管理员要求更换地图：仅房主客户端执行（复用本地 generateMultiplayerMaze 重新生成并同步）
@@ -12128,6 +12165,28 @@ function showMessageToSelf(message) {
             }
         }
 
+        // 游戏内超管面板的“玩家设置”字段 schema（与后台设置面板一致，按类型渲染控件）
+        const SA_SETTINGS_SCHEMA = [
+            { key: 'showControls', label: '显示控制', type: 'bool' },
+            { key: 'controlsPosition', label: '控制位置', type: 'select', options: ['bottom-left', 'bottom-right', 'top-left', 'top-right'] },
+            { key: 'controlsSize', label: '控制大小', type: 'number', min: 50, max: 200 },
+            { key: 'controlsOpacity', label: '控制透明度', type: 'number', min: 0, max: 100 },
+            { key: 'showGameInfo', label: '显示游戏信息', type: 'bool' },
+            { key: 'showLevelInfo', label: '显示关卡信息', type: 'bool' },
+            { key: 'showTimeInfo', label: '显示时间信息', type: 'bool' },
+            { key: 'showMoveInfo', label: '显示步数信息', type: 'bool' },
+            { key: 'showKeyInfo', label: '显示钥匙信息', type: 'bool' },
+            { key: 'showRoomInfo', label: '显示房间信息', type: 'bool' },
+            { key: 'showPlayerList', label: '显示玩家列表', type: 'bool' },
+            { key: 'musicEnabled', label: '音乐开关', type: 'bool' },
+            { key: 'musicVolume', label: '音乐音量', type: 'number', min: 0, max: 100 },
+            { key: 'joystickEnabled', label: '摇杆开关', type: 'bool' },
+            { key: 'joystickSensitivity', label: '摇杆灵敏度', type: 'number', min: 1, max: 10 },
+            { key: 'joystickDeadZone', label: '摇杆死区', type: 'number', min: 0, max: 50 },
+            { key: 'joystickRadius', label: '摇杆半径', type: 'number', min: 30, max: 150 },
+            { key: 'joystickPosition', label: '摇杆位置', type: 'select', options: ['bottom-right', 'bottom-left', 'top-left', 'top-right'] }
+        ];
+
         function renderSuperadminUserList(users) {
             const box = document.getElementById('superadminUserList');
             if (!box) return;
@@ -12135,15 +12194,185 @@ function showMessageToSelf(message) {
             box.innerHTML = users.map(u => {
                 const roleName = { user: '👤 用户', admin: '🛡️ 管理员', superadmin: '👑 超级管理员' }[u.role] || '👤 用户';
                 const me = u.id === gameState.clientId ? ' (我)' : '';
-                const mkBtn = (label, role, color) => `<button onclick="superadminSetRole('${encodeURIComponent(u.id)}','${role}')" style="margin:2px;padding:4px 8px;background:${color};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">${label}</button>`;
+                const enc = encodeURIComponent(u.id);
+                const mkBtn = (label, role, color) => `<button onclick="superadminSetRole('${enc}','${role}')" style="margin:2px;padding:4px 8px;background:${color};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">${label}</button>`;
+                const actBtn = (label, fn, color) => `<button onclick="${fn}('${enc}')" style="margin:2px;padding:4px 8px;background:${color};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">${label}</button>`;
+                const banChk = (id, label) => `<label style="display:inline-block;margin:2px 8px 2px 0;font-size:12px;color:#cdd;"><input type="checkbox" id="${id}_${enc}" style="vertical-align:middle;"> ${label}</label>`;
                 return `
                     <div style="padding:8px;border-bottom:1px solid #3a3a55;">
                         <div style="font-weight:bold;">${saEscapeHtml(u.name || '玩家')}${me}</div>
                         <div style="font-size:12px;color:#b6b6cc;margin:2px 0;">当前：${roleName} <span style="color:#8a8aa3;">(ID: ${saEscapeHtml(u.id || '')})</span></div>
                         <div>${mkBtn('设为用户', 'user', '#6c757d')}${mkBtn('管理员', 'admin', '#007bff')}${mkBtn('超管', 'superadmin', '#e83e8c')}</div>
+                        <div style="margin-top:4px;">${actBtn('改名', 'superadminRename', '#8e44ad')}${actBtn('踢出', 'superadminKick', '#fd7e14')}${actBtn('全部通关', 'superadminCompleteAll', '#28a745')}${actBtn('封禁▾', 'superadminToggleBan', '#dc3545')}${actBtn('设置', 'superadminOpenSettings', '#17a2b8')}${actBtn('IP封', 'superadminBanIP', '#6f42c1')}${actBtn('IP解', 'superadminUnbanIP', '#20c997')}</div>
+                        <div id="saBan_${enc}" style="display:none;margin-top:6px;padding:8px;background:#26263a;border-radius:6px;">
+                            <div>${banChk('mp', '多人')}${banChk('sp', '单人')}${banChk('pz', '解密')}${banChk('ch', '聊天')}</div>
+                            <input id="saBanReason_${enc}" placeholder="封禁理由（可选）" style="width:100%;box-sizing:border-box;padding:4px;margin:4px 0;font-size:12px;border-radius:4px;border:none;">
+                            <button onclick="superadminApplyBan('${enc}')" style="padding:4px 10px;background:#dc3545;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">应用封禁/解封</button>
+                            <span style="font-size:11px;color:#8a8aa3;margin-left:6px;">（勾选=封禁，取消=解封）</span>
+                        </div>
                     </div>`;
             }).join('');
         }
+
+        function superadminRename(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            const name = prompt('将该玩家改名为（不消耗金币）：', '');
+            if (name === null) return;
+            if (!name.trim()) { showNotification('昵称不能为空', 2000); return; }
+            notificationSocket.emit('admin-rename', { requesterId: gameState.clientId, targetId, name: name.trim() });
+        }
+
+        function superadminKick(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            if (targetId === gameState.clientId) { showNotification('不能踢出自己', 2000); return; }
+            if (!confirm('确定要踢出该玩家并关闭其游戏页面吗？')) return;
+            notificationSocket.emit('admin-kick', { requesterId: gameState.clientId, targetId, reason: '你已被超级管理员踢出。' });
+        }
+
+        function superadminCompleteAll(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            if (!confirm('确定将该玩家的单人 + 解密全部标记为通关，并授予「迷宫大师」「解密高手」吗？')) return;
+            notificationSocket.emit('admin-complete-all', { requesterId: gameState.clientId, targetId });
+        }
+
+        function superadminToggleBan(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const el = document.getElementById('saBan_' + encId);
+            if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+        }
+
+        function superadminApplyBan(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            const reason = (document.getElementById('saBanReason_' + encId) || {}).value || '';
+            const map = { mp: 'multiplayer', sp: 'single', pz: 'puzzle', ch: 'chat' };
+            for (const k in map) {
+                const chk = document.getElementById(k + '_' + encId);
+                const banned = !!(chk && chk.checked);
+                notificationSocket.emit('admin-ban', { requesterId: gameState.clientId, targetId, type: map[k], banned, reason });
+            }
+        }
+
+        function superadminOpenSettings(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            // 拉取该玩家当前生效设置并打开设置弹窗
+            if (typeof notificationSocket !== 'undefined' && notificationSocket && notificationSocket.connected) {
+                notificationSocket.emit('admin-get-settings', { requesterId: gameState.clientId, targetId });
+            }
+        }
+
+        function superadminBanIP(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            const reason = prompt('封禁该玩家 IP 的理由（留空则仅显示“管理员封禁此 IP”）：', '');
+            if (reason === null) return;
+            notificationSocket.emit('admin-ban-ip', { requesterId: gameState.clientId, targetId, reason: reason.trim() });
+        }
+
+        function superadminUnbanIP(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            if (!confirm('确定解封该玩家 IP？其下玩家将恢复全部功能。')) return;
+            notificationSocket.emit('admin-unban-ip', { requesterId: gameState.clientId, targetId });
+        }
+
+        // 游戏内超管“玩家设置”弹窗：根据服务端返回的设置渲染可编辑表单
+        function renderSuperadminSettingsForm(targetId, settings, adminOverridden) {
+            let modal = document.getElementById('superadminSettingsModal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'superadminSettingsModal';
+                modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:56000;display:none;align-items:center;justify-content:center;';
+                document.body.appendChild(modal);
+            }
+            const fields = SA_SETTINGS_SCHEMA.map(f => {
+                const v = settings[f.key];
+                if (f.type === 'bool') {
+                    return `<label style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;color:#dcdce8;">
+                        <span>${f.label}</span>
+                        <input type="checkbox" data-sa-key="${f.key}" ${v ? 'checked' : ''} style="transform:scale(1.2);">
+                    </label>`;
+                }
+                if (f.type === 'number') {
+                    return `<label style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;color:#dcdce8;">
+                        <span>${f.label}</span>
+                        <input type="number" data-sa-key="${f.key}" value="${v === undefined || v === null ? '' : v}" min="${f.min}" max="${f.max}" style="width:90px;padding:3px;border-radius:4px;border:none;">
+                    </label>`;
+                }
+                if (f.type === 'select') {
+                    const opts = f.options.map(o => `<option value="${o}" ${String(v) === o ? 'selected' : ''}>${o}</option>`).join('');
+                    return `<label style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;color:#dcdce8;">
+                        <span>${f.label}</span>
+                        <select data-sa-key="${f.key}" style="padding:3px;border-radius:4px;border:none;">${opts}</select>
+                    </label>`;
+                }
+                return '';
+            }).join('');
+            modal.innerHTML = `
+                <div style="background:#1e1e2f;color:#e8e8ef;border-radius:10px;padding:18px;width:380px;max-height:82vh;overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.5);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <h3 style="margin:0;font-size:15px;">⚙️ 玩家设置 — ${saEscapeHtml(targetId)}</h3>
+                        <button onclick="document.getElementById('superadminSettingsModal').style.display='none'" style="background:none;border:none;color:#b6b6cc;font-size:20px;cursor:pointer;">×</button>
+                    </div>
+                    ${adminOverridden ? '<p style="color:#e6a700;font-size:12px;margin:4px 0;">⚠️ 当前为管理员覆盖状态（客户端自己的设置已被覆盖）。</p>' : '<p style="color:#8a8aa3;font-size:12px;margin:4px 0;">当前为客户端最近一次上报的设置。</p>'}
+                    <div id="saSettingsFields" style="margin:8px 0;">${fields}</div>
+                    <div style="display:flex;gap:8px;margin-top:10px;">
+                        <button onclick="superadminSaveSettings('${encodeURIComponent(targetId)}')" style="flex:1;padding:8px;background:#28a745;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">💾 保存设置</button>
+                        <button onclick="superadminClearSettings('${encodeURIComponent(targetId)}')" style="flex:1;padding:8px;background:#6c757d;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">🔓 恢复客户端</button>
+                    </div>
+                </div>`;
+            modal.style.display = 'flex';
+        }
+
+        function superadminCollectSettings() {
+            const out = {};
+            const els = document.querySelectorAll('#saSettingsFields [data-sa-key]');
+            els.forEach(el => {
+                const k = el.getAttribute('data-sa-key');
+                if (el.type === 'checkbox') out[k] = !!el.checked;
+                else if (el.type === 'number') out[k] = (el.value === '' || isNaN(Number(el.value))) ? 0 : Number(el.value);
+                else out[k] = el.value;
+            });
+            return out;
+        }
+
+        function superadminSaveSettings(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            const settings = superadminCollectSettings();
+            notificationSocket.emit('admin-save-settings', { requesterId: gameState.clientId, targetId, settings });
+            const modal = document.getElementById('superadminSettingsModal');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function superadminClearSettings(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            notificationSocket.emit('admin-save-settings', { requesterId: gameState.clientId, targetId, settings: null });
+            const modal = document.getElementById('superadminSettingsModal');
+            if (modal) modal.style.display = 'none';
+        }
+
+        // 显式挂到 window，确保内联 onclick 始终能调用（不受外层作用域嵌套影响）
+        window.openSuperadminPanel = openSuperadminPanel;
+        window.closeSuperadminPanel = closeSuperadminPanel;
+        window.refreshSuperadminUserList = refreshSuperadminUserList;
+        window.renderSuperadminUserList = renderSuperadminUserList;
+        window.superadminSetRole = superadminSetRole;
+        window.superadminRename = superadminRename;
+        window.superadminKick = superadminKick;
+        window.superadminCompleteAll = superadminCompleteAll;
+        window.superadminToggleBan = superadminToggleBan;
+        window.superadminApplyBan = superadminApplyBan;
+        window.superadminOpenSettings = superadminOpenSettings;
+        window.superadminSaveSettings = superadminSaveSettings;
+        window.superadminClearSettings = superadminClearSettings;
+        window.superadminBanIP = superadminBanIP;
+        window.superadminUnbanIP = superadminUnbanIP;
 
         function superadminSetRole(encId, role) {
             if (gameState.myRole !== 'superadmin') return;
