@@ -1250,6 +1250,47 @@ app.post('/api/admin/users/:userId/rename', requireAdminAuth, (req, res) => {
     }
 });
 
+// API: 后台用户行「踢出」按钮 → 强制关闭该玩家的游戏标签页（按 userId 定位在线 socket）
+app.post('/api/admin/users/:userId/kick', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const reason = (req.body && req.body.reason) ? String(req.body.reason).slice(0, 200) : '你已被管理员踢出。';
+        const sockId = onlineSockets.get(userId);
+        const p = onlinePlayers.get(userId);
+        const name = (p && p.name) ? p.name : userId;
+        if (!sockId || sockId === 'rest') {
+            return res.json({ success: false, message: `玩家「${name}」当前不在线，无法踢出` });
+        }
+        const playerSocket = io.sockets.sockets.get(sockId);
+        if (playerSocket) {
+            // 通知客户端关闭标签页（客户端收到后尝试 window.close() 并显示全屏遮罩兜底）
+            playerSocket.emit('admin-kick-tab', { message: reason, close: true });
+            // 延迟断开，确保事件送达；客户端关页后此断开自然失效（try 保护幂等）
+            setTimeout(() => { try { playerSocket.disconnect(true); } catch (_) {} }, 600);
+        }
+        // 若在某房间内，一并从房间移除并做必要的房主交接
+        for (const [roomId, room] of rooms) {
+            if (room.players && room.players.has(userId)) {
+                const rp = room.players.get(userId);
+                room.players.delete(userId);
+                io.to(roomId).emit('player-kicked-by-admin', { playerName: name });
+                if (rp.isHost && rp.socketId === room.actualHost && room.players.size > 0) {
+                    const newHost = room.players.values().next().value;
+                    newHost.isHost = true;
+                    room.actualHost = newHost.socketId;
+                    io.to(newHost.socketId).emit('promoted-to-host', { roomId: room.id, message: '原房主被踢出，你已成为新任房主。' });
+                    io.to(roomId).emit('room-updated', { type: 'host-changed', newHostName: newHost.name });
+                }
+            }
+        }
+        appendAudit('admin', 'kick-player', `后台踢出(关页)玩家 ${name} (${userId})`);
+        res.json({ success: true, message: `已踢出玩家「${name}」，其游戏页面将被关闭` });
+    } catch (e) {
+        console.error('[API] 踢出玩家失败:', e.message);
+        res.status(500).json({ success: false, message: '踢出失败' });
+    }
+});
+
 // API: 管理员按 IP 封禁（该 IP 下所有玩家全部功能禁用，并强制弹出全屏封禁框）
 app.post('/api/admin/ban-ip', requireAdminAuth, (req, res) => {
     try {
@@ -2314,6 +2355,200 @@ io.on('connection', (socket) => {
             console.error('[role] admin-set-role 处理出错:', e.message);
             socket.emit('admin-set-role-result', { success: false, message: e.message });
         }
+    });
+
+    // ===== 游戏内超级管理员：复用改角色同源鉴权，扩展其余后台管理能力 =====
+    // 统一鉴权：仅“游戏内超级管理员”（getUserRole 校验为 superadmin）可执行这些通道
+    function assertSuperadminOp(requesterId) {
+        return !!(requesterId && getUserRole(requesterId) === 'superadmin');
+    }
+    function saLiveSocket(userId) {
+        const sockId = onlineSockets.get(userId);
+        if (!sockId || sockId === 'rest') return null;
+        return io.sockets.sockets.get(sockId) || null;
+    }
+
+    // 改名（不消耗金币，实时生效）
+    socket.on('admin-rename', (data) => {
+        try {
+            const { requesterId, targetId, name } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            if (!name || !String(name).trim()) return socket.emit('admin-action-result', { success: false, message: '昵称不能为空' });
+            const newName = String(name).trim().slice(0, 30);
+            const op = onlinePlayers.get(targetId);
+            if (op) { op.name = newName; onlinePlayers.set(targetId, op); }
+            for (const room of rooms.values()) {
+                if (room.players && room.players.has(targetId)) {
+                    const rp = room.players.get(targetId);
+                    rp.name = newName; room.players.set(targetId, rp);
+                }
+            }
+            savePlayerProfile(targetId, { username: newName });
+            const s = saLiveSocket(targetId);
+            if (s) s.emit('name-changed', { name: newName, byAdmin: true });
+            appendAudit('superadmin', 'rename', `（游戏内超级管理员 ${requesterId}）将 ${targetId} 改名为 ${newName}`);
+            socket.emit('admin-action-result', { success: true, message: `已将 ${targetId} 改名为 ${newName}` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 踢出（强制关闭标签页）
+    socket.on('admin-kick', (data) => {
+        try {
+            const { requesterId, targetId, reason } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            if (targetId === requesterId) return socket.emit('admin-action-result', { success: false, message: '不能踢出自己' });
+            const r = (reason && String(reason).trim()) || '你已被管理员踢出。';
+            const p = onlinePlayers.get(targetId);
+            const nm = (p && p.name) ? p.name : targetId;
+            const playerSocket = saLiveSocket(targetId);
+            if (!playerSocket) return socket.emit('admin-action-result', { success: false, message: `玩家「${nm}」当前不在线` });
+            playerSocket.emit('admin-kick-tab', { message: r, close: true });
+            setTimeout(() => { try { playerSocket.disconnect(true); } catch (_) {} }, 600);
+            for (const [roomId, room] of rooms) {
+                if (room.players && room.players.has(targetId)) {
+                    const rp = room.players.get(targetId);
+                    room.players.delete(targetId);
+                    io.to(roomId).emit('player-kicked-by-admin', { playerName: nm });
+                    if (rp.isHost && rp.socketId === room.actualHost && room.players.size > 0) {
+                        const nh = room.players.values().next().value;
+                        nh.isHost = true; room.actualHost = nh.socketId;
+                        io.to(nh.socketId).emit('promoted-to-host', { roomId: room.id, message: '原房主被踢出，你已成为新任房主。' });
+                        io.to(roomId).emit('room-updated', { type: 'host-changed', newHostName: nh.name });
+                    }
+                }
+            }
+            appendAudit('superadmin', 'kick-player', `（游戏内SA）踢出玩家 ${nm} (${targetId})`);
+            socket.emit('admin-action-result', { success: true, message: `已踢出「${nm}」` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 封禁/解封（多人/单人/解密/聊天）
+    socket.on('admin-ban', (data) => {
+        try {
+            const { requesterId, targetId, type, banned, reason } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            if (!['multiplayer', 'single', 'puzzle', 'chat'].includes(type)) return socket.emit('admin-action-result', { success: false, message: '类型无效' });
+            const userId = resolveUserId(targetId);
+            const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+            if (!ban.reasons) ban.reasons = {};
+            ban[type] = !!banned;
+            ban.reasons[type] = banned ? ((reason && String(reason).trim()) || '') : '';
+            userBans.set(userId, ban);
+            const sock = saLiveSocket(userId);
+            if (sock) sock.emit('ban-update', {
+                multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle, chat: !!ban.chat,
+                multiplayerReason: ban.reasons.multiplayer || '', singleReason: ban.reasons.single || '',
+                puzzleReason: ban.reasons.puzzle || '', chatReason: ban.reasons.chat || ''
+            });
+            const label = { multiplayer: '多人游戏', single: '单人游戏', puzzle: '解密游戏', chat: '多人聊天' }[type];
+            appendAudit('superadmin', 'ban', `（游戏内SA）用户 ${userId} 的${label}${banned ? '封禁' : '解封'}`);
+            socket.emit('admin-action-result', { success: true, message: `已${banned ? '封禁' : '解封'} ${userId} 的${label}` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 单人 + 解密全部通关，并授予 迷宫大师 + 解密高手
+    socket.on('admin-complete-all', (data) => {
+        try {
+            const { requesterId, targetId } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            const completedLevels = []; for (let i = 1; i <= MAX_SINGLE_LEVEL; i++) completedLevels.push(i);
+            const puzzleCompletedLevels = []; for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) puzzleCompletedLevels.push(i);
+            mergeProgress(targetId, { unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels });
+            const cur = reportedAchievements.get(targetId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
+            cur.allLevelsCompleted = true; cur.puzzleMaster = true;
+            reportedAchievements.set(targetId, cur);
+            const revoked = revokedAchievements.get(targetId);
+            if (revoked) { revoked.delete('allLevelsCompleted'); revoked.delete('puzzleMaster'); if (revoked.size === 0) revokedAchievements.delete(targetId); else revokedAchievements.set(targetId, revoked); }
+            io.emit('achievement-update', { clientId: targetId, achievements: cur });
+            io.emit('progress-update', { clientId: targetId, unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels });
+            appendAudit('superadmin', 'complete-all', `（游戏内SA）将 ${targetId} 单人/解密全部通关`);
+            socket.emit('admin-action-result', { success: true, message: `已将 ${targetId} 单人、解密全部通关` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 读取某玩家 UI 设置（供游戏内超管面板编辑）
+    socket.on('admin-get-settings', (data) => {
+        try {
+            const { requesterId, targetId } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            const rec = userSettings.get(targetId) || { admin: null, client: null };
+            socket.emit('admin-user-settings', { targetId, settings: getEffectiveUISettings(targetId), adminOverridden: !!rec.admin, clientSettings: rec.client || null });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 保存某玩家 UI 设置（管理员覆盖）
+    socket.on('admin-save-settings', (data) => {
+        try {
+            const { requesterId, targetId, settings } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            setAdminUISettings(targetId, (settings === null ? null : settings));
+            const eff = getEffectiveUISettings(targetId);
+            const s = saLiveSocket(targetId);
+            if (s) try { s.emit('settings-update', { uiSettings: eff, adminOverridden: true }); } catch (_) {}
+            appendAudit('superadmin', 'user-settings', `（游戏内SA）修改 ${targetId} 的 UI 设置`);
+            socket.emit('admin-action-result', { success: true, message: `已保存 ${targetId} 的设置` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 按玩家在线 IP 封禁（该 IP 下所有玩家全部功能禁用 + 强制弹窗），仅游戏内超级管理员
+    socket.on('admin-ban-ip', (data) => {
+        try {
+            const { requesterId, targetId, reason } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            const p = onlinePlayers.get(targetId);
+            const ip = (p && p.ip) || (data && data.ip);
+            if (!ip) return socket.emit('admin-action-result', { success: false, message: '无法获取该玩家 IP（可能已离线）' });
+            const ipKey = String(ip).trim();
+            bannedIPs.set(ipKey, { reason: (reason && String(reason).trim()) || '', bannedAt: new Date().toISOString() });
+            const msg = 'IP 封禁：' + ((reason && String(reason).trim()) || '管理员封禁此 IP');
+            for (const [uid, pl] of onlinePlayers.entries()) {
+                if (pl && pl.ip === ipKey) {
+                    const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+                    if (!ban.reasons) ban.reasons = {};
+                    ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
+                    ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
+                    userBans.set(uid, ban);
+                    const s = saLiveSocket(uid);
+                    if (s) s.emit('ip-banned', { reason: msg, permanent: true });
+                }
+            }
+            appendAudit('superadmin', 'ban-ip', `（游戏内SA）封禁 IP ${ipKey}`);
+            socket.emit('admin-action-result', { success: true, message: `已封禁 IP ${ipKey}` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
+    });
+
+    // 解除按玩家 IP 的封禁（其下玩家恢复全部功能），仅游戏内超级管理员
+    socket.on('admin-unban-ip', (data) => {
+        try {
+            const { requesterId, targetId } = data || {};
+            if (!assertSuperadminOp(requesterId)) return;
+            if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
+            const p = onlinePlayers.get(targetId);
+            const ip = (p && p.ip) || (data && data.ip);
+            if (!ip) return socket.emit('admin-action-result', { success: false, message: '无法获取该玩家 IP' });
+            const ipKey = String(ip).trim();
+            bannedIPs.delete(ipKey);
+            for (const [uid, pl] of onlinePlayers.entries()) {
+                if (pl && pl.ip === ipKey) {
+                    const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+                    if (!ban.reasons) ban.reasons = {};
+                    ban.multiplayer = ban.single = ban.puzzle = ban.chat = false;
+                    ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = '';
+                    userBans.set(uid, ban);
+                    const s = saLiveSocket(uid);
+                    if (s) s.emit('ip-unbanned', {});
+                }
+            }
+            appendAudit('superadmin', 'unban-ip', `（游戏内SA）解封 IP ${ipKey}`);
+            socket.emit('admin-action-result', { success: true, message: `已解封 IP ${ipKey}` });
+        } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
 
     // ===== 新增：多人游戏真实玩家注册（供管理后台 /api/users 聚合在线用户） =====
