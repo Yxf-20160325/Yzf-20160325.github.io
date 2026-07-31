@@ -23,9 +23,18 @@ let adminDisabled = false;               // 是否禁用普通管理员登录
 let gameAccessDisabled = false;          // 是否对游戏页面返回 403
 
 const SUPERADMIN_PASSWORD_PATH = path.join(__dirname, 'superadmin-password.txt');
-const ADMIN_STATE_FILE = path.join(__dirname, 'data', 'admin-state.json');
-const AUDIT_FILE = path.join(__dirname, 'data', 'admin-audit.log');
-const TELEMETRY_FILE = path.join(__dirname, 'data', 'telemetry.log');
+// 数据目录：默认 ./data；部署到会清空运行目录的平台（如 onrender 免费版每次部署/冷启会清空运行时文件）时，
+// 可通过环境变量 DATA_DIR 指向一块「持久磁盘」，否则遥测/审计会在重启后丢失。
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const ADMIN_STATE_FILE = path.join(DATA_DIR, 'admin-state.json');
+const AUDIT_FILE = path.join(DATA_DIR, 'admin-audit.log');
+const TELEMETRY_FILE = path.join(DATA_DIR, 'telemetry.log');
+
+// 确保数据目录存在：避免部署后 data/ 不存在导致 append 静默失败（接口仍返回 success，但什么都没存）
+function ensureDataDir() {
+    try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); }
+    catch (e) { console.error('[Data] 创建数据目录失败:', DATA_DIR, '->', e.message); }
+}
 
 // 超级管理员密码初始化（默认 11dev），仅首次启动创建一次
 function initializeSuperAdminPassword() {
@@ -47,6 +56,7 @@ function loadAdminState() {
     } catch (e) { console.error('[State] 加载管理状态失败:', e.message); }
 }
 function saveAdminState() {
+    ensureDataDir();
     try { fs.writeFileSync(ADMIN_STATE_FILE, JSON.stringify({ adminDisabled, gameAccessDisabled })); }
     catch (e) { console.error('[State] 保存管理状态失败:', e.message); }
 }
@@ -54,7 +64,9 @@ function saveAdminState() {
 // 审计日志：记录谁(actor)在什么时间做了什么(action)
 function appendAudit(actor, action, detail) {
     const entry = { ts: new Date().toISOString(), actor, action, detail: detail || '' };
-    try { fs.appendFileSync(AUDIT_FILE, JSON.stringify(entry) + '\n'); } catch (e) {}
+    ensureDataDir();
+    try { fs.appendFileSync(AUDIT_FILE, JSON.stringify(entry) + '\n'); }
+    catch (e) { console.error('[审计] 写入失败:', e.message); }
     console.log('[审计]', entry.ts, actor, action, detail || '');
 }
 function readAudit(limit) {
@@ -67,8 +79,11 @@ function readAudit(limit) {
 }
 
 // 遥测数据：记录客户端上报的用户操作（需用户同意后才会上报）
+// 返回 true/false，便于接口在写入失败时如实返回，而不是假成功
 function appendTelemetry(entry) {
-    try { fs.appendFileSync(TELEMETRY_FILE, JSON.stringify(entry) + '\n'); } catch (e) {}
+    ensureDataDir();
+    try { fs.appendFileSync(TELEMETRY_FILE, JSON.stringify(entry) + '\n'); return true; }
+    catch (e) { console.error('[遥测] 写入失败:', e.message); return false; }
 }
 function readTelemetry(limit, clientId) {
     try {
@@ -155,6 +170,30 @@ const userCoins = new Map(); // 用户金币余额（按 userId 存储，管理�
 const userLevels = new Map(); // 用户等级（预留；游戏当前无升级系统，恒为 1，仅供兼容）
 // 玩家真实金币（客户端上报，供管理员查看；与 userCoins 分开，避免覆盖管理员账本语义）
 const reportedCoins = new Map();
+// 玩家档案（客户端上报的 IP / 金币 / 时长 / 统计 / 游戏状态快照；持久保存最近一次，供管理后台离线查看）
+const playerProfiles = new Map();
+
+// 从请求中解析客户端 IP（兼容反向代理 x-forwarded-for）
+function getClientIp(req) {
+    try {
+        const xff = req.headers && req.headers['x-forwarded-for'];
+        if (xff) {
+            const first = String(xff).split(',')[0].trim();
+            if (first) return first;
+        }
+        return (req.socket && req.socket.remoteAddress) || req.ip || '';
+    } catch (e) { return ''; }
+}
+
+// 合并/更新玩家档案（保留历史 IP 与最近一次上报的字段）
+function savePlayerProfile(id, fields) {
+    try {
+        const prev = playerProfiles.get(id) || {};
+        const next = Object.assign({}, prev, fields);
+        next.lastSeen = Date.now();
+        playerProfiles.set(id, next);
+    } catch (e) {}
+}
 
 // ===== 新增：管理后台数据（用户访问控制 / 功能控制 / 在线玩家映射 / 热门迷宫） =====
 const userAccess = new Map();      // userId -> 页面访问权限设置
@@ -632,13 +671,14 @@ app.post('/api/telemetry', (req, res) => {
         if (!clientId || !event) {
             return res.status(400).json({ success: false, message: '缺少 clientId 或 event' });
         }
-        appendTelemetry({
+        const ok = appendTelemetry({
             ts: new Date().toISOString(),
             clientId: String(clientId),
             name: name ? String(name).slice(0, 30) : '',
             event: String(event).slice(0, 60),
             detail: detail != null ? String(detail).slice(0, 500) : ''
         });
+        if (!ok) return res.status(500).json({ success: false, message: '遥测写入失败（服务器磁盘不可写）' });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, message: '上报失败' });
@@ -763,7 +803,7 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements } = req.body || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
         const existing = onlinePlayers.get(id) || {};
         // 记录玩家上报的真实金币（供管理员查看）
@@ -773,15 +813,26 @@ app.post('/api/player-online', (req, res) => {
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
         // 记录玩家上报的成就数据（供管理员查看）
         if (achievements) mergeAchievements(id, achievements);
+        const ip = getClientIp(req);
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
             socketId: existing.socketId || null,   // 保留 socket 通道写入的连接标识
             roomId: existing.roomId || null,
-            joinedAt: existing.joinedAt || Date.now()
+            joinedAt: existing.joinedAt || Date.now(),
+            ip: ip
         });
         onlineSockets.set(id, 'rest');
-        console.log(`[Online] 玩家 ${name} (${id}) 上线(REST)，当前在线 ${onlinePlayers.size} 人`);
+        // 持久化玩家档案（IP / 金币 / 时长 / 统计 / 游戏状态），供管理后台查看
+        savePlayerProfile(id, {
+            ip: ip,
+            coins: isNaN(rc) ? (prevCoins(id)) : Math.max(0, rc),
+            totalPlayTime: (typeof totalPlayTime === 'number') ? totalPlayTime : (prevPlayTime(id)),
+            gameStats: (gameStats && typeof gameStats === 'object') ? gameStats : (prevStats(id)),
+            gamestate: (gamestate && typeof gamestate === 'object') ? gamestate : (prevGamestate(id)),
+            username: (name && String(name).trim()) || existing.name || '玩家'
+        });
+        console.log(`[Online] 玩家 ${name} (${id}) 上线(REST)，IP ${ip}，当前在线 ${onlinePlayers.size} 人`);
         // 把服务端已存（含管理员“全部通关”授予）的进度回传，客户端据此合入本地
         const prog = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
         res.json({
@@ -796,6 +847,12 @@ app.post('/api/player-online', (req, res) => {
         res.json({ success: false, message: e.message });
     }
 });
+
+// 从已存档案中读取历史字段（上报不全时回退，避免清掉已有数据）
+function prevCoins(id) { const p = playerProfiles.get(id); return p && typeof p.coins === 'number' ? p.coins : 0; }
+function prevPlayTime(id) { const p = playerProfiles.get(id); return p && typeof p.totalPlayTime === 'number' ? p.totalPlayTime : 0; }
+function prevStats(id) { const p = playerProfiles.get(id); return p && p.gameStats ? p.gameStats : null; }
+function prevGamestate(id) { const p = playerProfiles.get(id); return p && p.gamestate ? p.gamestate : null; }
 
 // API: 玩家下线（开放接口）
 app.post('/api/player-offline', (req, res) => {
@@ -839,6 +896,39 @@ app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
     } catch (error) {
         console.error('[API] 调整金币失败:', error);
         res.status(500).json({ success: false, message: '调整金币失败' });
+    }
+});
+
+// API: 获取用户详细信息（管理员专用）：封禁、IP、金币、游戏时长、gamestate、统计
+app.get('/api/admin/users/:userId/info', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+        if (!ban.reasons) ban.reasons = {};
+        const prof = playerProfiles.get(userId) || {};
+        const p = onlinePlayers.get(userId);
+        res.json({
+            success: true,
+            clientId: userId,
+            username: prof.username || (p && p.name) || '',
+            online: !!p,
+            ip: prof.ip || (p && p.ip) || '',
+            coins: (typeof prof.coins === 'number') ? prof.coins : (reportedCoins.get(userId) || 0),
+            totalPlayTime: (typeof prof.totalPlayTime === 'number') ? prof.totalPlayTime : 0,
+            gameStats: prof.gameStats || null,
+            gamestate: prof.gamestate || null,
+            bans: {
+                multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle, chat: !!ban.chat,
+                reasons: {
+                    multiplayer: ban.reasons.multiplayer || '',
+                    single: ban.reasons.single || '',
+                    puzzle: ban.reasons.puzzle || '',
+                    chat: ban.reasons.chat || ''
+                }
+            }
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取失败' });
     }
 });
 
@@ -1568,21 +1658,31 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements } = data || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate } = data || {};
         if (!id) return;
+        const ip = getClientIp(req);
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || '玩家',
             socketId: socket.id,
             roomId: null,
-            joinedAt: Date.now()
+            joinedAt: Date.now(),
+            ip: ip
         });
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
         if (achievements) mergeAchievements(id, achievements);
+        savePlayerProfile(id, {
+            ip: ip,
+            coins: isNaN(rc) ? prevCoins(id) : Math.max(0, rc),
+            totalPlayTime: (typeof totalPlayTime === 'number') ? totalPlayTime : prevPlayTime(id),
+            gameStats: (gameStats && typeof gameStats === 'object') ? gameStats : prevStats(id),
+            gamestate: (gamestate && typeof gamestate === 'object') ? gamestate : prevGamestate(id),
+            username: (name && String(name).trim()) || '玩家'
+        });
             onlineSockets.set(id, socket.id);
-            console.log(`[Online] 玩家 ${name} (${id}) 上线，当前在线 ${onlinePlayers.size} 人`);
+            console.log(`[Online] 玩家 ${name} (${id}) 上线，IP ${ip}，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
             console.error('[Online] player-online 处理出错:', e.message);
         }
