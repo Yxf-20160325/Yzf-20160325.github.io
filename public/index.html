@@ -3346,14 +3346,14 @@
 
         <!-- 新 UI：标签页布局 -->
         <div id="mainMenuNewUI">
+            <div class="ui-new-hint">
+                <span>我们做出了一个新UI，如果想要切换请点击旁边按钮</span>
+                <button type="button" class="ui-rollback-btn" onclick="switchToOldUI()">回退</button>
+            </div>
             <div class="main-tabs" id="mainTabs">
                 <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">开始</button>
                 <button class="main-tab" data-tab="mine" onclick="switchMainTab('mine')">我的</button>
                 <button class="main-tab" data-tab="more" onclick="switchMainTab('more')">更多</button>
-            </div>
-            <div class="ui-new-hint">
-                <span>我们做出了一个新UI，如果想要切换请点击旁边按钮</span>
-                <button type="button" class="ui-rollback-btn" onclick="switchToOldUI()">回退</button>
             </div>
             <div class="main-tab-panels">
                 <div class="main-tab-panel active" data-tab="start">
@@ -3378,6 +3378,7 @@
 
         <!-- 旧 UI：平铺布局（默认隐藏，由 uiMode 控制显示） -->
         <div id="mainMenuOldUI" style="display:none;">
+            <button class="menu-button ui-switch-new-btn" onclick="switchToNewUI()">✨ 切换到新UI</button>
             <div class="playTimeDisplay game-info" style="margin: 15px auto; display: inline-block;"></div>
             <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
             <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
@@ -3389,7 +3390,6 @@
             <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
             <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
             <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🛠️ 控制台</button>
-            <button class="menu-button ui-switch-new-btn" onclick="switchToNewUI()">✨ 切换到新UI</button>
         </div>
     </div>
     
@@ -4344,6 +4344,8 @@ function applyGlobalFunctions(settings) {
     document.querySelectorAll('button[onclick="checkServerBeforeMultiplayer()"]').forEach(b => b.style.display = g.multiplayer ? '' : 'none');
     // 调试信息：通过 refreshDevUI 重新评估可见性
     if (typeof refreshDevUI === 'function') refreshDevUI();
+    // 全局「使用新UI」策略变化后，立即刷新主菜单布局与切换按钮锁定状态
+    if (typeof applyMainMenuUiMode === 'function') applyMainMenuUiMode();
     console.log('[功能设定] 已应用全局功能开关:', window.globalFunctionControl);
 }
 
@@ -8612,11 +8614,18 @@ function switchMainTab(tab) {
 }
 
 // ===== 新旧 UI 模式切换 =====
+function getForcedUiMode() {
+    const g = window.__globalUiMode || { mode: 'always', prob: 100 };
+    if (g.mode === 'always') return 'new';   // 永久使用新UI → 锁定新，禁止回退
+    if (g.mode === 'never') return 'old';    // 永久使用旧UI → 锁定旧，禁止切换新UI
+    return null; // 未强制，用户可自由切换
+}
 function resolveUiMode() {
+    const forced = getForcedUiMode();
+    if (forced) return forced; // 全局策略强制锁定，忽略用户的 uiMode
     const s = (gameState.uiSettings && typeof gameState.uiSettings === 'object') ? gameState.uiSettings : {};
     if (s.uiMode === 'new' || s.uiMode === 'old') return s.uiMode;
     const g = window.__globalUiMode || { mode: 'always', prob: 100 };
-    if (g.mode === 'never') return 'old';
     if (g.mode === 'probability') return (Math.random() * 100 < (g.prob == null ? 100 : g.prob)) ? 'new' : 'old';
     return 'new';
 }
@@ -8631,8 +8640,16 @@ function applyMainMenuUiMode() {
         newUI.style.display = '';
         oldUI.style.display = 'none';
     }
+    // 锁定逻辑：永久新UI 不允许回退；永久旧UI 不允许切换新UI
+    const forced = getForcedUiMode();
+    const rollbackBtn = document.querySelector('.ui-rollback-btn');
+    const switchNewBtn = document.querySelector('.ui-switch-new-btn');
+    if (rollbackBtn) rollbackBtn.style.display = (forced === 'new') ? 'none' : '';
+    if (switchNewBtn) switchNewBtn.style.display = (forced === 'old') ? 'none' : '';
 }
 function setUserUiMode(mode) {
+    const forced = getForcedUiMode();
+    if (forced && forced !== mode) return; // 被全局策略锁定，禁止朝反方向切换
     if (!gameState.uiSettings || typeof gameState.uiSettings !== 'object') gameState.uiSettings = {};
     gameState.uiSettings.uiMode = mode;
     try { localStorage.setItem('uiSettings', JSON.stringify(Object.assign({}, gameState.uiSettings, { customMusic: [] }))); } catch (e) {}
@@ -10996,7 +11013,12 @@ function showUISettings() {
 
             // 界面模式（新/旧 UI）
             const uiMode = (settings && settings.uiMode) || 'new';
-            document.querySelectorAll('input[name="uiMode"]').forEach(function (r) { r.checked = (r.value === uiMode); });
+            const forcedUi = (typeof getForcedUiMode === 'function') ? getForcedUiMode() : null;
+            const effectiveUiMode = forcedUi || uiMode;
+            document.querySelectorAll('input[name="uiMode"]').forEach(function (r) {
+                r.checked = (r.value === effectiveUiMode);
+                r.disabled = !!forcedUi; // 全局锁定后禁止在设置里更改
+            });
             
             // 加载音乐设置
             document.getElementById('musicEnabledCheckbox').checked = settings.musicEnabled;
@@ -11793,8 +11815,9 @@ function showUISettings() {
             customY: customY,
             // 保存自定义音乐，如果存在的话
             customMusic: oldSettings.customMusic || [],
-            // 界面模式（新/旧 UI）
-            uiMode: (document.querySelector('input[name="uiMode"]:checked') || {}).value || (oldSettings.uiMode || 'new')
+            // 界面模式（新/旧 UI）：被全局策略锁定时不覆盖，沿用原值
+            uiMode: getForcedUiMode() ? (oldSettings.uiMode || 'new')
+                : ((document.querySelector('input[name="uiMode"]:checked') || {}).value || (oldSettings.uiMode || 'new'))
             };
             // 把新设置上传到服务器（供管理员后台查看/覆盖）
             uploadUISettingsToServer();
@@ -21637,13 +21660,26 @@ window.closeConsolePasswordModal = function() {
 
 window.checkConsolePassword = function() {
     try {
-        // 直接绕过密码验证，显示提示并打开控制台
-        alert('控制台已打开');
-        window.closeConsolePasswordModal();
-        window.openConsoleModal();
+        const input = document.getElementById('consolePasswordInput');
+        if (!input) {
+            console.error('未找到密码输入框');
+            alert('未找到密码输入框，请刷新页面重试');
+            return;
+        }
+        const password = input.value;
+        // 校验控制台密码（与历史版本保持一致，默认 dev）
+        if (password === 'dev') {
+            window.closeConsolePasswordModal();
+            window.openConsoleModal();
+        } else {
+            console.log('[控制台] 密码错误');
+            alert('密码错误！');
+            input.value = '';
+            input.focus();
+        }
     } catch (e) {
-        console.error('打开控制台时出错:', e);
-        alert('打开控制台时出错: ' + e.message);
+        console.error('验证密码时出错:', e);
+        alert('验证密码时出错: ' + e.message);
     }
 };
 
