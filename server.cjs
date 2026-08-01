@@ -251,7 +251,8 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     multiplayer: true,
     debugInfo: true,
     f12DevConsole: true,
-    ctrlShiftCD: true
+    ctrlShiftCD: true,
+    newUi: { mode: 'always', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
 
@@ -456,7 +457,8 @@ const DEFAULT_UI_SETTINGS = {
     joystickSensitivity: 5,
     joystickDeadZone: 15,
     joystickRadius: 70,
-    joystickPosition: 'bottom-right'
+    joystickPosition: 'bottom-right',
+    uiMode: 'new'
 };
 // 结构：userId -> { admin: <obj|null>, client: <obj|null> }
 // admin 为管理员远程设置的覆盖项；client 为客户端最近一次上报的设置。
@@ -3792,6 +3794,16 @@ app.put('/api/admin/global-functions', requireAdminAuth, (req, res) => {
         const next = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
         for (const k of validKeys) {
             if (typeof body[k] === 'boolean') next[k] = body[k];
+        }
+        // 新增：处理「使用新UI」策略（对象，非布尔）
+        if (body.newUi && typeof body.newUi === 'object') {
+            const m = body.newUi.mode;
+            if (m === 'always' || m === 'never' || m === 'probability') {
+                let prob = parseInt(body.newUi.prob, 10);
+                if (isNaN(prob)) prob = (m === 'probability') ? 100 : (GLOBAL_FUNCTIONS_DEFAULT.newUi ? GLOBAL_FUNCTIONS_DEFAULT.newUi.prob : 100);
+                prob = Math.max(0, Math.min(100, prob));
+                next.newUi = { mode: m, prob: prob };
+            }
         }
         globalFunctions = next;
         saveGlobalFunctions();
