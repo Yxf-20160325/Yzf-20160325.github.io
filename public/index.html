@@ -3244,7 +3244,6 @@
         <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
         <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
         <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
-        <button class="menu-button" onclick="showMyHomeProfileModal()">📋 我的主页</button>
         <button class="menu-button" onclick="showInstructions()">📖 游戏说明</button>
         <div id="playTimeDisplay" class="game-info" style="margin: 15px auto; display: inline-block;"></div>
         <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
@@ -4478,6 +4477,8 @@ function connectNotificationSocket() {
             registerPlayerOnline();
             // 上报个人主页（emoji+颜色头像/简介），供多人联机他人查看
             emitMyProfile();
+            // 拉取管理员下发的「能否查看他人主页」权限
+            refreshMyProfilePermissions();
             // 拉取管理员配置的全局功能开关并应用
             fetchGlobalFunctions();
             // 心跳：每 15 秒刷新一次在线状态，避免被 onrender 空闲超时 / 连接抖动清理
@@ -4683,6 +4684,11 @@ function connectNotificationSocket() {
             if (!data || !data.clientId) return;
             if (!window.playerProfiles) window.playerProfiles = {};
             window.playerProfiles[String(data.clientId)] = data;
+            // 若更新的是自己的主页，同步「能否查看他人主页」权限
+            if (gameState.clientId && String(data.clientId) === String(gameState.clientId)) {
+                if (!window.myHomeProfile) window.myHomeProfile = loadHomeProfile();
+                window.myHomeProfile.canViewOthers = (data.canViewOthers !== false);
+            }
             if (typeof refreshOpenProfileModal === 'function') refreshOpenProfileModal(String(data.clientId), data);
         });
 
@@ -4976,7 +4982,9 @@ function saveHomeProfileLocal(p) {
     window.myHomeProfile = {
         avatar: (p && p.avatar) ? String(p.avatar).slice(0, 8) : '😀',
         color: (p && p.color && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(p.color)) ? p.color : '#4CAF50',
-        bio: (p && p.bio) ? String(p.bio).slice(0, 200) : ''
+        bio: (p && p.bio) ? String(p.bio).slice(0, 200) : '',
+        // 保留管理员下发的「能否查看他人主页」权限（默认允许）
+        canViewOthers: (window.myHomeProfile && typeof window.myHomeProfile.canViewOthers === 'boolean') ? window.myHomeProfile.canViewOthers : true
     };
     try { localStorage.setItem('maze_home_profile', JSON.stringify(window.myHomeProfile)); } catch (e) {}
     return window.myHomeProfile;
@@ -4994,11 +5002,31 @@ function emitMyProfile() {
         bio: p.bio || ''
     });
 }
+// 拉取管理员下发的「能否查看他人主页」权限（默认允许）
+function refreshMyProfilePermissions() {
+    if (!gameState.clientId) return;
+    if (!window.myHomeProfile) window.myHomeProfile = loadHomeProfile();
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/profile/' + encodeURIComponent(gameState.clientId))
+        .then(r => r.json()).then(d => {
+            window.myHomeProfile.canViewOthers = (d && d.success && d.profile && d.profile.canViewOthers !== false);
+        })
+        .catch(() => { if (window.myHomeProfile.canViewOthers === undefined) window.myHomeProfile.canViewOthers = true; });
+}
 
 // 查看他人个人主页（全屏 modal）
 function showPlayerProfileModal(clientId, name) {
     clientId = clientId || '';
     name = name || '';
+    // 权限校验：若当前玩家被管理员禁止查看他人主页，则拦截
+    if (window.myHomeProfile && window.myHomeProfile.canViewOthers === false) {
+        const m = document.createElement('div');
+        m.id = 'playerProfileModal';
+        m.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
+        m.innerHTML = `<div style="background:#fff;color:#222;border-radius:12px;max-width:420px;width:90%;padding:28px;text-align:center;position:relative;"><button onclick="closePlayerProfileModal()" style="position:absolute;top:10px;right:14px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button><div style="font-size:48px;margin-bottom:12px;">🔒</div><div style="font-size:18px;font-weight:bold;">暂无权限查看他人主页</div><div style="font-size:14px;color:#666;margin-top:10px;">你的账号已被管理员设置为不可查看其他玩家的个人主页。</div><div style="margin-top:18px;"><button onclick="closePlayerProfileModal()" style="padding:8px 20px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭</button></div></div>`;
+        document.body.appendChild(m);
+        return;
+    }
     const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const existing = document.getElementById('playerProfileModal');
     if (existing) existing.remove();
@@ -6099,6 +6127,42 @@ function showMyInfoModal() {
     coinHint.style.cssText = 'color:#90a4ae;font-size:12px;margin-top:10px;text-align:center;';
     coinHint.textContent = '当前金币：' + gameState.coins + ' ｜ 改名费用：' + renameCost + ' 金币';
     renameWrap.appendChild(coinHint);
+
+    // ===== 个人主页（合并进「我的信息」）=====
+    const homeWrap = document.createElement('div');
+    homeWrap.style.cssText = 'margin-top:20px;padding-top:18px;border-top:1px dashed rgba(79,195,247,0.4);';
+    box.appendChild(homeWrap);
+
+    const homeTitle = document.createElement('div');
+    homeTitle.style.cssText = 'color:#e0e0e0;font-size:15px;font-weight:bold;margin:0 0 10px 0;border-left:4px solid #4fc3f7;padding-left:8px;';
+    homeTitle.textContent = '📋 我的个人主页';
+    homeWrap.appendChild(homeTitle);
+
+    const hp = (window.myHomeProfile) || loadHomeProfile() || {};
+    const homePreview = document.createElement('div');
+    homePreview.style.cssText = 'background:rgba(0,0,0,0.25);border-radius:10px;padding:14px;font-size:14px;line-height:1.6;color:#e0e0e0;display:flex;align-items:center;gap:12px;margin-bottom:12px;';
+    const avatarSpan = document.createElement('span');
+    avatarSpan.style.cssText = 'font-size:34px;';
+    avatarSpan.textContent = hp.avatar || '😀';
+    const infoSpan = document.createElement('span');
+    infoSpan.style.cssText = 'flex:1;';
+    const nameLine = document.createElement('div');
+    nameLine.style.cssText = 'color:#4fc3f7;font-weight:bold;';
+    nameLine.textContent = gameState.playerName;
+    const bioLine = document.createElement('div');
+    bioLine.style.cssText = 'color:#cfd8dc;white-space:pre-wrap;word-break:break-word;';
+    bioLine.textContent = (hp.bio && hp.bio.trim()) ? ('简介：' + hp.bio) : '（未设置简介）';
+    infoSpan.appendChild(nameLine);
+    infoSpan.appendChild(bioLine);
+    homePreview.appendChild(avatarSpan);
+    homePreview.appendChild(infoSpan);
+    homeWrap.appendChild(homePreview);
+
+    const homeEditBtn = document.createElement('button');
+    homeEditBtn.textContent = '✏️ 编辑我的主页';
+    homeEditBtn.style.cssText = 'padding:11px 24px;background:linear-gradient(135deg,#4CAF50,#2e7d32);color:white;border:none;border-radius:25px;cursor:pointer;font-size:15px;font-weight:bold;';
+    homeEditBtn.onclick = () => { overlay.remove(); showMyHomeProfileModal(); };
+    homeWrap.appendChild(homeEditBtn);
 
     const btn = document.createElement('button');
     btn.textContent = '关闭';
