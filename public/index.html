@@ -7744,6 +7744,7 @@ function startPuzzleLevel(level) {
     gameState.isCustomMaze = true;
     gameState.isPreviewMode = false;
     gameState.currentLevel = 'puzzle';
+    gameState.currentChallenge = 'puzzle'; // 解密关：标记为 puzzle，避免被误判为每日挑战
     gameState.puzzleCurrentLevel = level;
     
     // 初始化游戏状态
@@ -9049,6 +9050,8 @@ function showScreen(screenId) {
                 saveDailyChallenge();
                 showNotification('🎉 每日挑战完成！', 3000);
             }
+            // 本关结算后清除每日挑战标记，避免污染后续普通关卡（否则后续通关会误判为每日挑战完成）
+            gameState.currentChallenge = null;
         }
         
         function claimDailyReward() {
@@ -13554,6 +13557,7 @@ function isValidPosition(x, y) {
                 continueButton.className = 'level-button continue';
                 continueButton.textContent = `接着玩关卡 ${saveData.currentLevel}`;
                 continueButton.onclick = () => {
+                    gameState.currentChallenge = null; // 普通关：清除每日挑战残留标记
                     loadGame();
                     showScreen('singlePlayerGame');
                 };
@@ -13567,6 +13571,7 @@ function isValidPosition(x, y) {
                 // 使用当前最大关卡数+1作为新关卡
                 const currentLevels = Math.max(1, ...gameState.completedLevels, gameState.unlockedLevel);
                 gameState.currentLevel = currentLevels;
+                gameState.currentChallenge = null; // 普通关：清除每日挑战残留标记
                 showScreen('singlePlayerGame');
             };
             container.appendChild(newLevelButton);
@@ -13584,6 +13589,7 @@ function isValidPosition(x, y) {
                     levelButton.textContent = level;
                     levelButton.onclick = () => {
                         gameState.currentLevel = level;
+                        gameState.currentChallenge = null; // 普通关：清除每日挑战残留标记
                         showScreen('singlePlayerGame');
                     };
                     historyDiv.appendChild(levelButton);
