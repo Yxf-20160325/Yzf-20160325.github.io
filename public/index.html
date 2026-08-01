@@ -566,56 +566,6 @@
             display: none !important;
         }
         
-        /* 游戏说明弹窗 */
-        .instructions-modal {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(0, 0, 0, 0.9);
-            padding: 30px;
-            border-radius: 15px;
-            width: 80%;
-            max-width: 600px;
-            z-index: 1000;
-            box-shadow: 0 0 40px rgba(76, 175, 80, 0.7);
-            border: 2px solid #4CAF50;
-        }
-        
-        .instructions-modal h2 {
-            color: #4CAF50;
-            text-align: center;
-            margin-top: 0;
-        }
-        
-        .instructions-modal p {
-            line-height: 1.6;
-            margin-bottom: 20px;
-            font-family: monospace;
-        }
-        
-        .instructions-modal ul {
-            text-align: left;
-            padding-left: 20px;
-        }
-        
-        .instructions-modal li {
-            margin-bottom: 10px;
-            line-height: 1.4;
-        }
-        
-        .instructions-modal button {
-            display: block;
-            margin: 20px auto 0;
-            padding: 10px 25px;
-            background: linear-gradient(135deg, #4CAF50, #2E7D32);
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 16px;
-        }
-
         /* 方向键控制面板 */
         .controls-panel {
             position: fixed;
@@ -1757,88 +1707,6 @@
             font-size: 24px;
             font-weight: bold;
         }
-    
-    /* 历史更新样式 */
-    #historyUpdates {
-        padding: 20px;
-        box-sizing: border-box;
-        height: 100vh;
-        overflow: hidden;
-    }
-    
-    .updates-container {
-        max-width: 800px;
-        margin: 0 auto;
-        height: calc(100vh - 120px);
-        overflow-y: auto;
-        padding: 20px 0;
-        box-sizing: border-box;
-        display: flex;
-        flex-direction: column;
-        gap: 20px;
-        scrollbar-width: thin;
-        scrollbar-color: #4CAF50 rgba(255, 255, 255, 0.1);
-    }
-    
-    /* Webkit浏览器滚动条样式 */
-    .updates-container::-webkit-scrollbar {
-        width: 8px;
-    }
-    
-    .updates-container::-webkit-scrollbar-track {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 4px;
-    }
-    
-    .updates-container::-webkit-scrollbar-thumb {
-        background: #4CAF50;
-        border-radius: 4px;
-    }
-    
-    .updates-container::-webkit-scrollbar-thumb:hover {
-        background: #45a049;
-    }
-    
-    .update-item {
-        background: rgba(0, 0, 0, 0.8);
-        border: 1px solid #4CAF50;
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3);
-        transition: transform 0.2s, box-shadow 0.2s;
-    }
-    
-    .update-item:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 12px rgba(76, 175, 80, 0.5);
-    }
-    
-    .update-date {
-        color: #4CAF50;
-        font-size: 14px;
-        margin-bottom: 5px;
-    }
-    
-    .update-title {
-        color: #fff;
-        font-size: 20px;
-        margin: 0 0 15px 0;
-    }
-    
-    .update-content {
-        color: #ccc;
-    }
-    
-    .update-content ul {
-        list-style-type: disc;
-        margin-left: 20px;
-        padding: 0;
-    }
-    
-    .update-content li {
-        margin: 5px 0;
-        line-height: 1.5;
-    }
     
     /* 每日挑战样式 */
     #dailyChallengeScreen {
@@ -3244,7 +3112,6 @@
         <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
         <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
         <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
-        <button class="menu-button" onclick="showInstructions()">📖 游戏说明</button>
         <div id="playTimeDisplay" class="game-info" style="margin: 15px auto; display: inline-block;"></div>
         <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
         <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
@@ -3252,7 +3119,6 @@
         <button class="menu-button" onclick="startPuzzleGame()">🔐 解密游戏</button>
         <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🛠️ 控制台</button>
         <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">📅 每日挑战</button>
-        <button class="menu-button" onclick="showScreen('historyUpdates')">📜 历史更新</button>
         
         <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
         </div>
@@ -3444,168 +3310,6 @@
         </div>
     </div>
     
-    <!-- 历史更新 -->
-    <div id="historyUpdates" class="hidden">
-        <button class="back-button" onclick="showScreen('mainMenu')">返回</button>
-        <h2 class="level-select-title">历史更新</h2>
-        
-        <div class="updates-container">
-            <!-- 更新内容将由用户填写 -->
-            <div class="update-item">
-                <div class="update-title">版本 1.15.5</div>
-                <div class="update-content">
-                    <ul>
-                        <li>版本同步更新至 1.15.5（服务器/客户端版本号对齐）</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="update-item">
-                <div class="update-title">版本 1.15.3</div>
-                <div class="update-content">
-                    <ul>
-                        <li>新增综合反作弊系统：金币存档签名防篡改、金币异常变动检测、异常通关速度检测</li>
-                        <li>检测到作弊自动封禁对应玩法（管理员可解封）</li>
-                        <li>新增多人游戏聊天封禁功能（禁止打开聊天窗口、收发消息）</li>
-                        <li>管理后台新增作弊记录查看</li>
-                        <li>管理后台控制面板精简，用户列表增加加金币/聊天封禁按钮</li>
-                        <li>管理员发放金币改为弹窗提示</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="update-item">
-                <div class="update-title">版本 1.15.1</div>
-                <div class="update-content">
-                    <ul>
-                        <li>新增解密游戏封禁功能（与多人/单人封禁对称）</li>
-                        <li>新增解密游戏导出/导入通关数据功能</li>
-                        <li>admin 发放金币功能实装（服务端账本 + 客户端同步）</li>
-                        <li>封禁支持填写理由并显示在玩家端</li>
-                        <li>解封改为弹窗提示</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="update-item">
-                <div class="update-title">版本 1.15</div>
-                <div class="update-content">
-                    <ul>
-                        <li>新增每日挑战系统，提供3种不同类型的挑战任务</li>
-                        <li>优化多人聊天系统，确保消息撤回功能仅发送者可用</li>
-                        <li>改进音频录制稳定性，修复录音后麦克风持续占用问题</li>
-                        <li>增强消息安全性，限制仅本人可操作自己发送的消息</li>
-                        <li>优化Blob资源处理，解决跨会话音频加载失败问题</li>
-                        <li>修复多处UI显示异常，提升整体交互体验</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="update-item">
-                <div class="update-title">版本 1.11.5</div>
-                <div class="update-content">
-                    <ul>
-                        <li>新增语音转文字功能，支持语音消息转换为文字显示</li>
-                        <li>添加了完整的游戏商店系统，包含各种道具和装饰品</li>
-                        <li>优化了多人游戏的语音消息系统稳定性</li>
-                        <li>修复了录音功能的多个bug，提升用户体验</li>
-                        <li>改进了成就系统显示界面</li>
-                        <li>优化了游戏整体性能和加载速度</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.10.4</div>
-                <div class="update-content">
-                    <ul>
-                        <li>完善了语音消息系统，支持最长60秒录音</li>
-                        <li>添加了录音状态实时显示功能</li>
-                        <li>优化了多人游戏的连接稳定性</li>
-                        <li>修复了房间加入时的卡死问题</li>
-                        <li>改进了游戏界面的响应速度</li>
-                        <li>添加了更多游戏道具和功能</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.9.1</div>
-                <div class="update-content">
-                    <ul>
-                        <li>优化了迷宫生成算法，提供更多样化的地图布局</li>
-                        <li>改进了多人游戏的同步机制</li>
-                        <li>添加了更多的游戏设置选项</li>
-                        <li>修复了多个已知的游戏bug</li>
-                        <li>提升了游戏整体稳定性</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.8.3 - 房间搜索（特殊版本，未发布）</div>
-                <div class="update-content">
-                    <ul>
-                        <li>新增房间搜索功能，方便玩家快速找到可加入的房间</li>
-                        <li>优化了多人游戏的房间管理系统</li>
-                        <li>改进了玩家匹配算法</li>
-                        <li>添加了房间信息显示（玩家数量、游戏状态等）</li>
-                        <li>提升了多人游戏的连接速度</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.7.4</div>
-                <div class="update-content">
-                    <ul>
-                        <li>优化了游戏界面的视觉效果</li>
-                        <li>改进了移动端触控体验</li>
-                        <li>修复了多个UI显示问题</li>
-                        <li>提升了游戏整体性能</li>
-                        <li>优化了代码结构和加载效率</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.7.1</div>
-                <div class="update-content">
-                    <ul>
-                        <li>优化了多人游戏的网络通信</li>
-                        <li>改进了游戏状态的同步机制</li>
-                        <li>修复了部分设备上的兼容性问题</li>
-                        <li>提升了游戏运行稳定性</li>
-                        <li>优化了内存使用效率</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.6.5</div>
-                <div class="update-content">
-                    <ul>
-                        <li>优化了单人游戏的关卡设计</li>
-                        <li>改进了游戏的难度平衡</li>
-                        <li>添加了更多的游戏音效</li>
-                        <li>优化了迷宫生成算法</li>
-                        <li>提升了游戏整体体验</li>
-                    </ul>
-                </div>
-            </div>
-            
-            <div class="update-item">
-                <div class="update-title">版本 1.4.2 - 随机事件系统</div>
-                <div class="update-content">
-                    <ul>
-                        <li>引入了随机事件系统，增加游戏趣味性</li>
-                        <li>添加了控制反转等特殊事件</li>
-                        <li>优化了游戏商店系统</li>
-                        <li>改进了成就系统的显示效果</li>
-                        <li>提升了游戏界面的美观度</li>
-                        <li>修复了多个游戏机制问题</li>
-                    </ul>
-                </div>
-            </div>
-        
-        </div>
-    </div>
     
     <!-- 单人游戏界面 -->
     <div id="singlePlayerLevelSelect" class="hidden">
@@ -3871,30 +3575,6 @@
     <!-- 虚拟摇杆容器（由 JS 动态创建 base/knob） -->
     <div id="joystickContainer"></div>
 
-    <!-- 游戏说明弹窗 -->
-    <div id="instructionsModal" class="instructions-modal hidden">
-        <h2>游戏说明</h2>
-        <p><strong>单人模式：</strong>80个独特关卡，难度递增。使用方向键移动角色，避开陷阱，找到出口。</p>
-        <p><strong style="color: #4CAF50">多人模式：</strong>与朋友合作或竞争。创建房间或加入已有房间，共同完成迷宫挑战。</p>
-        <p><strong>迷宫元素：</strong></p>
-        <ul>
-            <li>绿色：玩家</li>
-            <li>红色：出口</li>
-            <li>黄色：陷阱（触碰后回到起点）</li>
-            <li>青色：传送门（随机传送到另一个传送门）</li>
-            <li>紫色：移动陷阱（会移动的危险区域）</li>
-            <li><span style="color: #f44336">红色闪烁警告</span>：移动敌人正在追逐你！</li>
-            <li><span style="color: gold">金色</span>：钥匙（特殊关卡需要钥匙才能开门）</li>
-            <li><span style="color: #8B4513">棕色</span>：门（需要钥匙才能打开）</li>
-        </ul>
-        <p><strong>特殊关卡：</strong></p>
-        <ul>
-            <li>第30关和60关为螺旋迷宫，中心是出口，并有移动敌人追逐玩家！</li>
-            <li>特殊关卡需要找到钥匙才能开门，拿到钥匙后需要10秒倒计时才能开门</li>
-        </ul>
-        <button onclick="document.getElementById('instructionsModal').classList.add('hidden')">关闭</button>
-    </div>
-    
     <!-- UI设置面板 -->
     <div id="uiSettingsModal" class="settings-modal hidden">
         <h2>UI设置</h2>
@@ -4433,6 +4113,72 @@ function showAdminPopup(title, message) {
     document.body.appendChild(overlay);
 }
 
+// ===== 公告功能：全屏弹窗展示（管理员发布后持久化，客户端拉取/实时推送）=====
+function showAnnouncementModal(list) {
+    if (!list || !list.length) return;
+    // 已存在则先移除，避免重复堆叠
+    const existing = document.getElementById('announcementFullModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'announcementFullModal';
+    // 全屏遮罩：铺满整个视口
+    overlay.style.cssText = 'position:fixed;inset:0;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.94);z-index:40000;display:flex;flex-direction:column;';
+
+    // 顶部标题栏
+    const header = document.createElement('div');
+    header.style.cssText = 'flex:0 0 auto;padding:18px 24px;background:linear-gradient(135deg,#1f2937,#111827);color:#FFC107;font-size:24px;font-weight:bold;text-align:center;border-bottom:2px solid #FFC107;letter-spacing:2px;';
+    header.textContent = '📢 公 告';
+    overlay.appendChild(header);
+
+    // 中部可滚动内容区（全屏）
+    const body = document.createElement('div');
+    body.style.cssText = 'flex:1 1 auto;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:20px;align-items:center;';
+    list.forEach((a, idx) => {
+        const card = document.createElement('div');
+        card.style.cssText = 'width:100%;max-width:900px;background:rgba(30,30,30,0.96);border:1px solid #FFC107;border-radius:12px;padding:20px 24px;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
+        const h = document.createElement('h2');
+        h.style.cssText = 'color:#FFC107;margin:0 0 12px 0;font-size:22px;word-break:break-word;';
+        h.textContent = (a.title && String(a.title).trim()) ? a.title : '系统公告';
+        const p = document.createElement('div');
+        p.style.cssText = 'color:#e0e0e0;font-size:16px;line-height:1.7;word-break:break-word;white-space:pre-wrap;';
+        p.textContent = (a.content != null) ? String(a.content) : '';
+        const meta = document.createElement('div');
+        meta.style.cssText = 'margin-top:14px;color:#888;font-size:12px;text-align:right;';
+        meta.textContent = (a.createdAt ? new Date(a.createdAt).toLocaleString() : '') + (a.priority ? ' ｜ 优先级 ' + a.priority : '');
+        card.appendChild(h); card.appendChild(p); card.appendChild(meta);
+        body.appendChild(card);
+    });
+    overlay.appendChild(body);
+
+    // 底部关闭按钮
+    const footer = document.createElement('div');
+    footer.style.cssText = 'flex:0 0 auto;padding:16px;text-align:center;background:rgba(0,0,0,0.4);border-top:1px solid #333;';
+    const btn = document.createElement('button');
+    btn.textContent = '我已知晓';
+    btn.style.cssText = 'padding:12px 48px;background:linear-gradient(135deg,#FFC107,#FF9800);color:#1a1a1a;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    footer.appendChild(btn);
+    overlay.appendChild(footer);
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
+
+// 客户端拉取当前生效公告并全屏展示
+async function loadAnnouncements() {
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        const resp = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/announcements', { method: 'GET' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const list = data.announcements || [];
+        if (list.length) showAnnouncementModal(list);
+    } catch (e) {
+        console.warn('[公告] 拉取失败:', e.message);
+    }
+}
+
 function connectNotificationSocket() {
     // 已连接则直接返回，避免重复建连
     if (notificationSocket && (notificationSocket.connected || notificationSocket.connecting)) return;
@@ -4499,6 +4245,12 @@ function connectNotificationSocket() {
             const title = (data && data.title) ? data.title : '系统通知';
             const message = (data && data.message) ? data.message : '';
             showAdminPopup(title, message);
+        });
+
+        // 管理员新发布的公告（实时推送，全屏弹出）
+        notificationSocket.on('announcement-new', (data) => {
+            console.log('[通知] 收到新公告:', data);
+            if (data && data.title && data.content) showAnnouncementModal([data]);
         });
 
         // 房间被管理员清空（同样无人处理的事件，顺带补上）
@@ -6294,6 +6046,8 @@ const modal = document.createElement('div');
 window.addEventListener('load', function() {
     // 页面加载时先建立实时通知 socket（与版本检测解耦，确保玩家一进游戏就注册在线）
     connectNotificationSocket();
+    // 拉取并全屏展示当前生效公告
+    loadAnnouncements();
     // 自动连接服务器（版本检测 + 更新提示 + 管理员登录）
     autoConnectToServer();
     // 初始化玩家身份：已存名字则直接注册在线，否则弹窗要求取名
@@ -6789,7 +6543,7 @@ function openShop() {
         'mainMenu', 'singlePlayerLevelSelect', 'singlePlayerGame', 
         'singlePlayerComplete', 'multiplayerSetup', 'multiplayerGame',
         'achievementsScreen', 'moreChallengesScreen', 'statisticsScreen',
-        'historyUpdates', 'dailyChallengeScreen', 'workshopMain', 
+        'dailyChallengeScreen', 'workshopMain', 
         'mazeEditor', 'myMazes', 'browseMazes', 'popularMazes'
     ];
     
@@ -8728,7 +8482,7 @@ function showScreen(screenId) {
                 'mainMenu', 'singlePlayerLevelSelect', 'singlePlayerGame', 
                 'singlePlayerComplete', 'multiplayerSetup', 'multiplayerGame',
                 'achievementsScreen', 'moreChallengesScreen', 'statisticsScreen',
-                'historyUpdates', 'dailyChallengeScreen', 'workshopMain', 
+                'dailyChallengeScreen', 'workshopMain', 
                 'mazeEditor', 'myMazes', 'browseMazes', 'popularMazes',
                 'puzzleLevelSelect'
             ];
@@ -10976,11 +10730,6 @@ function showScreen(screenId) {
                 });
             }
         });
-        // 显示游戏说明
-        function showInstructions() {
-            document.getElementById('instructionsModal').classList.remove('hidden');
-        }
-        
         // 显示UI设置面板
         // 保存 UI 设置（自动排除大体积的 customMusic）
 function saveUiSettings() {
@@ -17981,7 +17730,7 @@ function playMaze(mazeData, isPreview = false) {
         'mainMenu', 'singlePlayerLevelSelect', 'singlePlayerGame', 
         'singlePlayerComplete', 'multiplayerSetup', 'multiplayerGame',
         'achievementsScreen', 'moreChallengesScreen', 'statisticsScreen',
-        'historyUpdates', 'dailyChallengeScreen', 'workshopMain', 
+        'dailyChallengeScreen', 'workshopMain', 
         'mazeEditor', 'myMazes', 'browseMazes', 'popularMazes'
     ];
     
