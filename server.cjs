@@ -972,7 +972,15 @@ function requireAdminAuth(req, res, next) {
     }
     currentReqIp = clientIp(req);
     const token = authHeader.substring(7);
+    // 解析令牌中的操作者身份，便于记录「公告发布者」等信息
+    let decoded = null;
+    try { decoded = jwt.verify(token, JWT_SECRET); } catch (err) { decoded = null; }
     if (verifyAdminToken(token) || verifySuperAdminToken(token)) {
+        req.admin = {
+            name: decoded ? decoded.name : null,
+            role: decoded ? decoded.role : 'admin',
+            accountId: decoded ? decoded.accountId : null
+        };
         return next();
     }
 
@@ -3598,7 +3606,8 @@ app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
         if (!content || !String(content).trim()) {
             return res.status(400).json({ success: false, message: '公告内容不能为空' });
         }
-        const rec = await createAnnouncement({ title, content, priority, createdBy: 'admin' });
+        const publisher = (req.admin && req.admin.name) || (req.admin && req.admin.role) || 'admin';
+        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher });
         appendAudit('admin', 'announcement-create', `发布公告: ${String(title).slice(0, 80)}`);
         // 实时推送给所有在线客户端（游戏端监听 'announcement-new' 全屏弹出）
         io.emit('announcement-new', rec);
