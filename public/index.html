@@ -8640,11 +8640,11 @@ function applyMainMenuUiMode() {
         newUI.style.display = '';
         oldUI.style.display = 'none';
     }
-    // 锁定逻辑：永久新UI 不允许回退；永久旧UI 不允许切换新UI
+    // 锁定逻辑：永久新UI 不允许回退（连提示条一起隐藏）；永久旧UI 不允许切换新UI
     const forced = getForcedUiMode();
-    const rollbackBtn = document.querySelector('.ui-rollback-btn');
+    const hint = document.querySelector('.ui-new-hint');
+    if (hint) hint.style.display = (forced === 'new') ? 'none' : '';
     const switchNewBtn = document.querySelector('.ui-switch-new-btn');
-    if (rollbackBtn) rollbackBtn.style.display = (forced === 'new') ? 'none' : '';
     if (switchNewBtn) switchNewBtn.style.display = (forced === 'old') ? 'none' : '';
 }
 function setUserUiMode(mode) {
