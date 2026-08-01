@@ -36,8 +36,8 @@ let DB_AVAILABLE = false;
 // 默认数据库连接（已写入 server；部署到 onrender 等平台时，若设置了同名环境变量则覆盖此处默认值）。
 // 你已配好的 DB_HOST / DB_PORT 通过环境变量传入即可覆盖下面两个默认值。
 const DEFAULT_DB = {
-    host: process.env.DB_HOST
-    port: process.env.DB_PORT
+    host: process.env.DB_HOST || 'nu3uys.h.filess.io',
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3307,
     user: process.env.DB_USER || 'maze_graysetsor',
     password: process.env.DB_PASSWORD || '4c613aeb828b9923c8b12b63b11373f2a31a3357',
     database: process.env.DB_NAME || 'maze_graysetsor',
@@ -61,6 +61,67 @@ function buildDbConfig() {
     // 没有通过环境变量传入时，使用写死的默认值（保证 onrender 部署无需逐一配置 env 也能连库）
     return { ...DEFAULT_DB };
 }
+
+// ===== 服务器异常捕获与日志（供 admin 后台查看）=====
+// 目标：服务器任何意外报错都不再直接崩溃退出，而是被捕获、记录，并可在 admin 后台查看报错信息与运行日志。
+const SERVER_ERRORS_FILE = path.join(DATA_DIR, 'server-errors.log');
+const MAX_ERROR_LOG = 200;     // 内存中保留的最多异常条数
+const MAX_RECENT_LOG = 800;    // 内存中保留的最近日志条数
+let serverErrors = [];         // 异常记录：{ id, time, type, message, stack }
+let recentLogs = [];           // 最近控制台日志：{ time, level, message }
+let errorSeq = 0;
+
+function safeStringify(o) {
+    try { return JSON.stringify(o); } catch (_) { return String(o); }
+}
+// 把一条日志压入内存环形缓冲（最新在末尾）
+function pushRecentLog(level, args) {
+    const msg = args.map(a => (typeof a === 'string' ? a : (a && a.stack ? a.stack : safeStringify(a)))).join(' ');
+    recentLogs.push({ time: new Date().toISOString(), level, message: msg });
+    if (recentLogs.length > MAX_RECENT_LOG) recentLogs.shift();
+}
+// 记录一条异常（内存 + 落盘，落盘文件超量时裁剪）
+function recordServerError(type, err) {
+    const entry = {
+        id: ++errorSeq,
+        time: new Date().toISOString(),
+        type,
+        message: err && err.message ? String(err.message) : String(err),
+        stack: err && err.stack ? String(err.stack) : ''
+    };
+    serverErrors.push(entry);
+    if (serverErrors.length > MAX_ERROR_LOG) serverErrors.shift();
+    try {
+        fs.appendFileSync(SERVER_ERRORS_FILE, JSON.stringify(entry) + '\n');
+        const lines = fs.readFileSync(SERVER_ERRORS_FILE, 'utf8').split('\n').filter(Boolean);
+        if (lines.length > MAX_ERROR_LOG * 2) {
+            fs.writeFileSync(SERVER_ERRORS_FILE, lines.slice(-MAX_ERROR_LOG).join('\n') + '\n');
+        }
+    } catch (_) { /* 日志写入失败不应影响主流程 */ }
+}
+// 启动时从落盘文件恢复已记录的异常（跨重启保留）
+function loadServerErrorsFromFile() {
+    try {
+        if (fs.existsSync(SERVER_ERRORS_FILE)) {
+            const lines = fs.readFileSync(SERVER_ERRORS_FILE, 'utf8').split('\n').filter(Boolean);
+            serverErrors = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+            if (serverErrors.length) errorSeq = serverErrors[serverErrors.length - 1].id || serverErrors.length;
+            if (serverErrors.length > MAX_ERROR_LOG) serverErrors = serverErrors.slice(-MAX_ERROR_LOG);
+        }
+    } catch (_) {}
+}
+// 包裹 console.*：保留原样输出，同时记入 recentLogs 供 admin 查看
+['log', 'info', 'warn', 'error'].forEach(level => {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => { pushRecentLog(level, args); orig(...args); };
+});
+// 全局兜底：未捕获异常 / 未处理的 Promise 拒绝 —— 记录但不退出进程，保证服务持续可用
+process.on('uncaughtException', (err) => { recordServerError('uncaughtException', err); });
+process.on('unhandledRejection', (reason) => {
+    const e = (reason instanceof Error) ? reason : new Error('UnhandledRejection: ' + safeStringify(reason));
+    recordServerError('unhandledRejection', e);
+});
+
 function parseJsonCol(v) {
     if (v == null) return null;
     if (typeof v === 'object') return v;
@@ -4401,12 +4462,47 @@ setInterval(() => {
 }, ROOM_CLEANUP_CONFIG.checkInterval);
 
 
+// ===== 服务器异常与运行日志查看（admin 后台）=====
+app.get('/api/admin/server-errors', requireAdminAuth, (req, res) => {
+    res.json({
+        success: true,
+        errors: serverErrors.slice().reverse(),   // 新 -> 旧
+        recentLogs: recentLogs.slice().reverse(), // 新 -> 旧
+        dbAvailable: DB_AVAILABLE,
+        uptime: process.uptime(),
+        serverTime: new Date().toISOString()
+    });
+});
+app.delete('/api/admin/server-errors', requireAdminAuth, (req, res) => {
+    serverErrors = [];
+    recentLogs = [];
+    try { if (fs.existsSync(SERVER_ERRORS_FILE)) fs.writeFileSync(SERVER_ERRORS_FILE, ''); } catch (_) {}
+    res.json({ success: true, message: '已清空服务器报错与日志' });
+});
+// 全局请求级错误兜底：捕获路由内未处理的异常，避免进程崩溃并记入日志
+app.use((err, req, res, next) => {
+    recordServerError('request', err);
+    if (!res.headersSent) res.status(500).json({ success: false, message: '服务器内部错误，已记录' });
+});
+
 // 在服务器启动时初始化管理员密码
 console.log('🚀 正在初始化服务器...');
 initializeAdminPassword();
 initializeSuperAdminPassword();
 
+const PORT = process.env.PORT || 234;
+// 先监听，保证 onrender 等平台的健康检查能立即通过；数据库初始化与数据加载放到后台异步进行，
+// 避免 MySQL 不可达/缓慢时阻塞启动（否则 onrender 会因启动超时判定为“运行报错”）。
+server.listen(PORT, () => {
+    console.log(`\n✅ 服务器运行在 http://localhost:${PORT}`);
+    console.log(`📊 服务器状态: http://localhost:${PORT}/api/server-status`);
+    console.log(`🏠 房间列表: http://localhost:${PORT}/api/rooms`);
+    console.log(`👤 创建房间: http://localhost:${PORT}/api/create-room`);
+    console.log(`Socket.IO 服务已启动\n`);
+});
+
 (async () => {
+    loadServerErrorsFromFile();   // 恢复重启前记录的异常
     await initDatabase();
     loadAdminState();
     await loadUserRoles();
@@ -4414,13 +4510,4 @@ initializeSuperAdminPassword();
     loadGlobalFunctions();
     await loadAccounts();
     await loadHomeProfiles();
-
-    const PORT = process.env.PORT || 234;
-    server.listen(PORT, () => {
-        console.log(`\n✅ 服务器运行在 http://localhost:${PORT}`);
-        console.log(`📊 服务器状态: http://localhost:${PORT}/api/server-status`);
-        console.log(`🏠 房间列表: http://localhost:${PORT}/api/rooms`);
-        console.log(`👤 创建房间: http://localhost:${PORT}/api/create-room`);
-        console.log(`Socket.IO 服务已启动\n`);
-    });
-})();
+})().catch(e => console.error('[Init] 后台初始化失败:', e));
