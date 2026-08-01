@@ -189,6 +189,11 @@ const DB_TABLES_SQL = [
         created_by VARCHAR(64),
         created_at VARCHAR(32),
         INDEX idx_ann_active_created (active, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS global_functions (
+        id VARCHAR(32) PRIMARY KEY,
+        data JSON NOT NULL,
+        updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -252,11 +257,27 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     debugInfo: true,
     f12DevConsole: true,
     ctrlShiftCD: true,
-    newUi: { mode: 'always', prob: 100 }
+    newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
 
-function loadGlobalFunctions() {
+// 加载全局功能控制：DB 优先（global_functions 表，单例行 id='global'），失败回退 JSON 文件
+async function loadGlobalFunctions() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query("SELECT data FROM global_functions WHERE id='global'");
+            if (rows && rows.length && rows[0].data) {
+                const parsed = (typeof rows[0].data === 'string') ? JSON.parse(rows[0].data) : rows[0].data;
+                if (parsed && typeof parsed === 'object') {
+                    globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT, parsed);
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('[Func] DB 读取失败，回退 JSON:', e.message);
+        }
+    }
+    // DB 无数据或不可用 → 尝试从 JSON 文件加载（保留历史配置）
     try {
         if (fs.existsSync(GLOBAL_FUNCTIONS_FILE)) {
             const s = JSON.parse(fs.readFileSync(GLOBAL_FUNCTIONS_FILE, 'utf8'));
@@ -265,8 +286,26 @@ function loadGlobalFunctions() {
             }
         }
     } catch (e) { console.error('[Func] 加载全局功能控制失败:', e.message); }
+    // 若 DB 可用但尚无记录，把当前（默认值或 JSON 内容）写回 DB，使 SQL 成为权威存储
+    if (DB_AVAILABLE && pool) {
+        try { await saveGlobalFunctions(); } catch (_) {}
+    }
 }
-function saveGlobalFunctions() {
+// 保存全局功能控制：DB 优先（UPSERT 单行），失败回退 JSON 文件
+async function saveGlobalFunctions() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const updatedAt = new Date().toISOString();
+            await pool.query(
+                "INSERT INTO global_functions (id, data, updated_at) VALUES ('global', ?, ?) " +
+                "ON DUPLICATE KEY UPDATE data=VALUES(data), updated_at=VALUES(updated_at)",
+                [JSON.stringify(globalFunctions), updatedAt]
+            );
+            return; // DB 写入成功，无需再写 JSON（JSON 仅作兜底）
+        } catch (e) {
+            console.error('[Func] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
     ensureDataDir();
     try { fs.writeFileSync(GLOBAL_FUNCTIONS_FILE, JSON.stringify(globalFunctions, null, 2)); }
     catch (e) { console.error('[Func] 保存全局功能控制失败:', e.message); }
@@ -3787,7 +3826,7 @@ app.get('/api/admin/global-functions', (req, res) => {
 });
 
 // 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
-app.put('/api/admin/global-functions', requireAdminAuth, (req, res) => {
+app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
     try {
         const body = req.body || {};
         const validKeys = Object.keys(GLOBAL_FUNCTIONS_DEFAULT);
@@ -3806,7 +3845,7 @@ app.put('/api/admin/global-functions', requireAdminAuth, (req, res) => {
             }
         }
         globalFunctions = next;
-        saveGlobalFunctions();
+        await saveGlobalFunctions();
         // 实时广播给所有已连接的游戏客户端
         try { io.emit('global-function-update', Object.assign({}, globalFunctions)); } catch (_) {}
         const changed = validKeys.filter(k => GLOBAL_FUNCTIONS_DEFAULT[k] !== globalFunctions[k]);
@@ -4708,7 +4747,8 @@ server.listen(PORT, () => {
     loadAdminState();
     await loadUserRoles();
     await loadUserSettings();
-    loadGlobalFunctions();
+    await loadGlobalFunctions();
     await loadAccounts();
     await loadHomeProfiles();
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
+x
