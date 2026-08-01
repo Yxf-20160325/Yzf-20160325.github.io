@@ -5,7 +5,7 @@ const { Server } = require("socket.io");
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs'); // 纯 JS 实现，避免 onrender 等环境因原生模块编译失败导致部署崩溃（哈希格式与原生 bcrypt 兼容）
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2/promise');
 
@@ -193,6 +193,11 @@ async function initDatabase() {
     }
     // 免费托管库（如 filess.io）常限制并发连接数，连接池上限设小，避免触发拒绝
     const poolOpts = Object.assign({}, cfg, { waitForConnections: true, connectionLimit: 2, connectTimeout: 10000 });
+    // 托管 MySQL（filess.io 等）通常要求 TLS 连接；onrender 跨云连库没 SSL 会握手失败。
+    // 本地/特殊环境若不兼容可用 DB_SSL=false 关闭。
+    if (process.env.DB_SSL !== 'false') {
+        poolOpts.ssl = { rejectUnauthorized: false };
+    }
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
             pool = mysql.createPool(poolOpts);
