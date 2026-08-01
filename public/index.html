@@ -2597,7 +2597,172 @@
             font-size: 24px;
         }
     }
-    
+
+    /* ===== 玩家工坊移动端深度适配 ===== */
+    /* 编辑器主区：画布与调试面板改为上下排列，彻底避免横向溢出 */
+    @media (max-width: 768px) {
+        .editor-main-area {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        /* 编辑画布按容器宽度等比缩放（坐标计算基于 getBoundingClientRect，缩放后依然准确） */
+        #mazeCanvas {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+
+        #editorCanvas {
+            display: block;
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            touch-action: none;
+        }
+
+        /* 调试面板转为全宽并置于画布下方 */
+        .editor-debug-panel {
+            width: auto;
+            min-width: 0;
+            max-height: none;
+        }
+
+        .tool-row {
+            justify-content: flex-start;
+        }
+
+        /* 迷宫列表卡片：信息在上、操作按钮在下并撑满，按钮放大便于点按 */
+        .maze-item > div {
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 10px !important;
+        }
+
+        .maze-item > div > div:last-child {
+            display: flex !important;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .maze-item > div > div:last-child button {
+            flex: 1 1 0 !important;
+            min-width: 72px;
+            padding: 11px 8px !important;
+            font-size: 14px !important;
+        }
+
+        .maze-item h3 {
+            font-size: 17px;
+        }
+
+        .maze-item p {
+            font-size: 14px;
+            word-break: break-word;
+        }
+    }
+
+    @media (max-width: 480px) {
+        /* 放大编辑器工具按钮的触控区域 */
+        .tool-button {
+            min-width: 56px;
+            padding: 12px 6px;
+            font-size: 14px;
+        }
+
+        .editor-container {
+            padding: 0 10px;
+        }
+
+        .editor-canvas-container {
+            padding: 12px;
+        }
+
+        .editor-toolbar {
+            padding: 14px;
+        }
+
+        .search-bar {
+            gap: 8px;
+        }
+
+        /* 工坊主菜单按钮在超窄屏保持两列，避免单列过长 */
+        .workshop-container {
+            grid-template-columns: repeat(2, 1fr) !important;
+        }
+
+        .workshop-button {
+            min-height: 110px;
+        }
+    }
+
+    /* ===== 其余界面移动端收尾适配（低风险叠加） ===== */
+    /* 关卡/成就/统计等界面的居中大标题：窄屏缩小字号并留出两侧边距，避免与左上角返回按钮重叠 */
+    @media (max-width: 768px) {
+        .level-select-title {
+            font-size: 26px;
+            padding: 0 56px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        /* 主菜单按钮宽度安全化：不超过视口，避免极小屏溢出 */
+        .menu-button, .menu-btn {
+            width: min(250px, 86%);
+        }
+
+        /* 关卡选择圆钮略缩小，确保一行能排下更多且不挤 */
+        .level-button {
+            width: 52px;
+            height: 52px;
+            margin: 8px;
+            font-size: 18px;
+        }
+
+        /* 游戏内 HUD 信息条收缩，避免遮挡过多画面 */
+        .game-info {
+            max-width: calc(100vw - 36px);
+            padding: 6px 10px;
+            gap: 6px;
+            font-size: 13px;
+        }
+        .game-info-item {
+            min-width: 0;
+            padding: 3px 6px;
+            font-size: 12px;
+        }
+
+        /* 信息类容器在窄屏收敛内边距 */
+        .achievements-container,
+        .statistics-container,
+        .challenges-container {
+            padding: 15px;
+            margin: 20px auto;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .level-select-title {
+            font-size: 22px;
+            padding: 0 48px;
+        }
+
+        .game-info {
+            font-size: 12px;
+            padding: 5px 8px;
+        }
+        .game-info-item {
+            font-size: 11px;
+            padding: 2px 5px;
+        }
+
+        .level-button {
+            width: 46px;
+            height: 46px;
+            margin: 6px;
+            font-size: 16px;
+        }
+    }
+
     /* 额外的工坊动画效果 */
     @keyframes fadeInUp {
         from {
@@ -4146,7 +4311,11 @@ function showAnnouncementModal(list) {
         const meta = document.createElement('div');
         meta.style.cssText = 'margin-top:14px;color:#888;font-size:12px;text-align:right;';
         meta.textContent = (a.createdAt ? new Date(a.createdAt).toLocaleString() : '') + (a.priority ? ' ｜ 优先级 ' + a.priority : '');
-        card.appendChild(h); card.appendChild(p); card.appendChild(meta);
+        // 底部发布者信息
+        const who = document.createElement('div');
+        who.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px dashed #555;color:#FFC107;font-size:14px;text-align:right;';
+        who.textContent = '—— 由 ' + (a.createdBy ? String(a.createdBy) : '管理员') + ' 发布';
+        card.appendChild(h); card.appendChild(p); card.appendChild(meta); card.appendChild(who);
         body.appendChild(card);
     });
     overlay.appendChild(body);
@@ -16247,22 +16416,23 @@ function setupEditorEventListeners() {
             updateToolDisplay();
         }
         const rect = canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        const cellX = Math.floor(x / (canvas.width / editorState.mazeSize.width));
-        const cellY = Math.floor(y / (canvas.height / editorState.mazeSize.height));
+        const cell = getCellFromEvent(e.clientX, e.clientY, rect);
+        const cellX = cell.x, cellY = cell.y;
         editorState.lastCell = { x: cellX, y: cellY };
         updateCell(cellX, cellY);
         drawMazeGrid(ctx);
     });
     
     // 计算单元格坐标 + 更新坐标显示的辅助函数
+    // 注意：坐标必须除以「显示尺寸」而非 canvas 内部像素，否则画布被 CSS 缩放（移动端）后点按会错位
     function getCellFromEvent(clientX, clientY, rect) {
         const x = clientX - rect.left;
         const y = clientY - rect.top;
+        const cellW = rect.width / editorState.mazeSize.width;
+        const cellH = rect.height / editorState.mazeSize.height;
         return {
-            x: Math.floor(x / (canvas.width / editorState.mazeSize.width)),
-            y: Math.floor(y / (canvas.height / editorState.mazeSize.height))
+            x: Math.floor(x / cellW),
+            y: Math.floor(y / cellH)
         };
     }
     function updateCoordDisplay(cellX, cellY) {
@@ -16845,9 +17015,9 @@ function handleMapSelectionClick(event) {
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
     
-    // 计算点击的单元格坐标
-    const cellSizeX = canvas.width / editorState.mazeSize.width;
-    const cellSizeY = canvas.height / editorState.mazeSize.height;
+    // 计算点击的单元格坐标（使用显示尺寸，避免画布缩放后错位）
+    const cellSizeX = rect.width / editorState.mazeSize.width;
+    const cellSizeY = rect.height / editorState.mazeSize.height;
     const cellX = Math.floor(x / cellSizeX);
     const cellY = Math.floor(y / cellSizeY);
     
