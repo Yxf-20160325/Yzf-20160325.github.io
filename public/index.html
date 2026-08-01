@@ -67,6 +67,72 @@
             -webkit-text-fill-color: transparent;
         }
         
+        /* 主菜单标签页 */
+        .main-tabs {
+            display: flex;
+            gap: 8px;
+            width: min(520px, 92%);
+            margin: 0 auto 18px;
+        }
+        .main-tab {
+            flex: 1 1 0;
+            padding: 11px 4px;
+            background: rgba(255,255,255,0.06);
+            color: #ddd;
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all .2s;
+        }
+        .main-tab:hover { background: rgba(255,255,255,0.12); }
+        .main-tab.active {
+            background: linear-gradient(135deg,#FFC107,#FF9800);
+            color: #1a1a1a;
+            border-color: #FFC107;
+            font-weight: bold;
+        }
+        .main-tab-panels {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+        }
+        .main-tab-panel { display: none; width: 100%; flex-direction: column; align-items: center; }
+        .main-tab-panel.active { display: flex; }
+
+        /* 新 UI 提示条 + 回退按钮 */
+        .ui-new-hint {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            width: min(520px, 92%);
+            margin: 0 auto 16px;
+            padding: 10px 14px;
+            background: rgba(255, 193, 7, 0.12);
+            border: 1px solid rgba(255, 193, 7, 0.4);
+            border-radius: 10px;
+            color: #ffe082;
+            font-size: 14px;
+            text-align: center;
+        }
+        .ui-rollback-btn {
+            flex: 0 0 auto;
+            padding: 7px 18px;
+            background: linear-gradient(135deg, #FFC107, #FF9800);
+            color: #1a1a1a;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .ui-switch-new-btn {
+            background: linear-gradient(135deg, #42a5f5, #1e88e5) !important;
+        }
+
         .menu-button, .menu-btn {
             display: flex;
             align-items: center;
@@ -2761,6 +2827,9 @@
             margin: 6px;
             font-size: 16px;
         }
+
+        .main-tabs { width: 96%; gap: 5px; margin-bottom: 14px; }
+        .main-tab { font-size: 13px; padding: 9px 2px; }
     }
 
     /* 额外的工坊动画效果 */
@@ -3274,19 +3343,55 @@
     </div>    <!-- 主菜单 -->
     <div id="mainMenu" class="main-menu">
         <h1 class="menu-title">迷宫冒险</h1>
-        <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
-        <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
-        <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
-        <div id="playTimeDisplay" class="game-info" style="margin: 15px auto; display: inline-block;"></div>
-        <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
-        <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
-        <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
-        <button class="menu-button" onclick="startPuzzleGame()">🔐 解密游戏</button>
-        <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🛠️ 控制台</button>
-        <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">📅 每日挑战</button>
-        
-        <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
+
+        <!-- 新 UI：标签页布局 -->
+        <div id="mainMenuNewUI">
+            <div class="main-tabs" id="mainTabs">
+                <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">开始</button>
+                <button class="main-tab" data-tab="mine" onclick="switchMainTab('mine')">我的</button>
+                <button class="main-tab" data-tab="more" onclick="switchMainTab('more')">更多</button>
+            </div>
+            <div class="ui-new-hint">
+                <span>我们做出了一个新UI，如果想要切换请点击旁边按钮</span>
+                <button type="button" class="ui-rollback-btn" onclick="switchToOldUI()">回退</button>
+            </div>
+            <div class="main-tab-panels">
+                <div class="main-tab-panel active" data-tab="start">
+                    <div class="playTimeDisplay game-info" style="margin: 4px auto 14px; display: inline-block;"></div>
+                    <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
+                    <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
+                    <button class="menu-button" onclick="startPuzzleGame()">🔐 解密游戏</button>
+                    <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">📅 每日挑战</button>
+                </div>
+                <div class="main-tab-panel" data-tab="mine">
+                    <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
+                    <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
+                    <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
+                    <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
+                    <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
+                </div>
+                <div class="main-tab-panel" data-tab="more">
+                    <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🛠️ 控制台</button>
+                </div>
+            </div>
         </div>
+
+        <!-- 旧 UI：平铺布局（默认隐藏，由 uiMode 控制显示） -->
+        <div id="mainMenuOldUI" style="display:none;">
+            <div class="playTimeDisplay game-info" style="margin: 15px auto; display: inline-block;"></div>
+            <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
+            <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
+            <button class="menu-button" onclick="startPuzzleGame()">🔐 解密游戏</button>
+            <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">📅 每日挑战</button>
+            <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
+            <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
+            <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
+            <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
+            <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
+            <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🛠️ 控制台</button>
+            <button class="menu-button ui-switch-new-btn" onclick="switchToNewUI()">✨ 切换到新UI</button>
+        </div>
+    </div>
     
     <!-- 存档/读档管理界面 - 已隐藏 -->
     <!-- <div id="saveLoadModal" class="instructions-modal hidden">
@@ -3754,6 +3859,16 @@
     </div>
         
         <div class="setting-group">
+            <h3>界面模式</h3>
+            <label style="display:flex; align-items:center; gap:8px; margin-bottom:8px; cursor:pointer;">
+                <input type="radio" name="uiMode" value="new"> 新UI（标签页布局）
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                <input type="radio" name="uiMode" value="old"> 旧UI（平铺布局）
+            </label>
+        </div>
+
+        <div class="setting-group">
             <h3>控制面板</h3>
             <label for="showControlsCheckbox">
                 <input type="checkbox" id="showControlsCheckbox"> 显示控制面板
@@ -4213,6 +4328,8 @@ function applyGlobalFunctions(settings) {
     if (!settings || typeof settings !== 'object') return;
     const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true };
     window.globalFunctionControl = Object.assign({}, def, settings);
+    // 记录全局「使用新UI」策略，供主菜单旧/新 UI 决策使用
+    window.__globalUiMode = (settings && settings.newUi && typeof settings.newUi === 'object') ? settings.newUi : { mode: 'always', prob: 100 };
     const g = window.globalFunctionControl;
     // 导出按钮（单人 / 解密）
     document.querySelectorAll('button[onclick="exportCompletionData()"]').forEach(b => b.style.display = g.export ? '' : 'none');
@@ -4281,9 +4398,12 @@ function showAdminPopup(title, message) {
 // ===== 公告功能：全屏弹窗展示（管理员发布后持久化，客户端拉取/实时推送）=====
 function showAnnouncementModal(list) {
     if (!list || !list.length) return;
-    // 已存在则先移除，避免重复堆叠
+    // 若公告弹窗已存在（玩家正在看旧公告），把新公告追加进去，避免覆盖正在阅读的内容
     const existing = document.getElementById('announcementFullModal');
-    if (existing) existing.remove();
+    if (existing) {
+        const body = existing.querySelector('.ann-modal-body');
+        if (body) { appendAnnouncementCards(body, list); return; }
+    }
 
     const overlay = document.createElement('div');
     overlay.id = 'announcementFullModal';
@@ -4298,8 +4418,28 @@ function showAnnouncementModal(list) {
 
     // 中部可滚动内容区（全屏）
     const body = document.createElement('div');
+    body.className = 'ann-modal-body';
     body.style.cssText = 'flex:1 1 auto;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:20px;align-items:center;';
-    list.forEach((a, idx) => {
+    appendAnnouncementCards(body, list);
+    overlay.appendChild(body);
+
+    // 底部关闭按钮
+    const footer = document.createElement('div');
+    footer.style.cssText = 'flex:0 0 auto;padding:16px;text-align:center;background:rgba(0,0,0,0.4);border-top:1px solid #333;';
+    const btn = document.createElement('button');
+    btn.textContent = '我已知晓';
+    btn.style.cssText = 'padding:12px 48px;background:linear-gradient(135deg,#FFC107,#FF9800);color:#1a1a1a;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
+    btn.onclick = () => overlay.remove();
+    footer.appendChild(btn);
+    overlay.appendChild(footer);
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+}
+
+// 向公告内容区追加一张公告卡片
+function appendAnnouncementCards(body, list) {
+    list.forEach((a) => {
         const card = document.createElement('div');
         card.style.cssText = 'width:100%;max-width:900px;background:rgba(30,30,30,0.96);border:1px solid #FFC107;border-radius:12px;padding:20px 24px;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
         const h = document.createElement('h2');
@@ -4318,20 +4458,6 @@ function showAnnouncementModal(list) {
         card.appendChild(h); card.appendChild(p); card.appendChild(meta); card.appendChild(who);
         body.appendChild(card);
     });
-    overlay.appendChild(body);
-
-    // 底部关闭按钮
-    const footer = document.createElement('div');
-    footer.style.cssText = 'flex:0 0 auto;padding:16px;text-align:center;background:rgba(0,0,0,0.4);border-top:1px solid #333;';
-    const btn = document.createElement('button');
-    btn.textContent = '我已知晓';
-    btn.style.cssText = 'padding:12px 48px;background:linear-gradient(135deg,#FFC107,#FF9800);color:#1a1a1a;border:none;border-radius:25px;cursor:pointer;font-size:16px;font-weight:bold;';
-    btn.onclick = () => overlay.remove();
-    footer.appendChild(btn);
-    overlay.appendChild(footer);
-
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-    document.body.appendChild(overlay);
 }
 
 // 客户端拉取当前生效公告并全屏展示
@@ -6573,65 +6699,9 @@ function stopAutoSave() {
 }
 
 // 存档功能实现
-function saveGame(slot = 0) {
-    if (gameState.currentScreen !== 'singlePlayerGame') {
-        showNotification('请在单人游戏中保存进度！');
-        return;
-    }
-    
-    // 检查玩家是否可以到达出口
-    const playerX = singlePlayerGame.player.x;
-    const playerY = singlePlayerGame.player.y;
-    const exitX = singlePlayerGame.exit.x;
-    const exitY = singlePlayerGame.exit.y;
-    
-    const path = findPathToExit(singlePlayerGame.maze, playerX, playerY, exitX, exitY);
-    
-    if (!path) {
-        showNotification('无法保存游戏：玩家无法到达出口！');
-        return;
-    }
-    
-    const saveData = {
-        playerData: {
-            x: singlePlayerGame.player.x,
-            y: singlePlayerGame.player.y,
-            hasKey: singlePlayerGame.hasKey
-        },
-        currentLevel: gameState.currentLevel,
-        mazeState: JSON.parse(JSON.stringify(singlePlayerGame.maze)),
-        moveCount: singlePlayerGame.moveCount,
-        keyPosition: singlePlayerGame.keyPosition,
-        doorPosition: singlePlayerGame.doorPosition,
-        startTime: singlePlayerGame.startTime,
-        timestamp: new Date().toLocaleString()
-    };
-    
-    gameState.saveSlots[slot] = saveData;
-    localStorage.setItem('saveSlots', JSON.stringify(gameState.saveSlots));
-    showNotification('保存成功！');
-    
-    // 更新自动保存计时器
-    if (autoSaveTimer) {
-        clearInterval(autoSaveTimer);
-        startAutoSave();
-    }
-}
 
 
-function deleteSave(slot = 0) {
-    if (confirm('确定要删除该存档吗？')) {
-        gameState.saveSlots[slot] = {};
-        localStorage.setItem('saveSlots', JSON.stringify(gameState.saveSlots));
-        showNotification(`已删除存档位置 ${slot+1} 的存档`);
-        updateSaveLoadMenu();
-    }
-}
 
-function showSaveLoadMenu() {
-    document.getElementById('saveLoadModal').classList.remove('hidden');
-    updateSaveLoadMenu();
-}
 
 function closeSaveLoadMenu() {
     const modal = document.getElementById('saveLoadModal');
@@ -7594,14 +7664,6 @@ gameState.puzzleMode = {
 // 随机事件系统
 
 // 解谜模式
-function startPuzzleMode() {
-    gameState.currentChallenge = 'puzzle';
-    gameState.currentLevel = 1;
-    showScreen('singlePlayerGame');
-    
-    // 初始化解谜模式
-    initPuzzleMode();
-}
 
 // 解密游戏（主菜单入口）：显示关卡选择页面
 function startPuzzleGame() {
@@ -8436,103 +8498,13 @@ function resetPuzzleSequence() {
 }
 
 // 修改绘制函数以显示按钮
-function drawSinglePlayerMaze() {
-    const ctx = singlePlayerGame.ctx;
-    ctx.clearRect(0, 0, singlePlayerGame.canvas.width, singlePlayerGame.canvas.height);
-    
-    // 绘制迷宫（原有逻辑）
-    for (let y = 0; y < singlePlayerGame.maze.length; y++) {
-        for (let x = 0; x < singlePlayerGame.maze[y].length; x++) {
-            const cellValue = singlePlayerGame.maze[y][x];
-            let fillStyle = '#111';
-            
-            switch(cellValue) {
-                case 1: fillStyle = '#333'; break; // 墙
-                case 2: fillStyle = '#FF0'; break; // 陷阱
-                case 3: fillStyle = '#0FF'; break; // 传送门
-                case 9: fillStyle = '#8B4513'; break; // 门
-                default: 
-                    if (cellValue >= 10 && cellValue <= 20) {
-                        // 按钮
-                        const buttonId = cellValue - 10;
-                        const button = gameState.puzzleMode.buttons.find(b => b.id === buttonId);
-                        if (button) {
-                            fillStyle = button.pressed ? '#666' : button.color;
-                        }
-                    }
-            }
-            
-            ctx.fillStyle = fillStyle;
-            ctx.fillRect(x * singlePlayerGame.cellSize, y * singlePlayerGame.cellSize, 
-                        singlePlayerGame.cellSize, singlePlayerGame.cellSize);
-            
-            // 绘制按钮编号（如果是解谜模式）
-            if (cellValue >= 10 && cellValue <= 20) {
-                const buttonId = cellValue - 10;
-                ctx.fillStyle = '#000';
-                ctx.font = 'bold ' + (singlePlayerGame.cellSize/3) + 'px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText((buttonId + 1).toString(), 
-                    x * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2,
-                    y * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2
-                );
-            }
-        }
-    }
-    
-    // 绘制出口和玩家（原有逻辑）
-    ctx.fillStyle = '#F00';
-    ctx.fillRect(singlePlayerGame.exit.x * singlePlayerGame.cellSize, 
-                singlePlayerGame.exit.y * singlePlayerGame.cellSize, 
-                singlePlayerGame.cellSize, singlePlayerGame.cellSize);
-    
-    drawPlayerWithSkin(
-        ctx,
-        singlePlayerGame.player.x * singlePlayerGame.cellSize,
-        singlePlayerGame.player.y * singlePlayerGame.cellSize,
-        singlePlayerGame.cellSize
-    );
-    
-    // 绘制玩家名字
-    ctx.fillStyle = '#FFF';
-    ctx.font = 'bold ' + (singlePlayerGame.cellSize/3) + 'px Arial';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    // 绘制文字背景以提高可读性
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    const textWidth = ctx.measureText(gameState.playerName).width;
-    ctx.fillRect(
-        singlePlayerGame.player.x * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2 - textWidth/2 - 4,
-        singlePlayerGame.player.y * singlePlayerGame.cellSize - 2,
-        textWidth + 8,
-        singlePlayerGame.cellSize/4 + 4
-    );
-    // 绘制文字
-    ctx.fillStyle = '#FFF';
-    ctx.fillText(gameState.playerName, 
-        singlePlayerGame.player.x * singlePlayerGame.cellSize + singlePlayerGame.cellSize/2,
-        singlePlayerGame.player.y * singlePlayerGame.cellSize
-    );
-    
-    // 动态重新绘制路径提示（如果激活）
-    if (gameState.showPathHint) {
-        const path = findPathToExit(
-            singlePlayerGame.maze,
-            singlePlayerGame.player.x,
-            singlePlayerGame.player.y,
-            singlePlayerGame.exit.x,
-            singlePlayerGame.exit.y
-        );
-        if (path) drawPathHint(path);
-    }
-}
 
 
 
         // 应用UI设置
         function applyUISettings() {
             const settings = gameState.uiSettings;
+            if (typeof applyMainMenuUiMode === 'function') applyMainMenuUiMode();
             
             // 应用控制面板设置 - 处理两个控制面板
             const singlePlayerControls = document.getElementById('singlePlayerControls');
@@ -8632,6 +8604,44 @@ function drawSinglePlayerMaze() {
             applyJoystickSettings();
         }
 // 全局showScreen函数
+function switchMainTab(tab) {
+    const tabs = document.querySelectorAll('#mainMenu .main-tab');
+    const panels = document.querySelectorAll('#mainMenu .main-tab-panel');
+    tabs.forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-tab') === tab); });
+    panels.forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-tab') === tab); });
+}
+
+// ===== 新旧 UI 模式切换 =====
+function resolveUiMode() {
+    const s = (gameState.uiSettings && typeof gameState.uiSettings === 'object') ? gameState.uiSettings : {};
+    if (s.uiMode === 'new' || s.uiMode === 'old') return s.uiMode;
+    const g = window.__globalUiMode || { mode: 'always', prob: 100 };
+    if (g.mode === 'never') return 'old';
+    if (g.mode === 'probability') return (Math.random() * 100 < (g.prob == null ? 100 : g.prob)) ? 'new' : 'old';
+    return 'new';
+}
+function applyMainMenuUiMode() {
+    const newUI = document.getElementById('mainMenuNewUI');
+    const oldUI = document.getElementById('mainMenuOldUI');
+    if (!newUI || !oldUI) return;
+    if (resolveUiMode() === 'old') {
+        newUI.style.display = 'none';
+        oldUI.style.display = '';
+    } else {
+        newUI.style.display = '';
+        oldUI.style.display = 'none';
+    }
+}
+function setUserUiMode(mode) {
+    if (!gameState.uiSettings || typeof gameState.uiSettings !== 'object') gameState.uiSettings = {};
+    gameState.uiSettings.uiMode = mode;
+    try { localStorage.setItem('uiSettings', JSON.stringify(Object.assign({}, gameState.uiSettings, { customMusic: [] }))); } catch (e) {}
+    applyMainMenuUiMode();
+    if (typeof uploadUISettingsToServer === 'function') uploadUISettingsToServer();
+}
+function switchToOldUI() { setUserUiMode('old'); }
+function switchToNewUI() { setUserUiMode('new'); }
+
 function showScreen(screenId) {
             // 单人游戏被禁用时，拦截所有进入单人模式的入口（仅调试信息可恢复）
             if (gameState.singlePlayerDisabled &&
@@ -9114,19 +9124,20 @@ function showScreen(screenId) {
 
         // 更新游戏时长显示
         function updatePlayTimeDisplay() {
-            const playTimeElement = document.getElementById('playTimeDisplay');
-            if (playTimeElement) {
-                const minutes = Math.floor(gameState.totalPlayTime / (1000 * 60));
-                const hours = Math.floor(minutes / 60);
-                const days = Math.floor(hours / 24);
-                if (days > 0) {
-                    playTimeElement.textContent = `游戏时长: ${days}天 ${hours % 24}小时 ${minutes % 60}分钟`;
-                } else if (hours > 0) {
-                    playTimeElement.textContent = `游戏时长: ${hours}小时 ${minutes % 60}分钟`;
-                } else {
-                    playTimeElement.textContent = `游戏时长: ${minutes}分钟`;
-                }
+            const minutes = Math.floor(gameState.totalPlayTime / (1000 * 60));
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+            let text;
+            if (days > 0) {
+                text = `游戏时长: ${days}天 ${hours % 24}小时 ${minutes % 60}分钟`;
+            } else if (hours > 0) {
+                text = `游戏时长: ${hours}小时 ${minutes % 60}分钟`;
+            } else {
+                text = `游戏时长: ${minutes}分钟`;
             }
+            document.querySelectorAll('.playTimeDisplay').forEach(function (playTimeElement) {
+                playTimeElement.textContent = text;
+            });
         }
 
         // 聊天系统函数
@@ -10982,6 +10993,10 @@ function showUISettings() {
             document.getElementById('showMoveInfo').checked = settings.showMoveInfo;
             document.getElementById('showKeyInfo').checked = settings.showKeyInfo;
             document.getElementById('showRoomInfo').checked = settings.showRoomInfo;
+
+            // 界面模式（新/旧 UI）
+            const uiMode = (settings && settings.uiMode) || 'new';
+            document.querySelectorAll('input[name="uiMode"]').forEach(function (r) { r.checked = (r.value === uiMode); });
             
             // 加载音乐设置
             document.getElementById('musicEnabledCheckbox').checked = settings.musicEnabled;
@@ -11777,7 +11792,9 @@ function showUISettings() {
             customX: customX,
             customY: customY,
             // 保存自定义音乐，如果存在的话
-            customMusic: oldSettings.customMusic || []
+            customMusic: oldSettings.customMusic || [],
+            // 界面模式（新/旧 UI）
+            uiMode: (document.querySelector('input[name="uiMode"]:checked') || {}).value || (oldSettings.uiMode || 'new')
             };
             // 把新设置上传到服务器（供管理员后台查看/覆盖）
             uploadUISettingsToServer();
@@ -16165,10 +16182,6 @@ function handleSinglePlayerKeyDown(e) {
 
 
 // 更新计时器显示
-function updateUnlockTimer() {
-    document.getElementById('unlockTimer').textContent = 
-        `开门倒计时: ${singlePlayerGame.unlockTimeLeft}秒`;
-}
 function checkSinglePlayerExit() {
     // 检查玩家是否在出口位置
     if (singlePlayerGame.player.x === singlePlayerGame.exit.x && 
@@ -18702,9 +18715,9 @@ function startPuzzleMode() {
     gameState.currentChallenge = 'puzzle';
     gameState.currentLevel = 1;
     showScreen('singlePlayerGame');
-    
-    // 这里可以添加特殊的解谜关卡逻辑
-    // 例如：需要按照特定顺序踩踏按钮等
+
+    // 初始化解谜模式（生成谜题关卡并显示 UI）
+    initPuzzleMode();
 }
 
 // 成就系统函数
@@ -18950,15 +18963,16 @@ function showAchievementUnlocked(title, description) {
 // 存档系统
 // 新增删除存档功能
 function deleteSave(slot) {
+    if (!confirm('确定要删除该存档吗？')) return;
     gameState.saveSlots[slot] = {};
     localStorage.setItem('saveSlots', JSON.stringify(gameState.saveSlots));
     showNotification(`存档位置 ${slot + 1} 已删除`);
+    if (typeof updateSaveLoadMenu === 'function') updateSaveLoadMenu();
 }
 
 // 修改保存游戏函数 - 确保保存玩家位置
-function saveGame() {
-    const slot = 0; // 默认使用第一个存档槽位
-    
+function saveGame(slot = 0) {
+
     // 预览模式下禁止保存游戏
     if (gameState.isPreviewMode) {
         return;
