@@ -179,6 +179,16 @@ const DB_TABLES_SQL = [
         detail TEXT,
         INDEX idx_telemetry_client (client_id),
         INDEX idx_telemetry_ts (ts)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS announcements (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        content TEXT NOT NULL,
+        priority INT DEFAULT 0,
+        active TINYINT(1) DEFAULT 1,
+        created_by VARCHAR(64),
+        created_at VARCHAR(32),
+        INDEX idx_ann_active_created (active, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -3492,6 +3502,153 @@ app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
         res.status(500).json({ success: false, message: '发送弹窗失败' });
     }
 });
+
+// ===== 公告功能（管理员发布，持久化到 announcements 表 / JSON 兜底）=====
+const ANNOUNCEMENTS_FILE = path.join(DATA_DIR, 'announcements.json');
+
+// 从存储读取全部公告（DB 优先，失败回退 JSON）
+async function loadAnnouncementsFromStore() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query(
+                'SELECT id, title, content, priority, active, created_by, created_at FROM announcements ORDER BY created_at DESC'
+            );
+            return rows.map(r => ({
+                id: r.id,
+                title: r.title,
+                content: r.content,
+                priority: r.priority,
+                active: r.active,
+                createdBy: r.created_by,
+                createdAt: r.created_at
+            }));
+        } catch (e) {
+            console.error('[公告] DB 读取失败，回退 JSON:', e.message);
+        }
+    }
+    try {
+        if (fs.existsSync(ANNOUNCEMENTS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(ANNOUNCEMENTS_FILE, 'utf8'));
+            if (Array.isArray(arr)) return arr;
+        }
+    } catch (e) { console.error('[公告] JSON 读取失败:', e.message); }
+    return [];
+}
+
+async function saveAnnouncementsToJsonStore(arr) {
+    ensureDataDir();
+    try { fs.writeFileSync(ANNOUNCEMENTS_FILE, JSON.stringify(arr, null, 2)); }
+    catch (e) { console.error('[公告] JSON 写入失败:', e.message); }
+}
+
+// 创建公告（返回创建的记录）。DB 优先，失败回退 JSON 文件。
+async function createAnnouncement({ title, content, priority, createdBy }) {
+    const createdAt = new Date().toISOString();
+    const rec = {
+        id: null,
+        title: String(title).trim(),
+        content: String(content),
+        priority: parseInt(priority, 10) || 0,
+        active: 1,
+        createdBy: createdBy || 'admin',
+        createdAt
+    };
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [result] = await pool.query(
+                'INSERT INTO announcements (title, content, priority, active, created_by, created_at) VALUES (?,?,?,?,?,?)',
+                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt]
+            );
+            rec.id = result.insertId;
+            return rec;
+        } catch (e) {
+            console.error('[公告] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
+    const arr = await loadAnnouncementsFromStore();
+    rec.id = 'a_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    arr.push(rec);
+    saveAnnouncementsToJsonStore(arr);
+    return rec;
+}
+
+// 删除公告（按 id）。DB 优先，失败回退 JSON 文件。
+async function deleteAnnouncementById(id) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query('DELETE FROM announcements WHERE id = ?', [id]);
+            return true;
+        } catch (e) {
+            console.error('[公告] DB 删除失败，回退 JSON:', e.message);
+        }
+    }
+    const arr = await loadAnnouncementsFromStore();
+    const next = arr.filter(a => String(a.id) !== String(id));
+    saveAnnouncementsToJsonStore(next);
+    return true;
+}
+
+// 管理员：发布公告（持久化 + 实时广播给所有在线客户端）
+app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
+    try {
+        const { title, content, priority } = req.body || {};
+        if (!title || !String(title).trim()) {
+            return res.status(400).json({ success: false, message: '公告标题不能为空' });
+        }
+        if (!content || !String(content).trim()) {
+            return res.status(400).json({ success: false, message: '公告内容不能为空' });
+        }
+        const rec = await createAnnouncement({ title, content, priority, createdBy: 'admin' });
+        appendAudit('admin', 'announcement-create', `发布公告: ${String(title).slice(0, 80)}`);
+        // 实时推送给所有在线客户端（游戏端监听 'announcement-new' 全屏弹出）
+        io.emit('announcement-new', rec);
+        console.log(`[Admin] 已发布公告: ${rec.title} (id=${rec.id})`);
+        res.json({ success: true, message: '公告已发布', announcement: rec });
+    } catch (error) {
+        console.error('[API] 发布公告失败:', error);
+        res.status(500).json({ success: false, message: '发布公告失败' });
+    }
+});
+
+// 管理员：获取全部公告（用于后台管理列表）
+app.get('/api/admin/announcements', requireAdminAuth, async (req, res) => {
+    try {
+        const list = await loadAnnouncementsFromStore();
+        res.json({ success: true, announcements: list });
+    } catch (error) {
+        console.error('[API] 获取公告失败:', error);
+        res.status(500).json({ success: false, message: '获取公告失败' });
+    }
+});
+
+// 管理员：删除公告
+app.delete('/api/admin/announcements/:id', requireAdminAuth, async (req, res) => {
+    try {
+        const id = req.params.id;
+        await deleteAnnouncementById(id);
+        appendAudit('admin', 'announcement-delete', `删除公告 id=${id}`);
+        console.log(`[Admin] 已删除公告 id=${id}`);
+        res.json({ success: true, message: '公告已删除' });
+    } catch (error) {
+        console.error('[API] 删除公告失败:', error);
+        res.status(500).json({ success: false, message: '删除公告失败' });
+    }
+});
+
+// 公开接口：游戏客户端拉取当前生效（active）公告，按优先级、时间排序
+app.get('/api/announcements', async (req, res) => {
+    try {
+        const all = await loadAnnouncementsFromStore();
+        const active = all
+            .filter(a => a.active !== 0 && a.active !== false)
+            .sort((a, b) => ((b.priority || 0) - (a.priority || 0)) || (a.createdAt < b.createdAt ? 1 : -1));
+        res.json({ success: true, announcements: active });
+    } catch (error) {
+        console.error('[API] 获取公告失败:', error);
+        res.status(500).json({ success: false, message: '获取公告失败' });
+    }
+});
+
 
 // ===== 新增：热门迷宫管理（管理员专用，持久化到 data/mazes.json） =====
 function generateMazeId() {
