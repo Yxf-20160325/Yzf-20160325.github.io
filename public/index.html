@@ -3244,6 +3244,7 @@
         <button class="menu-button" onclick="showScreen('singlePlayerLevelSelect')">🎮 单人游戏</button>
         <button class="menu-button" onclick="checkServerBeforeMultiplayer()">🌐 多人联机</button>
         <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
+        <button class="menu-button" onclick="showMyHomeProfileModal()">📋 我的主页</button>
         <button class="menu-button" onclick="showInstructions()">📖 游戏说明</button>
         <div id="playTimeDisplay" class="game-info" style="margin: 15px auto; display: inline-block;"></div>
         <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
@@ -4351,6 +4352,49 @@ async function autoConnectToServer() {
 let notificationSocket = null;
 let onlineHeartbeat = null; // 在线状态心跳定时器，避免被服务器/空闲超时清理
 
+// ===== 全局功能控制开关（由管理员在后台「功能设定」统一配置，影响所有客户端）=====
+// 默认值全部开启；socket 连接后从服务器拉取真实配置并实时应用。
+window.globalFunctionControl = {
+    export: true,
+    importClear: true,
+    multiplayerChat: true,
+    multiplayer: true,
+    debugInfo: true,
+    f12DevConsole: true,
+    ctrlShiftCD: true
+};
+
+// 应用全局功能设定：更新内存开关，并同步隐藏/显示对应 UI 按钮
+function applyGlobalFunctions(settings) {
+    if (!settings || typeof settings !== 'object') return;
+    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true };
+    window.globalFunctionControl = Object.assign({}, def, settings);
+    const g = window.globalFunctionControl;
+    // 导出按钮（单人 / 解密）
+    document.querySelectorAll('button[onclick="exportCompletionData()"]').forEach(b => b.style.display = g.export ? '' : 'none');
+    document.querySelectorAll('button[onclick="exportPuzzleCompletionData()"]').forEach(b => b.style.display = g.export ? '' : 'none');
+    // 导入按钮（触发隐藏 file input 的可见按钮）
+    document.querySelectorAll('button[onclick*="importPuzzleCompletionInput"]').forEach(b => b.style.display = g.importClear ? '' : 'none');
+    document.querySelectorAll('button[onclick*="importCompletionInput"]').forEach(b => b.style.display = g.importClear ? '' : 'none');
+    // 多人联机聊天按钮
+    const chatBtn = document.getElementById('chatButton');
+    if (chatBtn) chatBtn.style.display = g.multiplayerChat ? '' : 'none';
+    // 多人联机菜单按钮
+    document.querySelectorAll('button[onclick="checkServerBeforeMultiplayer()"]').forEach(b => b.style.display = g.multiplayer ? '' : 'none');
+    // 调试信息：通过 refreshDevUI 重新评估可见性
+    if (typeof refreshDevUI === 'function') refreshDevUI();
+    console.log('[功能设定] 已应用全局功能开关:', window.globalFunctionControl);
+}
+
+// 从服务器拉取全局功能设定（socket 连接后调用）
+function fetchGlobalFunctions() {
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL) return;
+    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/admin/global-functions')
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d && d.success) applyGlobalFunctions(d.functions); })
+        .catch(() => {});
+}
+
 function showAdminPopup(title, message) {
     // 已存在则先移除，避免重复堆叠
     const existing = document.getElementById('adminBroadcastModal');
@@ -4432,6 +4476,10 @@ function connectNotificationSocket() {
             console.log('[通知] 实时通知 socket 已连接');
             // socket 连接建立后，立即注册在线（内部已判断 playerName 是否存在）
             registerPlayerOnline();
+            // 上报个人主页（emoji+颜色头像/简介），供多人联机他人查看
+            emitMyProfile();
+            // 拉取管理员配置的全局功能开关并应用
+            fetchGlobalFunctions();
             // 心跳：每 15 秒刷新一次在线状态，避免被 onrender 空闲超时 / 连接抖动清理
             if (onlineHeartbeat) clearInterval(onlineHeartbeat);
             onlineHeartbeat = setInterval(() => {
@@ -4596,12 +4644,25 @@ function connectNotificationSocket() {
             if (!data || !data.targetId) return;
             renderSuperadminSettingsForm(data.targetId, data.settings || {}, !!data.adminOverridden);
         });
+        // 游戏内超级管理员拉取的某玩家完整信息（用于玩家信息弹窗）
+        notificationSocket.on('admin-player-info', (data) => {
+            if (!data) return;
+            const box = document.getElementById('superadminInfoBox');
+            if (!box) return;
+            if (!data.success) { box.innerHTML = '<p style="color:#ff6b6b;">加载失败: ' + saEscapeHtml(data.message || '') + '</p>'; return; }
+            renderSuperadminInfoBox(box, data);
+        });
 
         // 管理员远程修改了本玩家的 UI 设置（仅当管理员覆盖时下发，立即生效）
         notificationSocket.on('settings-update', (data) => {
             if (!data || !data.uiSettings) return;
             applyServerUISettings(data.uiSettings);
             console.log('[通知] 管理员已更新你的界面设置');
+        });
+
+        // 管理员更新了全局功能设定（实时广播，立即对所有客户端生效）
+        notificationSocket.on('global-function-update', (data) => {
+            if (data) applyGlobalFunctions(data);
         });
 
         // 管理员在后台修改了本玩家的昵称（不消耗金币，实时生效，无需重新登录）
@@ -4615,6 +4676,14 @@ function connectNotificationSocket() {
             if (pn) pn.value = nm;
             showNotification('管理员已将你的昵称修改为：' + nm, 4000);
             console.log('[通知] 昵称被管理员修改为:', nm);
+        });
+
+        // 其他玩家的个人主页更新（实时缓存，供点击查看）
+        notificationSocket.on('player-profile', (data) => {
+            if (!data || !data.clientId) return;
+            if (!window.playerProfiles) window.playerProfiles = {};
+            window.playerProfiles[String(data.clientId)] = data;
+            if (typeof refreshOpenProfileModal === 'function') refreshOpenProfileModal(String(data.clientId), data);
         });
 
         // 游戏内管理员/超级管理员踢人结果反馈
@@ -4719,10 +4788,8 @@ function connectNotificationSocket() {
 
         // 后台「踢出」按钮：管理员从后台踢出此玩家 → 尝试关闭标签页，并显示全屏遮罩兜底
         notificationSocket.on('admin-kick-tab', (data) => {
-            const msg = (data && data.message) ? data.message : '你已被管理员踢出。';
-            // 浏览器通常禁止脚本关闭用户手动打开的页面，先尝试，失败由遮罩兜底
-            try { window.close(); } catch (_) {}
-            // 全屏不可关闭遮罩，提示玩家手动关闭其标签页
+            const reason = (data && data.message && data.message !== '你已被管理员踢出。') ? data.message : '';
+            // 先显示提示与 5 秒倒计时，倒计时归零后再尝试关闭页面（浏览器可能禁止脚本关手动打开的页，提供手动按钮兜底）
             let ov = document.getElementById('adminKickOverlay');
             if (!ov) {
                 ov = document.createElement('div');
@@ -4732,11 +4799,25 @@ function connectNotificationSocket() {
             }
             ov.innerHTML = ''
                 + '<div style="font-size:26px;color:#FF5252;margin-bottom:16px;">🚫 你已被管理员踢出</div>'
-                + '<div id="adminKickMsg" style="font-size:15px;color:#ddd;max-width:80%;margin-bottom:24px;"></div>'
-                + '<button onclick="window.close();" style="padding:10px 24px;font-size:15px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭此页面</button>'
+                + '<div id="adminKickMsg" style="font-size:16px;color:#ddd;max-width:80%;margin-bottom:10px;"></div>'
+                + '<div id="adminKickCount" style="font-size:18px;color:#ffd43b;margin-bottom:24px;"></div>'
+                + '<button onclick="window.close();" style="padding:10px 24px;font-size:15px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;">立即关闭此页面</button>'
                 + '<div style="font-size:12px;color:#888;margin-top:14px;">若页面未自动关闭，请手动关闭此标签页。</div>';
             const msgEl = ov.querySelector('#adminKickMsg');
-            if (msgEl) msgEl.textContent = msg; // 用 textContent 防注入
+            if (msgEl) msgEl.textContent = '即将关闭页面，并在 5 秒后自动关闭页面' + (reason ? '（' + reason + '）' : ''); // 用 textContent 防注入
+            const countEl = ov.querySelector('#adminKickCount');
+            let left = 5;
+            if (countEl) countEl.textContent = '剩余 ' + left + ' 秒';
+            const timer = setInterval(() => {
+                left--;
+                if (left <= 0) {
+                    clearInterval(timer);
+                    if (countEl) countEl.textContent = '正在关闭...';
+                    try { window.close(); } catch (_) {}
+                } else if (countEl) {
+                    countEl.textContent = '剩余 ' + left + ' 秒';
+                }
+            }, 1000);
         });
 
         // 管理员要求更换地图：仅房主客户端执行（复用本地 generateMultiplayerMaze 重新生成并同步）
@@ -4875,6 +4956,172 @@ async function registerPlayerOnline() {
     fetchMyCoins();
     console.log('[通知] 已注册玩家在线:', gameState.playerName, '(', gameState.clientId, ')');
 }
+
+// ===== 个人主页（多人联机可见，emoji+颜色头像）=====
+function loadHomeProfile() {
+    try {
+        const raw = localStorage.getItem('maze_home_profile');
+        if (raw) {
+            const p = JSON.parse(raw);
+            return {
+                avatar: (typeof p.avatar === 'string' && p.avatar) ? p.avatar.slice(0, 8) : '😀',
+                color: (typeof p.color === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(p.color)) ? p.color : '#4CAF50',
+                bio: (typeof p.bio === 'string') ? p.bio.slice(0, 200) : ''
+            };
+        }
+    } catch (e) {}
+    return { avatar: '😀', color: '#4CAF50', bio: '' };
+}
+function saveHomeProfileLocal(p) {
+    window.myHomeProfile = {
+        avatar: (p && p.avatar) ? String(p.avatar).slice(0, 8) : '😀',
+        color: (p && p.color && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(p.color)) ? p.color : '#4CAF50',
+        bio: (p && p.bio) ? String(p.bio).slice(0, 200) : ''
+    };
+    try { localStorage.setItem('maze_home_profile', JSON.stringify(window.myHomeProfile)); } catch (e) {}
+    return window.myHomeProfile;
+}
+function emitMyProfile() {
+    if (!notificationSocket || !notificationSocket.connected) return;
+    if (!gameState.clientId) return;
+    if (!window.myHomeProfile) window.myHomeProfile = loadHomeProfile();
+    const p = window.myHomeProfile;
+    notificationSocket.emit('set-profile', {
+        clientId: gameState.clientId,
+        name: gameState.playerName,
+        avatar: p.avatar || '😀',
+        color: p.color || '#4CAF50',
+        bio: p.bio || ''
+    });
+}
+
+// 查看他人个人主页（全屏 modal）
+function showPlayerProfileModal(clientId, name) {
+    clientId = clientId || '';
+    name = name || '';
+    const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const existing = document.getElementById('playerProfileModal');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'playerProfileModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = `
+        <div style="background:#fff;color:#222;border-radius:12px;max-width:480px;width:90%;padding:28px;text-align:center;position:relative;max-height:90vh;overflow-y:auto;">
+            <button onclick="closePlayerProfileModal()" style="position:absolute;top:10px;right:14px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
+            <div id="ppmAvatar" style="font-size:64px;width:96px;height:96px;line-height:96px;margin:0 auto 12px;border-radius:50%;background:#4CAF50;">😀</div>
+            <div id="ppmName" style="font-size:22px;font-weight:bold;">${esc(name)}</div>
+            <div id="ppmId" style="font-size:13px;color:#888;margin:6px 0 14px;word-break:break-all;">ID: ${esc(clientId)}</div>
+            <div id="ppmBody" style="font-size:14px;color:#444;white-space:pre-wrap;text-align:left;background:#f5f5f5;border-radius:8px;padding:12px;min-height:40px;">加载中…</div>
+            <div style="margin-top:16px;"><button onclick="closePlayerProfileModal()" style="padding:8px 20px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭</button></div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    let p = (window.playerProfiles && window.playerProfiles[String(clientId)]) || null;
+    if (p) {
+        renderProfileInto(modal, p);
+    } else if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/profile/' + encodeURIComponent(clientId))
+            .then(r => r.json()).then(d => {
+                if (d && d.success && d.profile) {
+                    if (!window.playerProfiles) window.playerProfiles = {};
+                    window.playerProfiles[String(clientId)] = d.profile;
+                    renderProfileInto(modal, d.profile);
+                } else { renderProfileInto(modal, null); }
+            })
+            .catch(() => renderProfileInto(modal, null));
+    } else {
+        renderProfileInto(modal, null);
+    }
+}
+function renderProfileInto(modal, p) {
+    const avatarEl = modal.querySelector('#ppmAvatar');
+    const bodyEl = modal.querySelector('#ppmBody');
+    if (!p) { if (bodyEl) bodyEl.textContent = '（该玩家暂未设置主页）'; return; }
+    if (p.disabled) {
+        if (avatarEl) { avatarEl.textContent = '🚫'; avatarEl.style.background = '#cccccc'; }
+        if (bodyEl) bodyEl.textContent = '该玩家的个人主页已被管理员禁用。';
+        return;
+    }
+    if (avatarEl) { avatarEl.textContent = p.avatar || '😀'; avatarEl.style.background = p.color || '#4CAF50'; }
+    if (bodyEl) bodyEl.textContent = (p.bio && p.bio.trim()) ? p.bio : '（暂无简介）';
+}
+function refreshOpenProfileModal(clientId, data) {
+    const modal = document.getElementById('playerProfileModal');
+    if (!modal) return;
+    const idEl = modal.querySelector('#ppmId');
+    if (idEl && idEl.textContent.indexOf(String(clientId)) === -1) return;
+    renderProfileInto(modal, data);
+}
+function closePlayerProfileModal() { const m = document.getElementById('playerProfileModal'); if (m) m.remove(); }
+
+// 编辑自己的个人主页
+function showMyHomeProfileModal() {
+    if (!window.myHomeProfile) window.myHomeProfile = loadHomeProfile();
+    const p = window.myHomeProfile;
+    const EMOJIS = ['😀','😎','🤖','👽','🐱','🐶','🦊','🐼','🌟','🔥','💎','🍎','⚡','🌈','🎮','👾','🐉','🦄','🌸','🍔'];
+    const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const existing = document.getElementById('myHomeProfileModal');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'myHomeProfileModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
+    const emojiBtns = EMOJIS.map(e => `<button type="button" class="mhp-emoji" data-emoji="${e}" style="font-size:22px;padding:6px 8px;margin:3px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer;">${e}</button>`).join('');
+    const curColor = p.color || '#4CAF50';
+    modal.innerHTML = `
+        <div style="background:#fff;color:#222;border-radius:12px;max-width:480px;width:90%;padding:28px;text-align:center;position:relative;max-height:90vh;overflow-y:auto;">
+            <button onclick="closeMyHomeProfileModal()" style="position:absolute;top:10px;right:14px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
+            <h3 style="margin-top:0;">📋 我的个人主页</h3>
+            <div style="margin:12px 0;text-align:left;">
+                <div style="font-weight:bold;margin-bottom:6px;">头像（点选 emoji）</div>
+                <div id="mhpEmojiWrap" style="display:flex;flex-wrap:wrap;justify-content:center;">${emojiBtns}</div>
+                <div style="margin-top:10px;">当前：<span id="mhpAvatarPreview" style="font-size:32px;">${esc(p.avatar || '😀')}</span></div>
+            </div>
+            <div style="margin:12px 0;text-align:left;">
+                <label style="font-weight:bold;display:block;margin-bottom:6px;">头像颜色</label>
+                <input type="color" id="mhpColor" value="${esc(curColor)}" style="width:64px;height:36px;vertical-align:middle;">
+                <span id="mhpColorVal" style="margin-left:8px;font-family:monospace;">${esc(curColor)}</span>
+            </div>
+            <div style="margin:12px 0;text-align:left;">
+                <label style="font-weight:bold;display:block;margin-bottom:6px;">主页信息（简介，自动转义，最多200字）</label>
+                <textarea id="mhpBio" rows="3" placeholder="介绍一下自己…" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;">${esc(p.bio || '')}</textarea>
+                <div style="font-size:12px;color:#999;"><span id="mhpBioCount">${(p.bio || '').length}</span>/200</div>
+            </div>
+            <div style="margin-top:16px;display:flex;gap:8px;justify-content:center;">
+                <button onclick="saveMyHomeProfile()" style="padding:8px 20px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;">💾 保存</button>
+                <button onclick="closeMyHomeProfileModal()" style="padding:8px 20px;background:#999;color:#fff;border:none;border-radius:6px;cursor:pointer;">取消</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const wrap = modal.querySelector('#mhpEmojiWrap');
+    const cur = p.avatar || '😀';
+    if (wrap) {
+        wrap.addEventListener('click', (ev) => {
+            const b = ev.target.closest('.mhp-emoji'); if (!b) return;
+            const av = b.getAttribute('data-emoji');
+            const prev = modal.querySelector('#mhpAvatarPreview'); if (prev) prev.textContent = av;
+            wrap.querySelectorAll('.mhp-emoji').forEach(x => x.style.borderColor = '#ccc');
+            b.style.borderColor = '#4CAF50';
+        });
+        wrap.querySelectorAll('.mhp-emoji').forEach(x => { if (x.getAttribute('data-emoji') === cur) x.style.borderColor = '#4CAF50'; });
+    }
+    const colorInput = modal.querySelector('#mhpColor'); const colorVal = modal.querySelector('#mhpColorVal');
+    if (colorInput && colorVal) colorInput.addEventListener('input', () => { colorVal.textContent = colorInput.value; });
+    const bio = modal.querySelector('#mhpBio'); const bioCount = modal.querySelector('#mhpBioCount');
+    if (bio && bioCount) bio.addEventListener('input', () => { bioCount.textContent = bio.value.length; });
+}
+function saveMyHomeProfile() {
+    const modal = document.getElementById('myHomeProfileModal'); if (!modal) return;
+    const avatar = (modal.querySelector('#mhpAvatarPreview') || {}).textContent || '😀';
+    const color = modal.querySelector('#mhpColor') ? modal.querySelector('#mhpColor').value : '#4CAF50';
+    const bio = modal.querySelector('#mhpBio') ? modal.querySelector('#mhpBio').value : '';
+    saveHomeProfileLocal({ avatar, color, bio });
+    emitMyProfile();
+    closeMyHomeProfileModal();
+    if (typeof showNotification === 'function') showNotification('✅ 个人主页已保存', 2000);
+}
+function closeMyHomeProfileModal() { const m = document.getElementById('myHomeProfileModal'); if (m) m.remove(); }
+
 async function unregisterPlayerOnline() {
     if (!gameState.clientId) return;
     const payload = { id: gameState.clientId };
@@ -5480,6 +5727,11 @@ function reportTelemetry(event, detail) {
 
 // 检查服务器连接后进入多人游戏
 async function checkServerBeforeMultiplayer() {
+    // 全局功能设定：多人联机功能被管理员禁用
+    if (window.globalFunctionControl && window.globalFunctionControl.multiplayer === false) {
+        showMultiplayerDisabledModal('多人联机功能已被管理员禁用，无法进入联机模式。');
+        return;
+    }
     // 检查多人联机权限
     if (gameState.multiplayerDisabled) {
         showMultiplayerDisabledModal(gameState.multiplayerDisabledReason || '多人联机功能已被禁用，无法进入联机模式。');
@@ -8893,6 +9145,11 @@ function showScreen(screenId) {
         // 聊天系统函数
         // 打开聊天模态框
         function openChatModal() {
+            // 全局功能设定：多人联机聊天功能被管理员禁用
+            if (window.globalFunctionControl && window.globalFunctionControl.multiplayerChat === false) {
+                showChatDisabledModal('多人联机聊天功能已被管理员禁用。');
+                return;
+            }
             // 多人游戏聊天被管理员封禁：禁止打开聊天窗口
             if (gameState.chatDisabled) {
                 showChatDisabledModal(gameState.chatDisabledReason || '你的多人游戏聊天功能已被管理员封禁。');
@@ -12078,7 +12335,9 @@ function showMessageToSelf(message) {
             const btn = document.getElementById('debugInfoBtn');
             if (!btn) return;
             const roleUnlocked = (gameState.myRole === 'admin' || gameState.myRole === 'superadmin');
-            if (gameState.developerMode || gameState.devMode || roleUnlocked) {
+            // 全局功能设定：调试信息被禁用时，即使处于开发者模式也不显示
+            const debugAllowed = !(window.globalFunctionControl && window.globalFunctionControl.debugInfo === false);
+            if (debugAllowed && (gameState.developerMode || gameState.devMode || roleUnlocked)) {
                 btn.classList.remove('hidden');
                 // 避免与右上角最上方的“超管管理”按钮重叠：超管可见时把调试信息按钮放到其下方
                 const saBtn = document.getElementById('superadminManageBtn');
@@ -12140,7 +12399,7 @@ function showMessageToSelf(message) {
                 modal.id = 'superadminPanel';
                 modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:55000;display:flex;align-items:center;justify-content:center;';
                 modal.innerHTML = `
-                    <div style="background:#1e1e2f;color:#e8e8ef;border-radius:10px;padding:20px;width:420px;max-height:80vh;overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.5);">
+                    <div style="background:#1e1e2f;color:#e8e8ef;border-radius:0;padding:20px;width:100vw;height:100vh;max-height:100vh;overflow:auto;box-sizing:border-box;box-shadow:0 6px 24px rgba(0,0,0,.5);">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                             <h3 style="margin:0;font-size:16px;">🛡️ 超管管理面板</h3>
                             <button onclick="closeSuperadminPanel()" style="background:none;border:none;color:#b6b6cc;font-size:20px;cursor:pointer;">×</button>
@@ -12195,19 +12454,19 @@ function showMessageToSelf(message) {
                 const roleName = { user: '👤 用户', admin: '🛡️ 管理员', superadmin: '👑 超级管理员' }[u.role] || '👤 用户';
                 const me = u.id === gameState.clientId ? ' (我)' : '';
                 const enc = encodeURIComponent(u.id);
-                const mkBtn = (label, role, color) => `<button onclick="superadminSetRole('${enc}','${role}')" style="margin:2px;padding:4px 8px;background:${color};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">${label}</button>`;
-                const actBtn = (label, fn, color) => `<button onclick="${fn}('${enc}')" style="margin:2px;padding:4px 8px;background:${color};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;">${label}</button>`;
+                const mkBtn = (label, role, color) => `<button onclick="superadminSetRole('${enc}','${role}')" style="margin:3px;padding:7px 16px;background:${color};color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;min-width:72px;">${label}</button>`;
+                const actBtn = (label, fn, color) => `<button onclick="${fn}('${enc}')" style="margin:3px;padding:7px 16px;background:${color};color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;min-width:72px;">${label}</button>`;
                 const banChk = (id, label) => `<label style="display:inline-block;margin:2px 8px 2px 0;font-size:12px;color:#cdd;"><input type="checkbox" id="${id}_${enc}" style="vertical-align:middle;"> ${label}</label>`;
                 return `
                     <div style="padding:8px;border-bottom:1px solid #3a3a55;">
                         <div style="font-weight:bold;">${saEscapeHtml(u.name || '玩家')}${me}</div>
                         <div style="font-size:12px;color:#b6b6cc;margin:2px 0;">当前：${roleName} <span style="color:#8a8aa3;">(ID: ${saEscapeHtml(u.id || '')})</span></div>
-                        <div>${mkBtn('设为用户', 'user', '#6c757d')}${mkBtn('管理员', 'admin', '#007bff')}${mkBtn('超管', 'superadmin', '#e83e8c')}</div>
-                        <div style="margin-top:4px;">${actBtn('改名', 'superadminRename', '#8e44ad')}${actBtn('踢出', 'superadminKick', '#fd7e14')}${actBtn('全部通关', 'superadminCompleteAll', '#28a745')}${actBtn('封禁▾', 'superadminToggleBan', '#dc3545')}${actBtn('设置', 'superadminOpenSettings', '#17a2b8')}${actBtn('IP封', 'superadminBanIP', '#6f42c1')}${actBtn('IP解', 'superadminUnbanIP', '#20c997')}</div>
+                        <div>${mkBtn('设为用户', 'user', '#6c757d')}${mkBtn('设为管理员', 'admin', '#007bff')}${mkBtn('设为超级管理员', 'superadmin', '#e83e8c')}</div>
+                        <div style="margin-top:4px;">${actBtn('玩家信息', 'superadminShowInfo', '#0d6efd')}${actBtn('改名', 'superadminRename', '#8e44ad')}${actBtn('踢出', 'superadminKick', '#fd7e14')}${actBtn('全部通关', 'superadminCompleteAll', '#28a745')}${actBtn('封禁', 'superadminToggleBan', '#dc3545')}${actBtn('设置', 'superadminOpenSettings', '#17a2b8')}${actBtn('IP封禁', 'superadminBanIP', '#6f42c1')}${actBtn('IP解封', 'superadminUnbanIP', '#20c997')}</div>
                         <div id="saBan_${enc}" style="display:none;margin-top:6px;padding:8px;background:#26263a;border-radius:6px;">
                             <div>${banChk('mp', '多人')}${banChk('sp', '单人')}${banChk('pz', '解密')}${banChk('ch', '聊天')}</div>
                             <input id="saBanReason_${enc}" placeholder="封禁理由（可选）" style="width:100%;box-sizing:border-box;padding:4px;margin:4px 0;font-size:12px;border-radius:4px;border:none;">
-                            <button onclick="superadminApplyBan('${enc}')" style="padding:4px 10px;background:#dc3545;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">应用封禁/解封</button>
+                            <button onclick="superadminApplyBan('${enc}')" style="padding:7px 16px;background:#dc3545;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;min-width:120px;">应用封禁/解封</button>
                             <span style="font-size:11px;color:#8a8aa3;margin-left:6px;">（勾选=封禁，取消=解封）</span>
                         </div>
                     </div>`;
@@ -12228,7 +12487,9 @@ function showMessageToSelf(message) {
             const targetId = decodeURIComponent(encId);
             if (targetId === gameState.clientId) { showNotification('不能踢出自己', 2000); return; }
             if (!confirm('确定要踢出该玩家并关闭其游戏页面吗？')) return;
-            notificationSocket.emit('admin-kick', { requesterId: gameState.clientId, targetId, reason: '你已被超级管理员踢出。' });
+            const reason = prompt('踢出理由（可选，留空则用默认提示，将展示给玩家）：', '你已被超级管理员踢出。');
+            const finalReason = (reason === null || !reason.trim()) ? '你已被超级管理员踢出。' : reason.trim().slice(0, 200);
+            notificationSocket.emit('admin-kick', { requesterId: gameState.clientId, targetId, reason: finalReason });
         }
 
         function superadminCompleteAll(encId) {
@@ -12313,7 +12574,7 @@ function showMessageToSelf(message) {
                 return '';
             }).join('');
             modal.innerHTML = `
-                <div style="background:#1e1e2f;color:#e8e8ef;border-radius:10px;padding:18px;width:380px;max-height:82vh;overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.5);">
+                <div style="background:#1e1e2f;color:#e8e8ef;border-radius:0;padding:18px;width:100vw;height:100vh;max-height:100vh;overflow:auto;box-sizing:border-box;box-shadow:0 6px 24px rgba(0,0,0,.5);">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
                         <h3 style="margin:0;font-size:15px;">⚙️ 玩家设置 — ${saEscapeHtml(targetId)}</h3>
                         <button onclick="document.getElementById('superadminSettingsModal').style.display='none'" style="background:none;border:none;color:#b6b6cc;font-size:20px;cursor:pointer;">×</button>
@@ -12373,6 +12634,65 @@ function showMessageToSelf(message) {
         window.superadminClearSettings = superadminClearSettings;
         window.superadminBanIP = superadminBanIP;
         window.superadminUnbanIP = superadminUnbanIP;
+        window.superadminShowInfo = superadminShowInfo;
+        window.renderSuperadminInfoBox = renderSuperadminInfoBox;
+
+        function superadminShowInfo(encId) {
+            if (gameState.myRole !== 'superadmin') return;
+            const targetId = decodeURIComponent(encId);
+            let modal = document.getElementById('superadminInfoModal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'superadminInfoModal';
+                modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:57000;display:none;align-items:center;justify-content:center;';
+                document.body.appendChild(modal);
+            }
+            modal.innerHTML = `
+                <div style="background:#1e1e2f;color:#e8e8ef;border-radius:0;padding:18px;width:100vw;height:100vh;max-height:100vh;overflow:auto;box-sizing:border-box;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <h3 style="margin:0;font-size:15px;">👤 玩家信息 — ${saEscapeHtml(targetId)}</h3>
+                        <button onclick="document.getElementById('superadminInfoModal').style.display='none'" style="background:none;border:none;color:#b6b6cc;font-size:20px;cursor:pointer;">×</button>
+                    </div>
+                    <div id="superadminInfoBox" style="max-height:calc(100vh - 90px);overflow:auto;">加载中...</div>
+                </div>`;
+            modal.style.display = 'flex';
+            if (typeof notificationSocket !== 'undefined' && notificationSocket && notificationSocket.connected) {
+                notificationSocket.emit('admin-get-player-info', { requesterId: gameState.clientId, targetId });
+            }
+        }
+
+        function renderSuperadminInfoBox(box, d) {
+            if (!d) return;
+            const banLabels = { multiplayer: '多人游戏', single: '单人游戏', puzzle: '解密游戏', chat: '聊天' };
+            const banTypes = ['multiplayer', 'single', 'puzzle', 'chat'];
+            const banRows = banTypes.map(t => {
+                const on = d.bans && d.bans[t];
+                const reason = (d.bans && d.bans.reasons && d.bans.reasons[t]) || '';
+                return `<tr><td style="padding:6px 8px;border-bottom:1px solid #3a3a55;color:#cdd;">${banLabels[t]}</td><td style="padding:6px 8px;border-bottom:1px solid #3a3a55;color:${on ? '#ff6b6b' : '#51cf66'};font-weight:bold;">${on ? '已封禁' : '正常'}</td><td style="padding:6px 8px;border-bottom:1px solid #3a3a55;color:#aaa;">${reason ? saEscapeHtml(reason) : '—'}</td></tr>`;
+            }).join('');
+            const gs = d.gamestate || {};
+            const gsKeys = Object.keys(gs);
+            const gsRows = gsKeys.length ? gsKeys.map(k => `<tr><td style="padding:5px 8px;border-bottom:1px solid #2e2e44;color:#9aa;">${saEscapeHtml(k)}</td><td style="padding:5px 8px;border-bottom:1px solid #2e2e44;">${saEscapeHtml(formatDebugVal(gs[k]))}</td></tr>`).join('') : '<tr><td style="padding:6px 8px;color:#888;">无数据</td></tr>';
+            const secs = (typeof d.totalPlayTime === 'number') ? d.totalPlayTime : 0;
+            const dur = Math.floor(secs / 3600) + '小时' + Math.floor((secs % 3600) / 60) + '分' + (secs % 60) + '秒';
+            box.innerHTML = `
+                ${d.ipBanned ? `<p style="color:#ff6b6b;margin:4px 0;">⚠️ 该 IP 已被封禁${d.ipBanReason ? '：' + saEscapeHtml(d.ipBanReason) : ''}</p>` : ''}
+                <h4 style="margin:10px 0 6px;color:#e8e8ef;">基本信息</h4>
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">用户名</td><td style="padding:6px 8px;">${saEscapeHtml(d.username || '')}</td></tr>
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">Client ID</td><td style="padding:6px 8px;font-family:monospace;color:#cdd;">${saEscapeHtml(d.clientId || '')}</td></tr>
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">在线状态</td><td style="padding:6px 8px;color:${d.online ? '#51cf66' : '#888'};font-weight:bold;">${d.online ? '在线' : '离线'}</td></tr>
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">角色</td><td style="padding:6px 8px;">${saEscapeHtml(d.role || 'user')}</td></tr>
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">IP 地址</td><td style="padding:6px 8px;font-family:monospace;color:#cdd;">${saEscapeHtml(d.ip || '未知')}</td></tr>
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">金币数量</td><td style="padding:6px 8px;font-weight:bold;color:#ffd43b;" colspan="2">${d.coins || 0}</td></tr>
+                    <tr><td style="padding:6px 8px;color:#8a8aa3;">游戏时长</td><td style="padding:6px 8px;" colspan="2">${dur}</td></tr>
+                </table>
+                <h4 style="margin:14px 0 6px;color:#e8e8ef;">封禁状态</h4>
+                <table style="width:100%;border-collapse:collapse;font-size:13px;"><tbody>${banRows}</tbody></table>
+                <h4 style="margin:14px 0 6px;color:#e8e8ef;">游戏状态 (gamestate)</h4>
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">${gsRows}</table>
+            `;
+        }
 
         function superadminSetRole(encId, role) {
             if (gameState.myRole !== 'superadmin') return;
@@ -13291,6 +13611,10 @@ function isValidPosition(x, y) {
 
         // ===== 单人迷宫完成数据 导出/导入 =====
         function exportCompletionData() {
+            // 全局功能设定：导出功能被管理员禁用
+            if (window.globalFunctionControl && window.globalFunctionControl.export === false) {
+                showNotification('导出功能已被管理员禁用', 3000); return;
+            }
             try {
                 const data = {
                     type: 'maze-completion',
@@ -13319,6 +13643,10 @@ function isValidPosition(x, y) {
         }
 
         function importCompletionData(event) {
+            // 全局功能设定：导入通关数据被管理员禁用
+            if (window.globalFunctionControl && window.globalFunctionControl.importClear === false) {
+                showNotification('导入通关数据功能已被管理员禁用', 3000); return;
+            }
             const fileInput = event.target;
             const file = fileInput.files && fileInput.files[0];
             if (!file) return;
@@ -13391,6 +13719,10 @@ function isValidPosition(x, y) {
 
         // ===== 解密游戏完成数据 导出/导入（与单人游戏对称） =====
         function exportPuzzleCompletionData() {
+            // 全局功能设定：导出功能被管理员禁用
+            if (window.globalFunctionControl && window.globalFunctionControl.export === false) {
+                showNotification('导出功能已被管理员禁用', 3000); return;
+            }
             try {
                 const data = {
                     type: 'puzzle-completion',
@@ -13418,6 +13750,10 @@ function isValidPosition(x, y) {
         }
 
         function importPuzzleCompletionData(event) {
+            // 全局功能设定：导入通关数据被管理员禁用
+            if (window.globalFunctionControl && window.globalFunctionControl.importClear === false) {
+                showNotification('导入通关数据功能已被管理员禁用', 3000); return;
+            }
             const fileInput = event.target;
             const file = fileInput.files && fileInput.files[0];
             if (!file) return;
@@ -18084,6 +18420,7 @@ function connectToMultiplayerGame() {
             // 添加自己作为玩家
             gameState.multiplayer.players[peerId] = {
                 id: peerId,
+                clientId: gameState.clientId,
                 name: gameState.playerName,
                 x: 1,
                 y: 1,
@@ -18252,6 +18589,7 @@ function connectToMultiplayerGame() {
                         type: 'player-join',
                         player: {
                             id: gameState.multiplayer.currentPlayerId,
+                            clientId: gameState.clientId,
                             name: gameState.playerName,
                             color: playerColor
                         },
@@ -19088,6 +19426,7 @@ function handleMultiplayerData(data, peerId) {
                         if (!gameState.multiplayer.players[gameState.multiplayer.currentPlayerId]) {
                             gameState.multiplayer.players[gameState.multiplayer.currentPlayerId] = {
                                 id: gameState.multiplayer.currentPlayerId,
+                                clientId: gameState.clientId,
                                 name: gameState.playerName,
                                 x: 1,
                                 y: 1,
@@ -20411,9 +20750,11 @@ window.addEventListener('load', initializeNewFeatures);
                 
                 const playerInfo = document.createElement('div');
                 playerInfo.className = 'player-info';
+                const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const pidSafe = String(player.clientId || '').replace(/'/g, "\\'");
                 playerInfo.innerHTML = `
                     <div class="player-color" style="background-color:${player.color}"></div>
-                    ${player.name} ${player.isHost ? '🏠' : ''} ${player.reachedExit ? '✓' : ''}
+                    <span class="player-name" data-name="${esc(player.name)}" onclick="showPlayerProfileModal('${pidSafe}', this.getAttribute('data-name'))" style="cursor:pointer;text-decoration:underline;">${esc(player.name)}</span> ${player.isHost ? '🏠' : ''} ${player.reachedExit ? '✓' : ''}
                     ${gameState.multiplayer.protectedPlayers[playerId] ? '🛡️' : ''}
                 `;
                 
@@ -20992,36 +21333,53 @@ function updateMultiplayerGame() {
 
         // =============== 键盘快捷键 ===============
         document.addEventListener('keydown', function(e) {
-            // Ctrl+Shift+C 打开/关闭控制台
+            const gf = (window.globalFunctionControl || {});
+
+            // F12 打开/关闭开发者控制台（受「F12 开发者控制台」开关控制）
+            if (e.key === 'F12') {
+                if (gf.f12DevConsole !== false) {
+                    e.preventDefault();
+                    toggleConsole();
+                }
+                return;
+            }
+
+            // Ctrl+Shift+C 打开/关闭控制台（受「CTRL+SHIFT+C/D」开关控制）
             if (e.ctrlKey && e.shiftKey && e.key === 'C') {
-                e.preventDefault();
-                toggleConsole();
+                if (gf.ctrlShiftCD !== false) {
+                    e.preventDefault();
+                    toggleConsole();
+                }
+                return;
             }
-            
-            // Ctrl+Shift+D 切换开发者模式
+
+            // Ctrl+Shift+D 切换开发者模式（受「CTRL+SHIFT+C/D」开关控制）
             if (e.ctrlKey && e.shiftKey && e.key === 'D') {
-                e.preventDefault();
-                gameState.devMode = !gameState.devMode;
-                console.log('开发者模式:', gameState.devMode ? '开启' : '关闭');
-                
-                // 显示提示
-                const hint = document.createElement('div');
-                hint.className = 'console-hint';
-                hint.textContent = `开发者模式 ${gameState.devMode ? '开启' : '关闭'}`;
-                document.body.appendChild(hint);
-                
-                setTimeout(() => {
-                    hint.classList.add('hidden');
-                    setTimeout(() => hint.remove(), 500);
-                }, 2000);
+                if (gf.ctrlShiftCD !== false) {
+                    e.preventDefault();
+                    gameState.devMode = !gameState.devMode;
+                    console.log('开发者模式:', gameState.devMode ? '开启' : '关闭');
+
+                    // 显示提示
+                    const hint = document.createElement('div');
+                    hint.className = 'console-hint';
+                    hint.textContent = `开发者模式 ${gameState.devMode ? '开启' : '关闭'}`;
+                    document.body.appendChild(hint);
+
+                    setTimeout(() => {
+                        hint.classList.add('hidden');
+                        setTimeout(() => hint.remove(), 500);
+                    }, 2000);
+                }
+                return;
             }
-            
+
             // 控制台输入处理
             if (consoleVisible && e.key === 'Enter') {
                 const input = document.getElementById('consoleInput');
                 const command = input.value.trim();
                 input.value = '';
-                    
+
                 if (command) {
                     consoleHistory.push(command);
                     historyIndex = consoleHistory.length;
