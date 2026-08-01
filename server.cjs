@@ -153,6 +153,7 @@ const DB_TABLES_SQL = [
         bio TEXT,
         disabled TINYINT(1) DEFAULT 0,
         admin_overridden TINYINT(1) DEFAULT 0,
+        can_view_others TINYINT(1) DEFAULT 1,
         updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS user_settings (
@@ -1305,12 +1306,25 @@ const HOME_PROFILES_FILE = path.join(DATA_DIR, 'home-profiles.json');
 // 结构：{ name, avatar(emoji), color(hex), bio, disabled, adminOverridden }
 let homeProfiles = new Map();
 
+// 为已存在的 home_profiles 表补齐 can_view_others 列（幂等：列已存在则忽略报错）
+async function ensureHomeProfilesCanViewOthers() {
+    if (!DB_AVAILABLE || !pool) return;
+    try {
+        await pool.query('ALTER TABLE home_profiles ADD COLUMN can_view_others TINYINT(1) DEFAULT 1');
+    } catch (e) {
+        // 1060 = Duplicate column name；其他错误也忽略（只要列已存在即可）
+        if (e && e.code !== 'ER_DUP_FIELDNAME' && !/duplicate column/i.test(e.message || '')) {
+            console.error('[Home] 增加 can_view_others 列失败:', e.message);
+        }
+    }
+}
 async function loadHomeProfiles() {
     if (DB_AVAILABLE && pool) {
         try {
-            const [rows] = await pool.query('SELECT client_id, name, avatar, color, bio, disabled, admin_overridden, updated_at FROM home_profiles');
+            await ensureHomeProfilesCanViewOthers();
+            const [rows] = await pool.query('SELECT client_id, name, avatar, color, bio, disabled, admin_overridden, can_view_others, updated_at FROM home_profiles');
             homeProfiles = new Map();
-            rows.forEach(r => { if (r && r.client_id) homeProfiles.set(r.client_id, { name: r.name, avatar: r.avatar, color: r.color, bio: r.bio, disabled: !!r.disabled, adminOverridden: !!r.admin_overridden, updatedAt: r.updated_at }); });
+            rows.forEach(r => { if (r && r.client_id) homeProfiles.set(r.client_id, { name: r.name, avatar: r.avatar, color: r.color, bio: r.bio, disabled: !!r.disabled, adminOverridden: !!r.admin_overridden, canViewOthers: r.can_view_others == null ? true : !!r.can_view_others, updatedAt: r.updated_at }); });
             return;
         } catch (e) { console.error('[Home] DB 加载失败，回退 JSON:', e.message); }
     }
@@ -1332,9 +1346,9 @@ async function saveHomeProfiles() {
         try {
             for (const [clientId, p] of homeProfiles) {
                 await pool.query(
-                    'INSERT INTO home_profiles (client_id, name, avatar, color, bio, disabled, admin_overridden, updated_at) VALUES (?,?,?,?,?,?,?,?) ' +
-                    'ON DUPLICATE KEY UPDATE name=VALUES(name),avatar=VALUES(avatar),color=VALUES(color),bio=VALUES(bio),disabled=VALUES(disabled),admin_overridden=VALUES(admin_overridden),updated_at=VALUES(updated_at)',
-                    [clientId, p.name || '', p.avatar || '🙂', p.color || '#4CAF50', p.bio || '', p.disabled ? 1 : 0, p.adminOverridden ? 1 : 0, p.updatedAt || new Date().toISOString()]
+                    'INSERT INTO home_profiles (client_id, name, avatar, color, bio, disabled, admin_overridden, can_view_others, updated_at) VALUES (?,?,?,?,?,?,?,?,?) ' +
+                    'ON DUPLICATE KEY UPDATE name=VALUES(name),avatar=VALUES(avatar),color=VALUES(color),bio=VALUES(bio),disabled=VALUES(disabled),admin_overridden=VALUES(admin_overridden),can_view_others=VALUES(can_view_others),updated_at=VALUES(updated_at)',
+                    [clientId, p.name || '', p.avatar || '🙂', p.color || '#4CAF50', p.bio || '', p.disabled ? 1 : 0, p.adminOverridden ? 1 : 0, (p.canViewOthers === false ? 0 : 1), p.updatedAt || new Date().toISOString()]
                 );
             }
         } catch (e) { console.error('[Home] DB 保存失败:', e.message); }
@@ -1418,6 +1432,10 @@ app.put('/api/admin/users/:userId/profile', requireAdminAuth, (req, res) => {
         if (typeof body.disabled === 'boolean') {
             merged.disabled = body.disabled;
             merged.adminOverridden = true;
+        }
+        // 是否允许该玩家查看他人主页（管理员权限控制，默认允许）
+        if (typeof body.canViewOthers === 'boolean') {
+            merged.canViewOthers = body.canViewOthers;
         }
         // 管理员修改了任意主页信息字段，同样标记为覆盖
         if (typeof body.avatar === 'string' || typeof body.color === 'string' || typeof body.bio === 'string' || typeof body.name === 'string') {
