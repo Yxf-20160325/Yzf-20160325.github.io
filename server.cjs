@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const mysql = require('mysql2/promise');
 
 const app = express();
 // 配置CORS以支持跨网络连接
@@ -26,9 +27,254 @@ const SUPERADMIN_PASSWORD_PATH = path.join(__dirname, 'superadmin-password.txt')
 // 数据目录：默认 ./data；部署到会清空运行目录的平台（如 onrender 免费版每次部署/冷启会清空运行时文件）时，
 // 可通过环境变量 DATA_DIR 指向一块「持久磁盘」，否则遥测/审计会在重启后丢失。
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+
+// ===== MySQL 数据层（默认连接已写入；可用同名环境变量覆盖）=====
+// 连接配置优先级：process.env.DATABASE_URL > 环境变量 DB_* > 下面写死的默认值
+let pool = null;
+let DB_AVAILABLE = false;
+
+// 默认数据库连接（已写入 server；部署到 onrender 等平台时，若设置了同名环境变量则覆盖此处默认值）。
+// 你已配好的 DB_HOST / DB_PORT 通过环境变量传入即可覆盖下面两个默认值。
+const DEFAULT_DB = {
+    host: process.env.DB_HOST || 'nu3uys.h.filess.io',
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3307,
+    user: process.env.DB_USER || 'maze_graysetsor',
+    password: process.env.DB_PASSWORD || '4c613aeb828b9923c8b12b63b11373f2a31a3357',
+    database: process.env.DB_NAME || 'maze_graysetsor',
+};
+
+function parseDbUrl(url) {
+    // mysql://user:password@host:port/database
+    const m = String(url).match(/^mysql:\/\/([^:]+):([^@]+)@([^:/]+)(?::(\d+))?\/([^?]+)/);
+    if (!m) return null;
+    return { host: m[3], port: m[4] ? parseInt(m[4], 10) : 3306, user: m[1], password: decodeURIComponent(m[2]), database: m[5] };
+}
+function buildDbConfig() {
+    if (process.env.DATABASE_URL) {
+        const p = parseDbUrl(process.env.DATABASE_URL);
+        if (p) return p;
+    }
+    const { DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
+    if (DB_HOST && DB_USER && DB_PASSWORD && DB_NAME) {
+        return { host: DB_HOST, port: DB_PORT ? parseInt(DB_PORT, 10) : 3306, user: DB_USER, password: DB_PASSWORD, database: DB_NAME };
+    }
+    // 没有通过环境变量传入时，使用写死的默认值（保证 onrender 部署无需逐一配置 env 也能连库）
+    return { ...DEFAULT_DB };
+}
+function parseJsonCol(v) {
+    if (v == null) return null;
+    if (typeof v === 'object') return v;
+    try { return JSON.parse(v); } catch (_) { return null; }
+}
+const DB_TABLES_SQL = [
+    `CREATE TABLE IF NOT EXISTS accounts (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(64) NOT NULL,
+        role ENUM('admin','superadmin') NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_by VARCHAR(64),
+        created_at VARCHAR(32),
+        last_ip VARCHAR(64),
+        disabled TINYINT(1) DEFAULT 0,
+        UNIQUE KEY uniq_role_name (role, name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS user_roles (
+        user_id VARCHAR(128) PRIMARY KEY,
+        role VARCHAR(32) NOT NULL,
+        set_by VARCHAR(64),
+        set_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS home_profiles (
+        client_id VARCHAR(128) PRIMARY KEY,
+        name VARCHAR(32),
+        avatar VARCHAR(16),
+        color VARCHAR(16),
+        bio TEXT,
+        disabled TINYINT(1) DEFAULT 0,
+        admin_overridden TINYINT(1) DEFAULT 0,
+        updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS user_settings (
+        user_id VARCHAR(128) PRIMARY KEY,
+        admin_json JSON,
+        client_json JSON
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        ts VARCHAR(32) NOT NULL,
+        actor VARCHAR(64),
+        action VARCHAR(64),
+        detail TEXT,
+        ip VARCHAR(64),
+        INDEX idx_audit_ts (ts)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS telemetry (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        ts VARCHAR(32) NOT NULL,
+        client_id VARCHAR(128),
+        name VARCHAR(64),
+        event VARCHAR(64),
+        detail TEXT,
+        INDEX idx_telemetry_client (client_id),
+        INDEX idx_telemetry_ts (ts)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+];
+async function createTables() {
+    for (const sql of DB_TABLES_SQL) {
+        await pool.query(sql);
+    }
+}
+async function initDatabase() {
+    const cfg = buildDbConfig();
+    if (!cfg) {
+        console.log('ℹ️ 未配置数据库连接（DATABASE_URL 或 DB_* 环境变量），继续使用 JSON 文件存储。');
+        return;
+    }
+    // 免费托管库（如 filess.io）常限制并发连接数，连接池上限设小，避免触发拒绝
+    const poolOpts = Object.assign({}, cfg, { waitForConnections: true, connectionLimit: 2, connectTimeout: 10000 });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            pool = mysql.createPool(poolOpts);
+            const conn = await pool.getConnection();
+            await conn.ping();
+            conn.release();
+            await createTables();
+            DB_AVAILABLE = true;
+            console.log('🗄️ 已连接 MySQL 数据库，数据将持久化到数据库。');
+            return;
+        } catch (e) {
+            console.error(`[DB] 第 ${attempt} 次连接 MySQL 失败:`, e.message);
+            try { if (pool) await pool.end(); } catch (_) {}
+            pool = null;
+            DB_AVAILABLE = false;
+            if (attempt < 3) { await new Promise(r => setTimeout(r, 1500)); }
+        }
+    }
+    console.error('[DB] 多次连接失败，回退到 JSON 文件存储。');
+}
+
 const ADMIN_STATE_FILE = path.join(DATA_DIR, 'admin-state.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'admin-audit.log');
 const TELEMETRY_FILE = path.join(DATA_DIR, 'telemetry.log');
+const GLOBAL_FUNCTIONS_FILE = path.join(DATA_DIR, 'global-functions.json');
+
+// ===== 全局功能控制（管理员统一开关，影响所有游戏客户端）=====
+// 各开关含义：
+//   export          —— 导出进度（单人/解密）功能
+//   importClear     —— 导入通关数据功能
+//   multiplayerChat —— 多人联机聊天功能
+//   multiplayer     —— 多人联机功能
+//   debugInfo       —— 调试信息按钮是否显示
+//   f12DevConsole   —— F12 打开的开发者控制台是否显示
+//   ctrlShiftCD     —— CTRL+SHIFT+C/D 是否可以打开控制台/开发者模式
+const GLOBAL_FUNCTIONS_DEFAULT = {
+    export: true,
+    importClear: true,
+    multiplayerChat: true,
+    multiplayer: true,
+    debugInfo: true,
+    f12DevConsole: true,
+    ctrlShiftCD: true
+};
+let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
+
+function loadGlobalFunctions() {
+    try {
+        if (fs.existsSync(GLOBAL_FUNCTIONS_FILE)) {
+            const s = JSON.parse(fs.readFileSync(GLOBAL_FUNCTIONS_FILE, 'utf8'));
+            if (s && typeof s === 'object') {
+                globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT, s);
+            }
+        }
+    } catch (e) { console.error('[Func] 加载全局功能控制失败:', e.message); }
+}
+function saveGlobalFunctions() {
+    ensureDataDir();
+    try { fs.writeFileSync(GLOBAL_FUNCTIONS_FILE, JSON.stringify(globalFunctions, null, 2)); }
+    catch (e) { console.error('[Func] 保存全局功能控制失败:', e.message); }
+}
+
+// ===== 多账号系统（超级管理员可创建 admin / superadmin 账号，自定义名称+密码）=====
+const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+// 账号结构：{ id, name, role:'admin'|'superadmin', passwordHash, createdBy, createdAt, lastIp, disabled }
+let accounts = [];
+
+async function loadAccounts() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT id, name, role, password_hash, created_by, created_at, last_ip, disabled FROM accounts');
+            accounts = rows.map(r => ({
+                id: r.id, name: r.name, role: r.role,
+                passwordHash: r.password_hash, createdBy: r.created_by,
+                createdAt: r.created_at, lastIp: r.last_ip, disabled: !!r.disabled
+            }));
+            if (accounts.length === 0) await seedDefaultAccounts();
+            return;
+        } catch (e) { console.error('[Accounts] DB 加载失败，回退 JSON:', e.message); }
+    }
+    try {
+        if (fs.existsSync(ACCOUNTS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
+            if (Array.isArray(arr)) accounts = arr;
+        }
+    } catch (e) { console.error('[Accounts] 加载账号失败:', e.message); }
+    if (accounts.length === 0) seedDefaultAccounts();
+}
+async function saveAccounts() {
+    // 始终保留一份 JSON 存档（无 DB 时也是主存储）
+    ensureDataDir();
+    try { fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2)); }
+    catch (e) { console.error('[Accounts] 保存账号失败:', e.message); }
+    if (DB_AVAILABLE && pool) {
+        try {
+            for (const a of accounts) {
+                await pool.query(
+                    'INSERT INTO accounts (id,name,role,password_hash,created_by,created_at,last_ip,disabled) VALUES (?,?,?,?,?,?,?,?) ' +
+                    'ON DUPLICATE KEY UPDATE name=VALUES(name),role=VALUES(role),password_hash=VALUES(password_hash),created_by=VALUES(created_by),created_at=VALUES(created_at),last_ip=VALUES(last_ip),disabled=VALUES(disabled)',
+                    [a.id, a.name, a.role, a.passwordHash, a.createdBy, a.createdAt, a.lastIp, a.disabled ? 1 : 0]
+                );
+            }
+        } catch (e) { console.error('[Accounts] DB 保存失败:', e.message); }
+    }
+}
+// 首次启动：用现有密码文件（或默认密码）初始化默认 admin / superadmin 账号
+async function seedDefaultAccounts() {
+    const adminPath = path.join(__dirname, 'admin-password.txt');
+    if (!fs.existsSync(adminPath)) initializeAdminPassword();
+    const superPath = SUPERADMIN_PASSWORD_PATH;
+    if (!fs.existsSync(superPath)) initializeSuperAdminPassword();
+    const adminHash = fs.readFileSync(adminPath, 'utf8').trim();
+    const superHash = fs.readFileSync(superPath, 'utf8').trim();
+    accounts = [
+        { id: 'acc_admin', name: 'admin', role: 'admin', passwordHash: adminHash, createdBy: 'system', createdAt: new Date().toISOString(), lastIp: null, disabled: false },
+        { id: 'acc_superadmin', name: 'superadmin', role: 'superadmin', passwordHash: superHash, createdBy: 'system', createdAt: new Date().toISOString(), lastIp: null, disabled: false }
+    ];
+    await saveAccounts();
+    console.log('👤 已初始化默认账号: admin(角色 admin) / superadmin(角色 superadmin)');
+}
+// 按角色+名称+密码查找账号；name 为空时按密码匹配该角色下任一账号（兼容旧版仅密码登录）
+async function findAccountByCredentials(role, name, password) {
+    const cand = accounts.filter(a => a.role === role && !a.disabled);
+    let matches = cand;
+    if (name) matches = cand.filter(a => a.name === name);
+    for (const a of matches) {
+        if (await bcrypt.compare(String(password || ''), a.passwordHash)) return a;
+    }
+    return null;
+}
+function getAccountById(id) { return accounts.find(a => a.id === id) || null; }
+
+// ===== 审计来源 IP 捕获 =====
+// 通过鉴权中间件在每次 REST 请求时写入当前操作者来源 IP；appendAudit 记录到审计条目。
+let currentReqIp = null;
+function clientIp(req) {
+    if (!req) return null;
+    const xff = req.headers && req.headers['x-forwarded-for'];
+    if (xff && typeof xff === 'string' && xff.length) return xff.split(',')[0].trim();
+    if (req.socket && req.socket.remoteAddress) return req.socket.remoteAddress;
+    if (req.connection && req.connection.remoteAddress) return req.connection.remoteAddress;
+    return null;
+}
 
 // 确保数据目录存在：避免部署后 data/ 不存在导致 append 静默失败（接口仍返回 success，但什么都没存）
 function ensureDataDir() {
@@ -63,7 +309,19 @@ function saveAdminState() {
 
 // ===== 玩家角色（游戏内权限：user / admin / superadmin）=====
 const USER_ROLES_FILE = path.join(DATA_DIR, 'user-roles.json');
-function loadUserRoles() {
+async function loadUserRoles() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT user_id, role, set_by, set_at FROM user_roles');
+            userRoles = new Map();
+            rows.forEach(r => {
+                if (r && r.user_id && ['user', 'admin', 'superadmin'].includes(r.role)) {
+                    userRoles.set(r.user_id, { role: r.role, setBy: r.set_by || 'admin', setAt: r.set_at || new Date().toISOString() });
+                }
+            });
+            return;
+        } catch (e) { console.error('[Roles] DB 加载失败，回退 JSON:', e.message); }
+    }
     try {
         if (fs.existsSync(USER_ROLES_FILE)) {
             const arr = JSON.parse(fs.readFileSync(USER_ROLES_FILE, 'utf8'));
@@ -75,13 +333,21 @@ function loadUserRoles() {
         }
     } catch (e) { console.error('[Roles] 加载玩家角色失败:', e.message); }
 }
-function saveUserRoles() {
+async function saveUserRoles() {
     ensureDataDir();
     try {
         const arr = [];
         for (const [userId, v] of userRoles) arr.push({ userId, role: v.role, setBy: v.setBy, setAt: v.setAt });
         fs.writeFileSync(USER_ROLES_FILE, JSON.stringify(arr, null, 2));
     } catch (e) { console.error('[Roles] 保存玩家角色失败:', e.message); }
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query('DELETE FROM user_roles');
+            for (const [userId, v] of userRoles) {
+                await pool.query('INSERT INTO user_roles (user_id, role, set_by, set_at) VALUES (?,?,?,?)', [userId, v.role, v.setBy || 'admin', v.setAt || new Date().toISOString()]);
+            }
+        } catch (e) { console.error('[Roles] DB 保存失败:', e.message); }
+    }
 }
 function getUserRole(userId) {
     const v = userRoles.get(userId);
@@ -118,7 +384,7 @@ const DEFAULT_UI_SETTINGS = {
 // 结构：userId -> { admin: <obj|null>, client: <obj|null> }
 // admin 为管理员远程设置的覆盖项；client 为客户端最近一次上报的设置。
 // 生效值 = 默认值 <- client <- admin（admin 优先）
-const userSettings = new Map();
+let userSettings = new Map();
 function sanitizeUISettings(obj) {
     if (!obj || typeof obj !== 'object') return null;
     const out = {};
@@ -157,7 +423,22 @@ function setAdminUISettings(userId, obj) {
     userSettings.set(userId, rec);
     saveUserSettings();
 }
-function loadUserSettings() {
+async function loadUserSettings() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT user_id, admin_json, client_json FROM user_settings');
+            userSettings = new Map();
+            rows.forEach(r => {
+                if (r && r.user_id) {
+                    userSettings.set(r.user_id, {
+                        admin: parseJsonCol(r.admin_json),
+                        client: parseJsonCol(r.client_json)
+                    });
+                }
+            });
+            return;
+        } catch (e) { console.error('[Settings] DB 加载失败，回退 JSON:', e.message); }
+    }
     try {
         if (fs.existsSync(USER_SETTINGS_FILE)) {
             const arr = JSON.parse(fs.readFileSync(USER_SETTINGS_FILE, 'utf8'));
@@ -169,13 +450,24 @@ function loadUserSettings() {
         }
     } catch (e) { console.error('[Settings] 加载用户设置失败:', e.message); }
 }
-function saveUserSettings() {
+async function saveUserSettings() {
     ensureDataDir();
     try {
         const arr = [];
         for (const [userId, v] of userSettings) arr.push({ userId, admin: v.admin || null, client: v.client || null });
         fs.writeFileSync(USER_SETTINGS_FILE, JSON.stringify(arr, null, 2));
     } catch (e) { console.error('[Settings] 保存用户设置失败:', e.message); }
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query('DELETE FROM user_settings');
+            for (const [userId, v] of userSettings) {
+                await pool.query(
+                    'INSERT INTO user_settings (user_id, admin_json, client_json) VALUES (?,?,?) ON DUPLICATE KEY UPDATE admin_json=VALUES(admin_json), client_json=VALUES(client_json)',
+                    [userId, JSON.stringify(v.admin || null), JSON.stringify(v.client || null)]
+                );
+            }
+        } catch (e) { console.error('[Settings] DB 保存失败:', e.message); }
+    }
 }
 // 由请求头 Bearer 令牌判断操作者身份：superadmin / admin / null
 function getOperatorRole(req) {
@@ -191,14 +483,26 @@ function getOperatorRole(req) {
 }
 
 // 审计日志：记录谁(actor)在什么时间做了什么(action)
-function appendAudit(actor, action, detail) {
-    const entry = { ts: new Date().toISOString(), actor, action, detail: detail || '' };
+function appendAudit(actor, action, detail, req) {
+    const ip = (req && clientIp(req)) || currentReqIp || null;
+    const entry = { ts: new Date().toISOString(), actor, action, detail: detail || '', ip };
     ensureDataDir();
     try { fs.appendFileSync(AUDIT_FILE, JSON.stringify(entry) + '\n'); }
     catch (e) { console.error('[审计] 写入失败:', e.message); }
-    console.log('[审计]', entry.ts, actor, action, detail || '');
+    console.log('[审计]', entry.ts, actor, action, detail || '', ip ? ('(IP:' + ip + ')') : '');
+    if (DB_AVAILABLE && pool) {
+        pool.query('INSERT INTO audit_logs (ts, actor, action, detail, ip) VALUES (?,?,?,?,?)', [entry.ts, actor, action, entry.detail, ip])
+            .catch(e => console.error('[审计] DB 写入失败:', e.message));
+    }
 }
-function readAudit(limit) {
+async function readAudit(limit) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT ts, actor, action, detail, ip FROM audit_logs ORDER BY id DESC LIMIT ?', [limit ? parseInt(limit, 10) : 1000000]);
+            let arr = rows.map(r => ({ ts: r.ts, actor: r.actor, action: r.action, detail: r.detail, ip: r.ip }));
+            return arr.reverse(); // 兼容原语义：旧 → 新
+        } catch (e) { console.error('[审计] DB 读取失败，回退 JSON:', e.message); }
+    }
     try {
         if (!fs.existsSync(AUDIT_FILE)) return [];
         const lines = fs.readFileSync(AUDIT_FILE, 'utf8').trim().split('\n').filter(Boolean);
@@ -211,10 +515,27 @@ function readAudit(limit) {
 // 返回 true/false，便于接口在写入失败时如实返回，而不是假成功
 function appendTelemetry(entry) {
     ensureDataDir();
-    try { fs.appendFileSync(TELEMETRY_FILE, JSON.stringify(entry) + '\n'); return true; }
+    try { fs.appendFileSync(TELEMETRY_FILE, JSON.stringify(entry) + '\n'); }
     catch (e) { console.error('[遥测] 写入失败:', e.message); return false; }
+    if (DB_AVAILABLE && pool) {
+        pool.query('INSERT INTO telemetry (ts, client_id, name, event, detail) VALUES (?,?,?,?,?)', [entry.ts, entry.clientId, entry.name, entry.event, entry.detail])
+            .catch(e => console.error('[遥测] DB 写入失败:', e.message));
+    }
+    return true;
 }
-function readTelemetry(limit, clientId) {
+async function readTelemetry(limit, clientId) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            let sql = 'SELECT id, ts, client_id, name, event, detail FROM telemetry';
+            const params = [];
+            if (clientId) { sql += ' WHERE client_id = ?'; params.push(clientId); }
+            sql += ' ORDER BY id DESC LIMIT ?';
+            params.push(limit ? parseInt(limit, 10) : 1000000);
+            const [rows] = await pool.query(sql, params);
+            let arr = rows.map(r => ({ id: r.id, ts: r.ts, clientId: r.client_id, name: r.name, event: r.event, detail: r.detail }));
+            return arr.reverse();
+        } catch (e) { console.error('[遥测] DB 读取失败，回退 JSON:', e.message); }
+    }
     try {
         if (!fs.existsSync(TELEMETRY_FILE)) return [];
         const lines = fs.readFileSync(TELEMETRY_FILE, 'utf8').trim().split('\n').filter(Boolean);
@@ -223,6 +544,85 @@ function readTelemetry(limit, clientId) {
         return limit ? arr.slice(-limit) : arr;
     } catch (e) { return []; }
 }
+
+// 超级管理员遥测管理：返回带 id 的记录（DB 模式为自增主键，JSON 回退模式用物理行号）。前端统一用 id 字段。
+async function readTelemetryLines(clientId, limit) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            let sql = 'SELECT id, ts, client_id, name, event, detail FROM telemetry';
+            const params = [];
+            if (clientId) { sql += ' WHERE client_id = ?'; params.push(clientId); }
+            sql += ' ORDER BY id DESC LIMIT ?';
+            params.push(limit ? parseInt(limit, 10) : 1000000);
+            const [rows] = await pool.query(sql, params);
+            let arr = rows.map(r => ({ id: r.id, ts: r.ts, clientId: r.client_id, name: r.name, event: r.event, detail: r.detail }));
+            return arr.reverse();
+        } catch (e) { console.error('[遥测] DB 读取失败，回退 JSON:', e.message); }
+    }
+    try {
+        if (!fs.existsSync(TELEMETRY_FILE)) return [];
+        const rawLines = fs.readFileSync(TELEMETRY_FILE, 'utf8').split('\n');
+        const arr = [];
+        rawLines.forEach((l, idx) => {
+            const s = l.trim();
+            if (!s) return;
+            try { const o = JSON.parse(s); o.id = idx; o.__line = idx; arr.push(o); } catch (e) {}
+        });
+        const filtered = clientId ? arr.filter(e => e.clientId === clientId) : arr;
+        return limit ? filtered.slice(-limit) : filtered;
+    } catch (e) { return []; }
+}
+async function deleteTelemetryLine(idOrLine) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [r] = await pool.query('DELETE FROM telemetry WHERE id = ?', [parseInt(idOrLine, 10)]);
+            return !!(r && r.affectedRows > 0);
+        } catch (e) { console.error('[遥测] DB 删除失败:', e.message); return false; }
+    }
+    try {
+        const rawLines = fs.readFileSync(TELEMETRY_FILE, 'utf8').split('\n');
+        const idx = Number(idOrLine);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= rawLines.length) return false;
+        if (!rawLines[idx].trim()) return false;
+        rawLines.splice(idx, 1);
+        fs.writeFileSync(TELEMETRY_FILE, rawLines.join('\n'));
+        return true;
+    } catch (e) { return false; }
+}
+async function updateTelemetryLine(idOrLine, patch) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const id = parseInt(idOrLine, 10);
+            const fields = [];
+            const params = [];
+            if (patch.clientId !== undefined) { fields.push('client_id = ?'); params.push(String(patch.clientId).slice(0, 60)); }
+            if (patch.name !== undefined) { fields.push('name = ?'); params.push(String(patch.name).slice(0, 30)); }
+            if (patch.event !== undefined) { fields.push('event = ?'); params.push(String(patch.event).slice(0, 60)); }
+            if (patch.detail !== undefined) { fields.push('detail = ?'); params.push(String(patch.detail).slice(0, 500)); }
+            if (fields.length === 0) return true;
+            params.push(id);
+            const [r] = await pool.query('UPDATE telemetry SET ' + fields.join(', ') + ' WHERE id = ?', params);
+            return !!(r && r.affectedRows > 0);
+        } catch (e) { console.error('[遥测] DB 更新失败:', e.message); return false; }
+    }
+    try {
+        const rawLines = fs.readFileSync(TELEMETRY_FILE, 'utf8').split('\n');
+        const idx = Number(idOrLine);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= rawLines.length) return false;
+        const s = rawLines[idx].trim();
+        if (!s) return false;
+        const o = JSON.parse(s);
+        if (patch.clientId !== undefined) o.clientId = String(patch.clientId).slice(0, 60);
+        if (patch.name !== undefined) o.name = String(patch.name).slice(0, 30);
+        if (patch.event !== undefined) o.event = String(patch.event).slice(0, 60);
+        if (patch.detail !== undefined) o.detail = String(patch.detail).slice(0, 500);
+        rawLines[idx] = JSON.stringify(o);
+        fs.writeFileSync(TELEMETRY_FILE, rawLines.join('\n'));
+        return true;
+    } catch (e) { return false; }
+}
+function stripTelemetryLine(o) { const { __line, ...rest } = o; return rest; }
+function csvQuoteCell(v) { const s = (v == null) ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 
 // 访问控制：gameAccessDisabled 开启时，任何 GET 游戏页面请求返回 403（管理员/超管页面除外）
 // 必须在 express.static 之前注册，才能抢在静态文件返回游戏页之前拦截
@@ -336,7 +736,7 @@ const userFunctions = new Map();   // userId -> 功能控制设置
 const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool, chat:bool, reasons:{} }，管理员封禁状态
 const bannedIPs = new Map();     // ip -> { reason, bannedAt }，管理员按 IP 封禁（所有功能禁用 + 客户端强制全屏弹窗）
 // 玩家角色（游戏内权限）：userId -> { role:'user'|'admin'|'superadmin', setBy, setAt }
-const userRoles = new Map();
+let userRoles = new Map();
 const cheatReports = [];           // 反作弊上报记录：{ id, clientId, type, detail, time }
 const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, message, image, isAdmin, time}]，房间聊天记录（客户端镜像上报，供管理员监管），每房间上限 200 条
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
@@ -479,11 +879,11 @@ function verifyAdminToken(token) {
     }
 }
 
-// 生成管理员令牌
-function generateAdminToken() {
+// 生成管理员令牌（携带账号 id/name，便于审计记录操作者）
+function generateAdminToken(accountId, name) {
     const tokenId = 'admin_' + Date.now();
-    const token = jwt.sign({ tokenId }, JWT_SECRET, { expiresIn: '24h' });
-    adminTokens.set(tokenId, true);
+    const token = jwt.sign({ tokenId, role: 'admin', accountId: accountId || null, name: name || null }, JWT_SECRET, { expiresIn: '24h' });
+    adminTokens.set(tokenId, { role: 'admin', accountId: accountId || null, name: name || null });
     return token;
 }
 
@@ -493,7 +893,7 @@ function requireAdminAuth(req, res, next) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ success: false, message: '需要管理员身份验证' });
     }
-
+    currentReqIp = clientIp(req);
     const token = authHeader.substring(7);
     if (verifyAdminToken(token) || verifySuperAdminToken(token)) {
         return next();
@@ -511,10 +911,10 @@ function verifySuperAdminToken(token) {
         return false;
     }
 }
-function generateSuperAdminToken() {
+function generateSuperAdminToken(accountId, name) {
     const tokenId = 'superadmin_' + Date.now();
-    const token = jwt.sign({ tokenId }, JWT_SECRET, { expiresIn: '24h' });
-    superAdminTokens.set(tokenId, true);
+    const token = jwt.sign({ tokenId, role: 'superadmin', accountId: accountId || null, name: name || null }, JWT_SECRET, { expiresIn: '24h' });
+    superAdminTokens.set(tokenId, { role: 'superadmin', accountId: accountId || null, name: name || null });
     return token;
 }
 function requireSuperAdminAuth(req, res, next) {
@@ -522,6 +922,7 @@ function requireSuperAdminAuth(req, res, next) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ success: false, message: '需要超级管理员身份验证' });
     }
+    currentReqIp = clientIp(req);
     const token = authHeader.substring(7);
     if (!verifySuperAdminToken(token)) {
         return res.status(403).json({ success: false, message: '无效的超级管理员令牌' });
@@ -672,9 +1073,9 @@ app.get('/api/admin/rooms', requireAdminAuth, (req, res) => {
 // 且管理员可通过修改该文件真正改密（明文比较时改密文件完全失效）。
 app.post('/api/admin/login', async (req, res) => {
     try {
-        const { password } = req.body;
+        const { password, name } = req.body || {};
         
-        console.log('收到管理员登录请求');
+        console.log('收到管理员登录请求', name ? ('(账号: ' + name + ')') : '(共享密码)');
         
         if (!password) {
             return res.status(400).json({ success: false, message: '密码不能为空' });
@@ -686,29 +1087,15 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(403).json({ success: false, message: '管理员账号已被超级管理员禁用' });
         }
 
-        const adminPasswordPath = path.join(__dirname, 'admin-password.txt');
-        
-        // 确保密码文件存在（首次启动由 initializeAdminPassword 创建）
-        if (!fs.existsSync(adminPasswordPath)) {
-            initializeAdminPassword();
-        }
-        
-        const hashedPassword = fs.readFileSync(adminPasswordPath, 'utf8').trim();
-        
-        const isValid = await bcrypt.compare(password, hashedPassword);
-        
-        if (isValid) {
-            const token = generateAdminToken();
-            appendAudit('admin', 'login', '管理员登录');
-            console.log('管理员登录成功');
-            return res.json({
-                success: true,
-                message: '登录成功',
-                token: token
-            });
+        const acc = await findAccountByCredentials('admin', name, password);
+        if (acc) {
+            const token = generateAdminToken(acc.id, acc.name);
+            appendAudit('admin', 'login', '管理员登录' + (name ? ('（账号 ' + name + '）') : '（共享密码）'), req);
+            console.log('管理员登录成功', name || '(共享)');
+            return res.json({ success: true, message: '登录成功', token, name: acc.name });
         } else {
             console.log('管理员密码验证失败');
-            return res.status(401).json({ success: false, message: '密码错误' });
+            return res.status(401).json({ success: false, message: '密码或账号名称错误' });
         }
         
     } catch (error) {
@@ -720,17 +1107,15 @@ app.post('/api/admin/login', async (req, res) => {
 // 超级管理员登录（密码文件 superadmin-password.txt，初始 11dev）
 app.post('/api/superadmin/login', async (req, res) => {
     try {
-        const { password } = req.body;
+        const { password, name } = req.body || {};
         if (!password) return res.status(400).json({ success: false, message: '密码不能为空' });
-        if (!fs.existsSync(SUPERADMIN_PASSWORD_PATH)) initializeSuperAdminPassword();
-        const hashed = fs.readFileSync(SUPERADMIN_PASSWORD_PATH, 'utf8').trim();
-        const isValid = await bcrypt.compare(password, hashed);
-        if (isValid) {
-            const token = generateSuperAdminToken();
-            appendAudit('superadmin', 'login', '超级管理员登录');
-            return res.json({ success: true, token });
+        const acc = await findAccountByCredentials('superadmin', name, password);
+        if (acc) {
+            const token = generateSuperAdminToken(acc.id, acc.name);
+            appendAudit('superadmin', 'login', '超级管理员登录' + (name ? ('（账号 ' + name + '）') : '（共享密码）'), req);
+            return res.json({ success: true, token, name: acc.name });
         }
-        return res.status(401).json({ success: false, message: '密码错误' });
+        return res.status(401).json({ success: false, message: '密码或账号名称错误' });
     } catch (e) {
         console.error('[SuperAdmin] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
@@ -749,18 +1134,76 @@ app.post('/api/superadmin/change-password', requireSuperAdminAuth, async (req, r
         }
         const filePath = target === 'admin' ? path.join(__dirname, 'admin-password.txt') : SUPERADMIN_PASSWORD_PATH;
         fs.writeFileSync(filePath, bcrypt.hashSync(String(newPassword), 10));
+        // 同步更新默认账号（acc_admin / acc_superadmin）的密码哈希，保持一致
+        const defId = target === 'admin' ? 'acc_admin' : 'acc_superadmin';
+        const defAcc = getAccountById(defId);
+        if (defAcc) { defAcc.passwordHash = bcrypt.hashSync(String(newPassword), 10); saveAccounts(); }
         if (target === 'admin') {
             adminTokens.clear(); // 改密后使旧管理员令牌失效
-            appendAudit('superadmin', 'change-admin-password', '修改了管理员密码');
+            appendAudit('superadmin', 'change-admin-password', '修改了管理员密码', req);
         } else {
             superAdminTokens.clear();
-            appendAudit('superadmin', 'change-superadmin-password', '修改了超级管理员密码');
+            appendAudit('superadmin', 'change-superadmin-password', '修改了超级管理员密码', req);
         }
         res.json({ success: true, message: `已更新 ${target} 密码` });
     } catch (e) {
         console.error('[SuperAdmin] 改密失败:', e);
         res.status(500).json({ success: false, message: '操作失败' });
     }
+});
+
+// 超级管理员创建 admin / superadmin 账号（自定义名称 + 密码）
+app.post('/api/superadmin/create-account', requireSuperAdminAuth, async (req, res) => {
+    try {
+        const { name, password, role } = req.body || {};
+        if (role !== 'admin' && role !== 'superadmin') {
+            return res.status(400).json({ success: false, message: 'role 必须为 admin 或 superadmin' });
+        }
+        if (!name || String(name).trim().length < 1) {
+            return res.status(400).json({ success: false, message: '账号名称不能为空' });
+        }
+        if (!password || String(password).length < 1) {
+            return res.status(400).json({ success: false, message: '密码不能为空' });
+        }
+        const nm = String(name).trim();
+        // 同角色下名称唯一（跨角色允许同名，因登录时已按角色区分）
+        if (accounts.some(a => a.role === role && a.name === nm)) {
+            return res.status(409).json({ success: false, message: `已存在同名 ${role} 账号: ${nm}` });
+        }
+        // 操作者信息（来自令牌）
+        let opName = 'superadmin';
+        try {
+            const decoded = jwt.verify(req.headers.authorization.substring(7), JWT_SECRET);
+            if (decoded && decoded.name) opName = decoded.name;
+        } catch (_) {}
+        const acc = {
+            id: 'acc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            name: nm,
+            role,
+            passwordHash: bcrypt.hashSync(String(password), 10),
+            createdBy: opName,
+            createdAt: new Date().toISOString(),
+            lastIp: clientIp(req),
+            disabled: false
+        };
+        accounts.push(acc);
+        saveAccounts();
+        appendAudit('superadmin', 'create-account', `创建了 ${role} 账号「${nm}」（创建者 ${opName}）`, req);
+        console.log(`[Accounts] 超级管理员 ${opName} 创建了 ${role} 账号: ${nm}`);
+        res.json({ success: true, message: `已创建 ${role} 账号 ${nm}`, account: { id: acc.id, name: acc.name, role: acc.role } });
+    } catch (e) {
+        console.error('[SuperAdmin] 创建账号失败:', e);
+        res.status(500).json({ success: false, message: '创建失败' });
+    }
+});
+
+// 账号列表（超级管理员查看）
+app.get('/api/superadmin/accounts', requireSuperAdminAuth, (req, res) => {
+    const list = accounts.map(a => ({
+        id: a.id, name: a.name, role: a.role,
+        createdBy: a.createdBy, createdAt: a.createdAt, lastIp: a.lastIp, disabled: !!a.disabled
+    }));
+    res.json({ success: true, accounts: list });
 });
 
 // 禁用 / 启用 管理员账号
@@ -791,15 +1234,71 @@ app.post('/api/superadmin/set-game-disabled', requireSuperAdminAuth, (req, res) 
     }
 });
 
+// ===== 个人主页（多人联机可查看对方名称/头像/简介）=====
+const HOME_PROFILES_FILE = path.join(DATA_DIR, 'home-profiles.json');
+// 结构：{ name, avatar(emoji), color(hex), bio, disabled, adminOverridden }
+let homeProfiles = new Map();
+
+async function loadHomeProfiles() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT client_id, name, avatar, color, bio, disabled, admin_overridden, updated_at FROM home_profiles');
+            homeProfiles = new Map();
+            rows.forEach(r => { if (r && r.client_id) homeProfiles.set(r.client_id, { name: r.name, avatar: r.avatar, color: r.color, bio: r.bio, disabled: !!r.disabled, adminOverridden: !!r.admin_overridden, updatedAt: r.updated_at }); });
+            return;
+        } catch (e) { console.error('[Home] DB 加载失败，回退 JSON:', e.message); }
+    }
+    try {
+        if (fs.existsSync(HOME_PROFILES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(HOME_PROFILES_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(r => { if (r && r.clientId) homeProfiles.set(r.clientId, r); });
+        }
+    } catch (e) { console.error('[Home] 加载个人主页失败:', e.message); }
+}
+async function saveHomeProfiles() {
+    ensureDataDir();
+    try {
+        const arr = [];
+        for (const [clientId, p] of homeProfiles) arr.push(Object.assign({ clientId }, p));
+        fs.writeFileSync(HOME_PROFILES_FILE, JSON.stringify(arr, null, 2));
+    } catch (e) { console.error('[Home] 保存个人主页失败:', e.message); }
+    if (DB_AVAILABLE && pool) {
+        try {
+            for (const [clientId, p] of homeProfiles) {
+                await pool.query(
+                    'INSERT INTO home_profiles (client_id, name, avatar, color, bio, disabled, admin_overridden, updated_at) VALUES (?,?,?,?,?,?,?,?) ' +
+                    'ON DUPLICATE KEY UPDATE name=VALUES(name),avatar=VALUES(avatar),color=VALUES(color),bio=VALUES(bio),disabled=VALUES(disabled),admin_overridden=VALUES(admin_overridden),updated_at=VALUES(updated_at)',
+                    [clientId, p.name || '', p.avatar || '🙂', p.color || '#4CAF50', p.bio || '', p.disabled ? 1 : 0, p.adminOverridden ? 1 : 0, p.updatedAt || new Date().toISOString()]
+                );
+            }
+        } catch (e) { console.error('[Home] DB 保存失败:', e.message); }
+    }
+}
+// 归一化并限制大小，防止滥用
+function sanitizeHomeProfile(input) {
+    const p = {};
+    if (input && typeof input === 'object') {
+        p.name = (typeof input.name === 'string' && input.name.trim()) ? input.name.trim().slice(0, 24) : '';
+        // 头像：emoji 或单字符；不允许 HTML
+        p.avatar = (typeof input.avatar === 'string' && input.avatar.trim()) ? input.avatar.trim().slice(0, 8) : '🙂';
+        // 颜色：仅允许 #RRGGBB 或 #RGB
+        const c = (typeof input.color === 'string') ? input.color.trim() : '';
+        p.color = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c) ? c : '#4CAF50';
+        // 简介：纯文本，长度限制（渲染时再转义，防止 XSS）
+        p.bio = (typeof input.bio === 'string') ? input.bio.slice(0, 200) : '';
+    }
+    return p;
+}
+
 // 当前访问控制状态
 app.get('/api/superadmin/state', requireSuperAdminAuth, (req, res) => {
     res.json({ success: true, adminDisabled, gameAccessDisabled });
 });
 
 // 审计日志
-app.get('/api/superadmin/audit', requireSuperAdminAuth, (req, res) => {
+app.get('/api/superadmin/audit', requireSuperAdminAuth, async (req, res) => {
     const limit = parseInt(req.query.limit) || 200;
-    res.json({ success: true, logs: readAudit(limit) });
+    res.json({ success: true, logs: await readAudit(limit) });
 });
 
 // 遥测：客户端上报操作数据（需用户在客户端同意遥测后才会调用；要求携带 clientId）
@@ -824,10 +1323,123 @@ app.post('/api/telemetry', (req, res) => {
 });
 
 // 遥测查看（管理员专用）：可指定 clientId 查看单个用户，或留空查看全部
-app.get('/api/admin/telemetry', requireAdminAuth, (req, res) => {
+app.get('/api/admin/telemetry', requireAdminAuth, async (req, res) => {
     const limit = parseInt(req.query.limit) || 500;
     const clientId = req.query.clientId || '';
-    res.json({ success: true, logs: readTelemetry(limit, clientId || null) });
+    res.json({ success: true, logs: await readTelemetry(limit, clientId || null) });
+});
+
+// 个人主页：公开读取（游戏内点击对方名称时拉取）
+app.get('/api/profile/:clientId', (req, res) => {
+    const p = homeProfiles.get(req.params.clientId);
+    if (!p) return res.json({ success: true, profile: null });
+    res.json({ success: true, profile: Object.assign({ clientId: req.params.clientId }, p) });
+});
+
+// 个人主页：管理员修改 / 禁用某玩家的主页
+app.put('/api/admin/users/:userId/profile', requireAdminAuth, (req, res) => {
+    try {
+        const clientId = req.params.userId;
+        const prev = homeProfiles.get(clientId) || {};
+        const body = req.body || {};
+        const merged = Object.assign({}, prev);
+        // 仅当管理员显式提供了字段才覆盖，保留玩家原有的头像/颜色/简介/名称
+        if (typeof body.avatar === 'string') merged.avatar = body.avatar.slice(0, 8);
+        if (typeof body.color === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(body.color.trim())) merged.color = body.color.trim();
+        if (typeof body.bio === 'string') merged.bio = body.bio.slice(0, 200);
+        if (typeof body.name === 'string') merged.name = body.name.slice(0, 24);
+        // 禁用 / 启用（管理员操作，标记覆盖）
+        if (typeof body.disabled === 'boolean') {
+            merged.disabled = body.disabled;
+            merged.adminOverridden = true;
+        }
+        // 管理员修改了任意主页信息字段，同样标记为覆盖
+        if (typeof body.avatar === 'string' || typeof body.color === 'string' || typeof body.bio === 'string' || typeof body.name === 'string') {
+            merged.adminOverridden = true;
+        }
+        merged.updatedAt = new Date().toISOString();
+        homeProfiles.set(clientId, merged);
+        saveHomeProfiles();
+        io.emit('player-profile', Object.assign({ clientId }, merged));
+        appendAudit('admin', 'edit-profile', `修改/禁用玩家 ${clientId} 的个人主页${merged.disabled ? '（已禁用）' : ''}`, req);
+        res.json({ success: true, profile: Object.assign({ clientId }, merged) });
+    } catch (e) {
+        console.error('[Admin] 修改主页失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 遥测下载（管理员）：服务端直接返回文件并记审计（含来源 IP），供 superadmin 审计可见
+app.get('/api/admin/telemetry/download', requireAdminAuth, async (req, res) => {
+    try {
+        const format = (req.query.format === 'json') ? 'json' : 'csv';
+        const logs = await readTelemetry(0);
+        let content, filename, mime;
+        if (format === 'json') {
+            const out = logs.map(e => { const { __line, ...rest } = e; return rest; });
+            content = JSON.stringify(out, null, 2);
+            mime = 'application/json';
+            filename = 'telemetry.json';
+        } else {
+            const headers = ['ts', 'clientId', 'name', 'event', 'detail'];
+            const esc = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+            const rows = logs.map(e => headers.map(h => esc(e[h])).join(','));
+            content = '﻿' + headers.join(',') + '\n' + rows.join('\n');
+            mime = 'text/csv';
+            filename = 'telemetry.csv';
+        }
+        appendAudit('admin', 'telemetry-download', `下载遥测数据（格式 ${format}，共 ${logs.length} 条）`, req);
+        res.setHeader('Content-Type', mime + '; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(content);
+    } catch (e) {
+        console.error('[Admin] 遥测下载失败:', e);
+        res.status(500).json({ success: false, message: '下载失败' });
+    }
+});
+
+// 遥测管理（超级管理员专用）：列出（带物理行号）/ 删除 / 编辑 / 下载
+app.get('/api/superadmin/telemetry', requireSuperAdminAuth, async (req, res) => {
+    const limit = parseInt(req.query.limit) || 1000;
+    const clientId = req.query.clientId || '';
+    res.json({ success: true, logs: await readTelemetryLines(clientId || null, limit) });
+});
+app.delete('/api/superadmin/telemetry/:line', requireSuperAdminAuth, async (req, res) => {
+    try {
+        const ok = await deleteTelemetryLine(req.params.line);
+        if (!ok) return res.status(404).json({ success: false, message: '记录不存在或已删除' });
+        appendAudit('superadmin', 'telemetry-delete', `删除遥测记录 id=${req.params.line}`);
+        res.json({ success: true, message: '已删除' });
+    } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+app.put('/api/superadmin/telemetry/:line', requireSuperAdminAuth, async (req, res) => {
+    try {
+        const ok = await updateTelemetryLine(req.params.line, req.body || {});
+        if (!ok) return res.status(404).json({ success: false, message: '记录不存在或已删除' });
+        appendAudit('superadmin', 'telemetry-edit', `编辑遥测记录 id=${req.params.line}`);
+        res.json({ success: true, message: '已保存' });
+    } catch (e) { res.status(500).json({ success: false, message: '保存失败' }); }
+});
+app.get('/api/superadmin/telemetry/download', requireSuperAdminAuth, async (req, res) => {
+    try {
+        const fmt = (req.query.format === 'json') ? 'json' : 'csv';
+        const clientId = req.query.clientId || '';
+        const logs = await readTelemetryLines(clientId || null, 0);
+        let content, mime, ext;
+        if (fmt === 'json') {
+            content = JSON.stringify(logs.map(stripTelemetryLine), null, 2);
+            mime = 'application/json'; ext = 'json';
+        } else {
+            const headers = ['ts', 'clientId', 'name', 'event', 'detail'];
+            const rows = logs.map(e => headers.map(h => csvQuoteCell(e[h])).join(','));
+            content = [headers.join(','), ...rows].join('\n');
+            mime = 'text/csv'; ext = 'csv';
+        }
+        const fname = `telemetry_${new Date().toISOString().slice(0, 10)}.${ext}`;
+        res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+        res.setHeader('Content-Type', mime + '; charset=utf-8');
+        res.send('﻿' + content);
+    } catch (e) { res.status(500).send('下载失败'); }
 });
 
 // API:版本更新
@@ -1291,6 +1903,49 @@ app.post('/api/admin/users/:userId/kick', requireAdminAuth, (req, res) => {
     }
 });
 
+// API: 管理员踢出所有在线用户（批量关页）。exclude 为可选 clientId 列表，用于避免踢出操作者自身
+app.post('/api/admin/users/kick-all', requireAdminAuth, (req, res) => {
+    try {
+        const reason = (req.body && req.body.reason) ? String(req.body.reason).slice(0, 200) : '你已被管理员踢出。';
+        const exclude = (req.body && Array.isArray(req.body.exclude)) ? req.body.exclude : [];
+        let count = 0;
+        const kicked = [];
+        for (const [userId, sockId] of onlineSockets.entries()) {
+            if (!sockId || sockId === 'rest') continue;
+            if (exclude.includes(userId)) continue;
+            const playerSocket = io.sockets.sockets.get(sockId);
+            if (!playerSocket) continue;
+            const p = onlinePlayers.get(userId);
+            const name = (p && p.name) ? p.name : userId;
+            // 通知客户端关闭标签页（客户端收到后先提示，5 秒后尝试关闭）
+            playerSocket.emit('admin-kick-tab', { message: reason, close: true });
+            setTimeout(() => { try { playerSocket.disconnect(true); } catch (_) {} }, 600);
+            // 若在某房间内，一并从房间移除并做必要的房主交接
+            for (const [roomId, room] of rooms) {
+                if (room.players && room.players.has(userId)) {
+                    const rp = room.players.get(userId);
+                    room.players.delete(userId);
+                    io.to(roomId).emit('player-kicked-by-admin', { playerName: name });
+                    if (rp.isHost && rp.socketId === room.actualHost && room.players.size > 0) {
+                        const newHost = room.players.values().next().value;
+                        newHost.isHost = true;
+                        room.actualHost = newHost.socketId;
+                        io.to(newHost.socketId).emit('promoted-to-host', { roomId: room.id, message: '原房主被踢出，你已成为新任房主。' });
+                        io.to(roomId).emit('room-updated', { type: 'host-changed', newHostName: newHost.name });
+                    }
+                }
+            }
+            count++;
+            kicked.push(name);
+        }
+        appendAudit('admin', 'kick-all', `后台批量踢出 ${count} 名在线玩家`);
+        res.json({ success: true, message: `已踢出 ${count} 名在线玩家`, count, kicked });
+    } catch (e) {
+        console.error('[API] 批量踢出失败:', e.message);
+        res.status(500).json({ success: false, message: '批量踢出失败' });
+    }
+});
+
 // API: 管理员按 IP 封禁（该 IP 下所有玩家全部功能禁用，并强制弹出全屏封禁框）
 app.post('/api/admin/ban-ip', requireAdminAuth, (req, res) => {
     try {
@@ -1717,6 +2372,7 @@ app.post('/api/admin/rooms/:roomId/chat-send', requireAdminAuth, (req, res) => {
         // 全局广播（通知 socket 未 join 房间，由客户端按 roomId 过滤）
         io.emit('admin-chat-message', { roomId, messageId, message, sender, label });
         console.log(`[Admin] 后台以 "${sender}"${label ? '[' + label + ']' : ''} 身份向房间 ${roomId} 发送消息: ${message}`);
+        appendAudit('admin', 'chat-send', `房间 ${roomId} 以「${sender}」身份发送消息: ${message.slice(0, 80)}`);
         res.json({ success: true, messageId });
     } catch (e) {
         res.status(500).json({ success: false, message: '发送失败' });
@@ -2248,6 +2904,28 @@ io.on('connection', (socket) => {
         }
     });
 
+    // 玩家更新个人主页（名称/头像/简介）；服务器存储并实时广播给所有在线客户端
+    socket.on('set-profile', (data) => {
+        try {
+            const { clientId } = data || {};
+            if (!clientId) return;
+            const prev = homeProfiles.get(clientId) || {};
+            const clean = sanitizeHomeProfile(data);
+            // 合并：玩家只更新提供的字段，保留其它已有字段（避免只改简介时清空头像/颜色）
+            const merged = Object.assign({}, prev, clean);
+            // 保留管理员设置的禁用/覆盖标记，玩家自己不能清除
+            if (prev.disabled) merged.disabled = true;
+            if (prev.adminOverridden) merged.adminOverridden = true;
+            merged.updatedAt = new Date().toISOString();
+            homeProfiles.set(clientId, merged);
+            saveHomeProfiles();
+            io.emit('player-profile', Object.assign({ clientId }, merged));
+            console.log('[Home] 更新个人主页:', clientId);
+        } catch (e) {
+            console.error('[Home] set-profile 出错:', e.message);
+        }
+    });
+
     // 玩家离开游戏（关闭/刷新页面前主动通知）
     socket.on('player-offline', (data) => {
         try {
@@ -2551,6 +3229,47 @@ io.on('connection', (socket) => {
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
 
+    // 游戏内超管：拉取某玩家完整信息（与后台 /api/admin/users/:userId/info 同口径）
+    socket.on('admin-get-player-info', (data) => {
+        try {
+            const requesterId = (data && data.requesterId) || '';
+            if (!assertSuperadminOp(requesterId)) return;
+            const userId = (data && data.targetId) || '';
+            if (!userId) return socket.emit('admin-player-info', { success: false, message: '缺少目标玩家' });
+            const ban = userBans.get(userId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+            if (!ban.reasons) ban.reasons = {};
+            const prof = playerProfiles.get(userId) || {};
+            const p = onlinePlayers.get(userId);
+            const ipNow = prof.ip || (p && p.ip) || '';
+            const ipRec = bannedIPs.get(String(ipNow)) || null;
+            socket.emit('admin-player-info', {
+                success: true,
+                clientId: userId,
+                username: prof.username || (p && p.name) || '',
+                online: !!p,
+                role: getUserRole(userId),
+                ip: ipNow,
+                ipBanned: isIPBanned(ipNow),
+                ipBanReason: ipRec ? (ipRec.reason || '') : '',
+                coins: (typeof prof.coins === 'number') ? prof.coins : (reportedCoins.get(userId) || 0),
+                totalPlayTime: (typeof prof.totalPlayTime === 'number') ? prof.totalPlayTime : 0,
+                gameStats: prof.gameStats || null,
+                gamestate: prof.gamestate || null,
+                statsAdminLocked: !!prof.statsAdminLocked,
+                gamestateAdminLocked: !!prof.gamestateAdminLocked,
+                bans: {
+                    multiplayer: !!ban.multiplayer, single: !!ban.single, puzzle: !!ban.puzzle, chat: !!ban.chat,
+                    reasons: {
+                        multiplayer: ban.reasons.multiplayer || '',
+                        single: ban.reasons.single || '',
+                        puzzle: ban.reasons.puzzle || '',
+                        chat: ban.reasons.chat || ''
+                    }
+                }
+            });
+        } catch (e) { socket.emit('admin-player-info', { success: false, message: e.message }); }
+    });
+
     // ===== 新增：多人游戏真实玩家注册（供管理后台 /api/users 聚合在线用户） =====
     // 客户端（房主与加入者）在成功进入房间后，经此事件把自身注册到服务器 room.players，
     // 与 REST create-room 创建的房间（roomId = Peer 房间号）对应。同时同步到 onlinePlayers（带上房间号）。
@@ -2732,6 +3451,7 @@ app.post('/api/admin/mazes', requireAdminAuth, (req, res) => {
         mazes.set(maze.id, maze);
         saveMazes();
         console.log(`[Admin] 新建迷宫: ${maze.name} (${maze.id})`);
+        appendAudit('admin', 'maze-create', `新建迷宫 ${maze.name} (${maze.id})`);
         res.json({ success: true, message: '迷宫创建成功', maze });
     } catch (error) {
         console.error('[API] 新建迷宫失败:', error);
@@ -2755,6 +3475,7 @@ app.put('/api/admin/mazes/:mazeId', requireAdminAuth, (req, res) => {
         mazes.set(mazeId, maze);
         saveMazes();
         console.log(`[Admin] 更新迷宫: ${maze.name} (${mazeId})`);
+        appendAudit('admin', 'maze-update', `更新迷宫 ${maze.name} (${mazeId})`);
         res.json({ success: true, message: '迷宫更新成功', maze });
     } catch (error) {
         console.error('[API] 更新迷宫失败:', error);
@@ -2770,6 +3491,7 @@ app.delete('/api/admin/mazes/:mazeId', requireAdminAuth, (req, res) => {
         mazes.delete(mazeId);
         saveMazes();
         console.log(`[Admin] 删除迷宫: ${mazeId}`);
+        appendAudit('admin', 'maze-delete', `删除迷宫 ${mazeId}`);
         res.json({ success: true, message: '迷宫删除成功' });
     } catch (error) {
         console.error('[API] 删除迷宫失败:', error);
@@ -2784,6 +3506,7 @@ app.post('/api/admin/access', requireAdminAuth, (req, res) => {
         if (!userId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
         userAccess.set(userId, access || 'all');
         console.log(`[Admin] 用户 ${userId} 页面访问权限设为: ${access || 'all'}`);
+        appendAudit('admin', 'access-control', `用户 ${userId} 页面访问权限设为: ${access || 'all'}`);
         res.json({ success: true, message: `已为用户 ${userId} 设置访问权限: ${access || 'all'}`, access: userAccess.get(userId) });
     } catch (error) {
         console.error('[API] 设置访问权限失败:', error);
@@ -2797,10 +3520,40 @@ app.post('/api/admin/function-control', requireAdminAuth, (req, res) => {
         if (!userId) return res.status(400).json({ success: false, message: '用户ID不能为空' });
         userFunctions.set(userId, control || 'enable');
         console.log(`[Admin] 用户 ${userId} 功能控制设为: ${control || 'enable'}`);
+        appendAudit('admin', 'function-control', `用户 ${userId} 功能控制设为: ${control || 'enable'}`);
         res.json({ success: true, message: `已为用户 ${userId} 设置功能控制: ${control || 'enable'}`, control: userFunctions.get(userId) });
     } catch (error) {
         console.error('[API] 设置功能控制失败:', error);
         res.status(500).json({ success: false, message: '设置失败' });
+    }
+});
+
+// ===== 全局功能控制（管理员统一开关，影响所有在线游戏客户端）=====
+// 读取当前全局功能开关（公开，供游戏客户端初始化时拉取；仅返回开关，不含敏感信息）
+app.get('/api/admin/global-functions', (req, res) => {
+    res.json({ success: true, functions: Object.assign({}, globalFunctions) });
+});
+
+// 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
+app.put('/api/admin/global-functions', requireAdminAuth, (req, res) => {
+    try {
+        const body = req.body || {};
+        const validKeys = Object.keys(GLOBAL_FUNCTIONS_DEFAULT);
+        const next = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
+        for (const k of validKeys) {
+            if (typeof body[k] === 'boolean') next[k] = body[k];
+        }
+        globalFunctions = next;
+        saveGlobalFunctions();
+        // 实时广播给所有已连接的游戏客户端
+        try { io.emit('global-function-update', Object.assign({}, globalFunctions)); } catch (_) {}
+        const changed = validKeys.filter(k => GLOBAL_FUNCTIONS_DEFAULT[k] !== globalFunctions[k]);
+        appendAudit('admin', 'function-control', `全局功能设定更新: {${changed.map(k => `${k}=${globalFunctions[k]}`).join(', ')}}`);
+        console.log('[Admin] 全局功能设定更新:', globalFunctions);
+        res.json({ success: true, message: '全局功能设定已保存并广播', functions: Object.assign({}, globalFunctions) });
+    } catch (error) {
+        console.error('[API] 保存全局功能设定失败:', error);
+        res.status(500).json({ success: false, message: '保存失败' });
     }
 });
 
@@ -2931,6 +3684,7 @@ app.post('/api/admin/remote', requireAdminAuth, (req, res) => {
         if (!sock) return res.status(404).json({ success: false, message: '目标用户连接已断开' });
         sock.emit('admin-command', { action, timestamp: Date.now() });
         console.log(`[Admin] 已向用户 ${userId} 发送远程指令: ${action}`);
+        appendAudit('admin', 'remote-command', `向用户 ${userId} 发送远程指令: ${action}`);
         res.json({ success: true, message: `已向用户 ${userId} 发送指令: ${action}` });
     } catch (error) {
         console.error('[API] 远程控制失败:', error);
@@ -3651,15 +4405,22 @@ setInterval(() => {
 console.log('🚀 正在初始化服务器...');
 initializeAdminPassword();
 initializeSuperAdminPassword();
-loadAdminState();
-loadUserRoles();
-loadUserSettings();
 
-const PORT = process.env.PORT || 234;
-server.listen(PORT, () => {
-    console.log(`\n✅ 服务器运行在 http://localhost:${PORT}`);
-    console.log(`📊 服务器状态: http://localhost:${PORT}/api/server-status`);
-    console.log(`🏠 房间列表: http://localhost:${PORT}/api/rooms`);
-    console.log(`👤 创建房间: http://localhost:${PORT}/api/create-room`);
-    console.log(`Socket.IO 服务已启动\n`);
-});
+(async () => {
+    await initDatabase();
+    loadAdminState();
+    await loadUserRoles();
+    await loadUserSettings();
+    loadGlobalFunctions();
+    await loadAccounts();
+    await loadHomeProfiles();
+
+    const PORT = process.env.PORT || 234;
+    server.listen(PORT, () => {
+        console.log(`\n✅ 服务器运行在 http://localhost:${PORT}`);
+        console.log(`📊 服务器状态: http://localhost:${PORT}/api/server-status`);
+        console.log(`🏠 房间列表: http://localhost:${PORT}/api/rooms`);
+        console.log(`👤 创建房间: http://localhost:${PORT}/api/create-room`);
+        console.log(`Socket.IO 服务已启动\n`);
+    });
+})();
