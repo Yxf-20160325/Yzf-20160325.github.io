@@ -205,7 +205,8 @@ const DB_TABLES_SQL = [
         password_hash VARCHAR(255) NOT NULL,
         created_at VARCHAR(32),
         updated_at VARCHAR(32),
-        max_mazes INT NOT NULL DEFAULT 5
+        max_mazes INT NOT NULL DEFAULT 5,
+        client_id VARCHAR(64)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -268,6 +269,32 @@ async function initDatabase() {
             await conn.ping();
             conn.release();
             await createTables();
+            // 迁移：为已存在的 cloud_storage_accounts 表补充 max_mazes 列。
+            // 旧库账号表在加入扩容码功能前已建好，CREATE TABLE IF NOT EXISTS 不会补列，
+            // 会导致 dbSaveCloudAccount 写入 max_mazes 时报 "Unknown column" 被吞掉、
+            // 扩容容量回退默认 5（即"扩容码没用"）。
+            try {
+                const [dbRow] = await pool.query('SELECT DATABASE() AS db');
+                const dbName = (dbRow && dbRow[0] && dbRow[0].db) || '';
+                const [cols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_accounts' AND COLUMN_NAME='max_mazes'",
+                    [dbName]
+                );
+                if (!cols || cols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN max_mazes INT NOT NULL DEFAULT 5');
+                    console.log('🗄️ 已为 cloud_storage_accounts 表补充 max_mazes 列（支持云空间扩容）');
+                }
+                // 补充 client_id 列：用于把云储存账号与管理端游戏用户(clientId)关联，
+                // 否则 admin 用游戏用户名查云账号永远查不到（两套独立命名空间）。
+                const [cidCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_accounts' AND COLUMN_NAME='client_id'",
+                    [dbName]
+                );
+                if (!cidCols || cidCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN client_id VARCHAR(64)');
+                    console.log('🗄️ 已为 cloud_storage_accounts 表补充 client_id 列（关联游戏用户）');
+                }
+            } catch (e) { console.error('[迁移] 检查/补充 max_mazes 列失败:', e.message); }
             DB_AVAILABLE = true;
             loadCloudSessions(); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
             console.log('🗄️ 已连接 MySQL 数据库，数据将持久化到数据库。');
@@ -4013,18 +4040,33 @@ async function dbGetCloudAccount(username) {
     }
     return cloudAccounts.get(username) || null;
 }
+// 按游戏 clientId 反查云储存账号（用于管理端从游戏用户定位其云账号）
+async function dbGetCloudAccountByClient(clientId) {
+    if (!clientId) return null;
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_storage_accounts WHERE client_id=?', [clientId]);
+            if (rows && rows.length) return rows[0];
+        } catch (e) { console.error('[云储存] DB 读账号(clientId)失败:', e.message); }
+    }
+    for (const acc of cloudAccounts.values()) {
+        if (acc.client_id === clientId) return acc;
+    }
+    return null;
+}
 async function dbSaveCloudAccount(acc) {
     const maxMazes = (acc.max_mazes != null) ? acc.max_mazes : CLOUD_MAX_MAZES;
+    const clientId = (acc.client_id != null) ? acc.client_id : null;
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes) VALUES (?,?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes]);
+                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id) VALUES (?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id)',
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId]);
             return;
         } catch (e) { console.error('[云储存] DB 写账号失败:', e.message); }
     }
-    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes }));
+    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId }));
     saveCloudStorage();
 }
 // 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
@@ -4073,11 +4115,11 @@ async function dbGetCloudMazes(username) {
 async function dbGetAllCloudAccounts() {
     if (DB_AVAILABLE && pool) {
         try {
-            const [rows] = await pool.query('SELECT username, created_at, updated_at FROM cloud_storage_accounts ORDER BY created_at DESC');
+            const [rows] = await pool.query('SELECT username, created_at, updated_at, client_id FROM cloud_storage_accounts ORDER BY created_at DESC');
             if (rows) return rows;
         } catch (e) { console.error('[云储存] DB 读账号列表失败:', e.message); }
     }
-    return Array.from(cloudAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at }));
+    return Array.from(cloudAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null }));
 }
 loadCloudStorage();
 
@@ -4280,7 +4322,8 @@ app.post('/api/cloud-storage/register', async (req, res) => {
         if (existing) return res.status(409).json({ success: false, message: '该用户名已被注册' });
         const password_hash = bcrypt.hashSync(password, 10);
         const now = new Date().toISOString();
-        const acc = { username, password_hash, created_at: now, updated_at: now };
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        const acc = { username, password_hash, created_at: now, updated_at: now, client_id: clientId };
         await dbSaveCloudAccount(acc);
         const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
         const sess = makeCloudSession(username, device);
@@ -4301,6 +4344,13 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         const acc = await dbGetCloudAccount(username);
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        }
+        // 登录时绑定/更新游戏 clientId（使管理端能用游戏用户定位云账号）
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        if (clientId && acc.client_id !== clientId) {
+            acc.client_id = clientId;
+            acc.updated_at = new Date().toISOString();
+            await dbSaveCloudAccount(acc);
         }
         const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
         const sess = makeCloudSession(username, device);
@@ -4496,7 +4546,15 @@ app.post('/api/cloud-storage/redeem', requireCloudAuth, async (req, res) => {
         if (c.active === 0 || c.active === false) return res.status(410).json({ success: false, message: '该扩容码已作废' });
         if (c.used >= c.max_uses) return res.status(403).json({ success: false, message: '该扩容码已达到使用上限' });
         const redeemedBy = Array.isArray(c.redeemed_by) ? c.redeemed_by : [];
-        if (redeemedBy.includes(req.cloudUser)) return res.status(403).json({ success: false, message: '本账号已使用过该扩容码' });
+        const alreadyRedeemed = redeemedBy.includes(req.cloudUser);
+        if (alreadyRedeemed) {
+            // 兼容历史 bug：若账号当前容量仍低于码容量，说明上次兑换因缺 max_mazes 列未真正持久化，
+            // 允许重新生效且不重复计次（used/redeemed_by 不再累加）；只有容量确实已达标才拦截。
+            const curMax = await cloudMaxMazes(req.cloudUser);
+            if (curMax >= c.capacity) {
+                return res.status(403).json({ success: false, message: '本账号已使用过该扩容码' });
+            }
+        }
         // IP 限制
         const clientIp = getClientIp(req);
         if (c.allowed_ips !== '*' && Array.isArray(c.allowed_ips)) {
@@ -4514,10 +4572,12 @@ app.post('/api/cloud-storage/redeem', requireCloudAuth, async (req, res) => {
         acc.max_mazes = newMax;
         acc.updated_at = new Date().toISOString();
         await dbSaveCloudAccount(acc);
-        // 更新码状态
-        c.used = (c.used || 0) + 1;
-        redeemedBy.push(req.cloudUser);
-        c.redeemed_by = redeemedBy;
+        // 更新码状态（仅当本次是"首次真正生效"才计次，避免历史未生效的重复兑换消耗使用次数）
+        if (!alreadyRedeemed) {
+            c.used = (c.used || 0) + 1;
+            redeemedBy.push(req.cloudUser);
+            c.redeemed_by = redeemedBy;
+        }
         await dbUpsertCloudCode(c);
         res.json({ success: true, maxMazes: newMax, capacity: c.capacity, message: `云空间已扩容至 ${newMax} 个` });
     } catch (e) {
@@ -4585,11 +4645,14 @@ app.delete('/api/admin/cloud-codes/:code', requireAdminAuth, async (req, res) =>
 app.get('/api/admin/cloud-storage/usage', requireAdminAuth, async (req, res) => {
     try {
         const username = (req.query.username || '').toString().trim();
-        if (!username) return res.status(400).json({ success: false, message: '缺少 username' });
-        const acc = await dbGetCloudAccount(username);
-        if (!acc) return res.status(404).json({ success: false, message: '云账号不存在' });
+        const clientId = (req.query.clientId || '').toString().trim();
+        let acc = username ? await dbGetCloudAccount(username) : null;
+        if (!acc && clientId) acc = await dbGetCloudAccountByClient(clientId);
+        if (!acc) return res.status(404).json({ success: false, message: '该游戏账号尚未注册/绑定云储存账号' });
         const max = (acc.max_mazes != null) ? acc.max_mazes : CLOUD_MAX_MAZES;
-        const list = await dbGetCloudMazes(username);
+        // 注意：按 clientId 反查时本地 username 变量为空，必须统一用 acc.username 查询
+        const uname = acc.username;
+        const list = await dbGetCloudMazes(uname);
         const mazes = list.map(m => {
             const bytes = Buffer.byteLength(JSON.stringify({
                 name: m.name, maze: m.maze, size: m.size, teleporters: m.teleporters,
@@ -4598,12 +4661,12 @@ app.get('/api/admin/cloud-storage/usage', requireAdminAuth, async (req, res) => 
             return { id: m.id, name: m.name, bytes, updated_at: m.updated_at };
         });
         const totalBytes = mazes.reduce((s, m) => s + m.bytes, 0);
-        const devices = (await dbGetCloudSessions(username)).map(s => ({
+        const devices = (await dbGetCloudSessions(uname)).map(s => ({
             id: s.id, device: s.device || '未知设备',
             created_at: s.created_at, last_active_at: s.last_active_at
         }));
         res.json({
-            success: true, username, maxMazes: max, count: list.length,
+            success: true, username: uname, maxMazes: max, count: list.length,
             totalBytes, mazes, devices
         });
     } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
@@ -4613,8 +4676,11 @@ app.get('/api/admin/cloud-storage/usage', requireAdminAuth, async (req, res) => 
 app.get('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res) => {
     try {
         const username = (req.query.username || '').toString().trim();
-        if (!username) return res.status(400).json({ success: false, message: '缺少 username' });
-        const devices = (await dbGetCloudSessions(username)).map(s => ({
+        const clientId = (req.query.clientId || '').toString().trim();
+        let acc = username ? await dbGetCloudAccount(username) : null;
+        if (!acc && clientId) acc = await dbGetCloudAccountByClient(clientId);
+        const uname = acc ? acc.username : username;
+        const devices = (await dbGetCloudSessions(uname)).map(s => ({
             id: s.id, device: s.device || '未知设备',
             created_at: s.created_at, last_active_at: s.last_active_at
         }));
@@ -4626,8 +4692,13 @@ app.get('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res) =
 app.delete('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res) => {
     try {
         const username = (req.query.username || '').toString().trim();
+        const clientId = (req.query.clientId || '').toString().trim();
         const id = (req.query.id || '').toString().trim();
-        if (!username || !id) return res.status(400).json({ success: false, message: '缺少 username 或 id' });
+        if (!id) return res.status(400).json({ success: false, message: '缺少 id' });
+        let acc = username ? await dbGetCloudAccount(username) : null;
+        if (!acc && clientId) acc = await dbGetCloudAccountByClient(clientId);
+        const uname = acc ? acc.username : username;
+        if (!uname) return res.status(400).json({ success: false, message: '缺少 username 或 clientId' });
         await dbDeleteCloudSession(id);
         res.json({ success: true, message: '已退登该设备' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
