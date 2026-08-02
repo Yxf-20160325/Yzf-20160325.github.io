@@ -199,6 +199,27 @@ const DB_TABLES_SQL = [
         id VARCHAR(32) PRIMARY KEY,
         data JSON NOT NULL,
         updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_storage_accounts (
+        username VARCHAR(64) PRIMARY KEY,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
+        id VARCHAR(64) PRIMARY KEY,
+        username VARCHAR(64) NOT NULL,
+        name VARCHAR(128) NOT NULL,
+        maze JSON NOT NULL,
+        size JSON,
+        teleporters JSON,
+        enemy_speed INT DEFAULT 1,
+        show_shop TINYINT(1) DEFAULT 1,
+        description TEXT,
+        difficulty VARCHAR(32),
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        INDEX idx_cloud_user (username)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -262,6 +283,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     debugInfo: true,
     f12DevConsole: true,
     ctrlShiftCD: true,
+    cloudStorage: true,
     newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
@@ -3929,6 +3951,306 @@ function savePlayerMazes() {
 }
 loadPlayerMazes();
 
+// =============== 云储存（玩家注册账号，每个账号最多 5 个地图）===============
+// 存储：DB 优先（cloud_storage_accounts / cloud_storage_mazes 表），失败回退 JSON 文件（data/cloud-storage.json）。
+const CLOUD_STORAGE_FILE = path.join(DATA_DIR, 'cloud-storage.json');
+const CLOUD_MAX_MAZES = 5;
+let cloudAccounts = new Map(); // username -> { username, password_hash, created_at, updated_at }
+let cloudMazes = new Map();    // mazeId -> { id, username, name, maze, size, teleporters, enemy_speed, show_shop, description, difficulty, created_at, updated_at }
+function loadCloudStorage() {
+    try {
+        if (fs.existsSync(CLOUD_STORAGE_FILE)) {
+            const s = JSON.parse(fs.readFileSync(CLOUD_STORAGE_FILE, 'utf8'));
+            if (s && s.accounts) s.accounts.forEach(a => cloudAccounts.set(a.username, a));
+            if (s && s.mazes) s.mazes.forEach(m => cloudMazes.set(m.id, m));
+            console.log(`[云储存] 已从 ${CLOUD_STORAGE_FILE} 加载 ${cloudAccounts.size} 账号 / ${cloudMazes.size} 地图`);
+        }
+    } catch (e) { console.error('[云储存] 加载失败:', e.message); }
+}
+function saveCloudStorage() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(CLOUD_STORAGE_FILE, JSON.stringify({
+            accounts: Array.from(cloudAccounts.values()),
+            mazes: Array.from(cloudMazes.values())
+        }, null, 2));
+    } catch (e) { console.error('[云储存] 保存失败:', e.message); }
+}
+function cloudMazesOf(username) {
+    return Array.from(cloudMazes.values())
+        .filter(m => m.username === username)
+        .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+}
+// DB 优先：读取账号（返回带 password_hash 的对象或 null）
+async function dbGetCloudAccount(username) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_storage_accounts WHERE username=?', [username]);
+            if (rows && rows.length) return rows[0];
+        } catch (e) { console.error('[云储存] DB 读账号失败:', e.message); }
+    }
+    return cloudAccounts.get(username) || null;
+}
+async function dbSaveCloudAccount(acc) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at) VALUES (?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at)',
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at]);
+            return;
+        } catch (e) { console.error('[云储存] DB 写账号失败:', e.message); }
+    }
+    cloudAccounts.set(acc.username, acc);
+    saveCloudStorage();
+}
+async function dbDeleteCloudMaze(mazeId) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_storage_mazes WHERE id=?', [mazeId]); } catch (e) { console.error('[云储存] DB 删图失败:', e.message); }
+    }
+    cloudMazes.delete(mazeId);
+    saveCloudStorage();
+}
+async function dbUpsertCloudMaze(m) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_storage_mazes (id, username, name, maze, size, teleporters, enemy_speed, show_shop, description, difficulty, created_at, updated_at) ' +
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE ' +
+                'name=VALUES(name), maze=VALUES(maze), size=VALUES(size), teleporters=VALUES(teleporters), ' +
+                'enemy_speed=VALUES(enemy_speed), show_shop=VALUES(show_shop), description=VALUES(description), ' +
+                'difficulty=VALUES(difficulty), updated_at=VALUES(updated_at)',
+                [m.id, m.username, m.name,
+                 (typeof m.maze === 'string') ? m.maze : JSON.stringify(m.maze),
+                 (typeof m.size === 'string') ? m.size : JSON.stringify(m.size || null),
+                 (typeof m.teleporters === 'string') ? m.teleporters : JSON.stringify(m.teleporters || []),
+                 m.enemy_speed || 1, m.show_shop !== false ? 1 : 0, m.description || '', m.difficulty || '中等',
+                 m.created_at, m.updated_at]);
+            return;
+        } catch (e) { console.error('[云储存] DB 写图失败:', e.message); }
+    }
+    cloudMazes.set(m.id, m);
+    saveCloudStorage();
+}
+async function dbGetCloudMazes(username) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_storage_mazes WHERE username=? ORDER BY updated_at DESC', [username]);
+            if (rows) return rows;
+        } catch (e) { console.error('[云储存] DB 读图失败:', e.message); }
+    }
+    return cloudMazesOf(username);
+}
+async function dbGetAllCloudAccounts() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT username, created_at, updated_at FROM cloud_storage_accounts ORDER BY created_at DESC');
+            if (rows) return rows;
+        } catch (e) { console.error('[云储存] DB 读账号列表失败:', e.message); }
+    }
+    return Array.from(cloudAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at }));
+}
+loadCloudStorage();
+
+// 云储存功能总开关（受全局功能设定 cloudStorage 控制）
+function cloudStorageEnabled() { return globalFunctions.cloudStorage !== false; }
+
+// 云储存鉴权：校验 Authorization: Bearer <jwt>
+function requireCloudAuth(req, res, next) {
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, message: '未登录' });
+    try {
+        const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        req.cloudUser = decoded.username;
+        next();
+    } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
+}
+
+// 公开：云储存功能是否开启
+app.get('/api/cloud-storage/enabled', (req, res) => {
+    res.json({ success: true, enabled: cloudStorageEnabled() });
+});
+
+// 注册云储存账号（用户名 + 密码；无数量上限，仅校验用户名唯一）
+app.post('/api/cloud-storage/register', async (req, res) => {
+    try {
+        if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        if (!username || !password) return res.status(400).json({ success: false, message: '用户名和密码不能为空' });
+        if (username.length > 64 || password.length < 4) return res.status(400).json({ success: false, message: '用户名过长或密码至少 4 位' });
+        const existing = await dbGetCloudAccount(username);
+        if (existing) return res.status(409).json({ success: false, message: '该用户名已被注册' });
+        const password_hash = bcrypt.hashSync(password, 10);
+        const now = new Date().toISOString();
+        const acc = { username, password_hash, created_at: now, updated_at: now };
+        await dbSaveCloudAccount(acc);
+        const token = jwt.sign({ username, type: 'cloud' }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username });
+    } catch (e) {
+        console.error('[云储存] 注册失败:', e);
+        res.status(500).json({ success: false, message: '注册失败' });
+    }
+});
+
+// 云储存登录
+app.post('/api/cloud-storage/login', async (req, res) => {
+    try {
+        if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        const acc = await dbGetCloudAccount(username);
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        }
+        const token = jwt.sign({ username, type: 'cloud' }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username });
+    } catch (e) {
+        console.error('[云储存] 登录失败:', e);
+        res.status(500).json({ success: false, message: '登录失败' });
+    }
+});
+
+// 获取当前账号的云地图列表（含网格，用于下载）
+app.get('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
+    try {
+        const list = await dbGetCloudMazes(req.cloudUser);
+        const out = list.map(m => ({
+            id: m.id, name: m.name, description: m.description || '', difficulty: m.difficulty || '中等',
+            size: (typeof m.size === 'string') ? JSON.parse(m.size) : m.size,
+            maze: (typeof m.maze === 'string') ? JSON.parse(m.maze) : m.maze,
+            teleporters: (typeof m.teleporters === 'string') ? JSON.parse(m.teleporters) : (m.teleporters || []),
+            enemySpeed: m.enemy_speed || 1,
+            showShop: m.show_shop !== 0,
+            created_at: m.created_at, updated_at: m.updated_at
+        }));
+        res.json({ success: true, mazes: out, maxMazes: CLOUD_MAX_MAZES });
+    } catch (e) {
+        console.error('[云储存] 获取列表失败:', e);
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 上传/更新一张云地图（同 id 则覆盖；超过上限报错）
+app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
+    try {
+        const b = req.body || {};
+        const name = (b.name || '').toString().trim();
+        if (!name) return res.status(400).json({ success: false, message: '地图名称不能为空' });
+        if (!b.maze || !Array.isArray(b.maze) || b.maze.length === 0) return res.status(400).json({ success: false, message: '地图数据无效' });
+        const existingList = await dbGetCloudMazes(req.cloudUser);
+        const now = new Date().toISOString();
+        let mazeId = b.mazeId || b.id || '';
+        let existing = null;
+        if (mazeId) existing = existingList.find(m => m.id === mazeId);
+        if (existing) {
+            // 覆盖同名/同 id 地图
+            const m = {
+                id: existing.id, username: req.cloudUser, name,
+                maze: b.maze, size: b.size || { width: b.maze[0].length, height: b.maze.length },
+                teleporters: b.teleporters || [], enemy_speed: b.enemySpeed || 1,
+                show_shop: b.showShop !== false, description: b.description || '', difficulty: b.difficulty || '中等',
+                created_at: existing.created_at || now, updated_at: now
+            };
+            await dbUpsertCloudMaze(m);
+            return res.json({ success: true, maze: { id: m.id, name: m.name } });
+        }
+        // 新建：检查上限
+        if (existingList.length >= CLOUD_MAX_MAZES) {
+            return res.status(403).json({ success: false, message: `每个账号最多保存 ${CLOUD_MAX_MAZES} 个云地图（可删除旧图后重试）` });
+        }
+        // 优先使用客户端提供的稳定 mazeId（使覆盖/跨端引用/管理可追溯）；否则随机生成
+        if (!mazeId) mazeId = 'cloud_' + req.cloudUser + '_' + now.toString(36) + '_' + Math.random().toString(36).substr(2, 5);
+        const m = {
+            id: mazeId, username: req.cloudUser, name,
+            maze: b.maze, size: b.size || { width: b.maze[0].length, height: b.maze.length },
+            teleporters: b.teleporters || [], enemy_speed: b.enemySpeed || 1,
+            show_shop: b.showShop !== false, description: b.description || '', difficulty: b.difficulty || '中等',
+            created_at: now, updated_at: now
+        };
+        await dbUpsertCloudMaze(m);
+        res.json({ success: true, maze: { id: m.id, name: m.name } });
+    } catch (e) {
+        console.error('[云储存] 上传失败:', e);
+        res.status(500).json({ success: false, message: '上传失败' });
+    }
+});
+
+// 删除自己的云地图
+app.delete('/api/cloud-storage/mazes/:id', requireCloudAuth, async (req, res) => {
+    try {
+        const m = cloudMazes.get(req.params.id);
+        if (!m || m.username !== req.cloudUser) return res.status(404).json({ success: false, message: '地图不存在' });
+        await dbDeleteCloudMaze(req.params.id);
+        res.json({ success: true, message: '已删除' });
+    } catch (e) {
+        console.error('[云储存] 删除失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// ===== 云储存管理（管理员专用）=====
+// 列出所有云储存账号
+app.get('/api/admin/cloud-storage/users', requireAdminAuth, async (req, res) => {
+    try {
+        const accounts = await dbGetAllCloudAccounts();
+        res.json({ success: true, accounts });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+// 列出某账号的云地图（含网格，供管理/下载）
+app.get('/api/admin/cloud-storage/mazes', requireAdminAuth, async (req, res) => {
+    try {
+        const username = (req.query.username || '').toString().trim();
+        if (!username) return res.status(400).json({ success: false, message: '缺少 username' });
+        // 兼容：前端可能传 clientId，这里只支持云 username
+        const list = await dbGetCloudMazes(username);
+        const out = list.map(m => ({
+            id: m.id, name: m.name, description: m.description || '', difficulty: m.difficulty || '中等',
+            size: (typeof m.size === 'string') ? JSON.parse(m.size) : m.size,
+            maze: (typeof m.maze === 'string') ? JSON.parse(m.maze) : m.maze,
+            teleporters: (typeof m.teleporters === 'string') ? JSON.parse(m.teleporters) : (m.teleporters || []),
+            enemySpeed: m.enemy_speed || 1, showShop: m.show_shop !== 0,
+            created_at: m.created_at, updated_at: m.updated_at
+        }));
+        res.json({ success: true, mazes: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+// 管理员改名云地图
+app.put('/api/admin/cloud-storage/mazes/:id', requireAdminAuth, async (req, res) => {
+    try {
+        // 统一读取：DB 优先 + JSON 兜底（避免 DB 模式下 cloudMazes Map 为空导致查不到）
+        let m = cloudMazes.get(req.params.id);
+        if (!m && DB_AVAILABLE && pool) {
+            try {
+                const [rows] = await pool.query('SELECT * FROM cloud_storage_mazes WHERE id=?', [req.params.id]);
+                if (rows && rows.length) m = rows[0];
+            } catch (e) { console.error('[云储存] admin 改名查图失败:', e.message); }
+        }
+        if (!m) return res.status(404).json({ success: false, message: '地图不存在' });
+        const name = (req.body.name || '').toString().trim();
+        if (!name) return res.status(400).json({ success: false, message: '名称不能为空' });
+        m.name = name;
+        m.updated_at = new Date().toISOString();
+        await dbUpsertCloudMaze(m);
+        res.json({ success: true, maze: { id: m.id, name: m.name } });
+    } catch (e) { res.status(500).json({ success: false, message: '改名失败' }); }
+});
+// 管理员删除云地图
+app.delete('/api/admin/cloud-storage/mazes/:id', requireAdminAuth, async (req, res) => {
+    try {
+        let exists = cloudMazes.has(req.params.id);
+        if (!exists && DB_AVAILABLE && pool) {
+            try {
+                const [rows] = await pool.query('SELECT id FROM cloud_storage_mazes WHERE id=?', [req.params.id]);
+                if (rows && rows.length) exists = true;
+            } catch (e) { console.error('[云储存] admin 删除查图失败:', e.message); }
+        }
+        if (!exists) return res.status(404).json({ success: false, message: '地图不存在' });
+        await dbDeleteCloudMaze(req.params.id);
+        res.json({ success: true, message: '已删除' });
+    } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+
 // 玩家上报/保存自己的地图（公开，需 clientId 归属）
 app.post('/api/player-mazes', async (req, res) => {
     try {
@@ -3966,6 +4288,14 @@ app.post('/api/player-mazes', async (req, res) => {
         maze.authorName = b.authorName || '玩家';
         maze.accountId = b.accountId || null;
         maze.isShared = b.isShared === true;
+        // isPublic：玩家自己控制的"是否公开"（默认私密=false）。玩家更新时覆盖；noShare / disabled 由 admin 控制不覆盖
+        if (b.mazeId && playerMazes.has(b.mazeId)) {
+            // 更新已有图：以客户端本次传入为准（明确传 false/true 都尊重）
+            maze.isPublic = b.isPublic === true;
+        } else {
+            // 新建图：默认私密
+            maze.isPublic = b.isPublic === true;
+        }
         // noShare / disabled 由 admin 控制，玩家更新时不覆盖
         maze.updatedAt = now;
         playerMazes.set(maze.id, maze);
@@ -3987,7 +4317,7 @@ app.get('/api/browse-mazes', (req, res) => {
             .map(m => ({
                 id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
                 size: m.size, maze: m.maze, teleporters: m.teleporters || [], enemySpeed: m.enemySpeed || 1,
-                showShop: m.showShop !== false, authorName: m.authorName, playCount: m.playCount || 0,
+                showShop: m.showShop !== false, authorName: m.authorName, author: m.author, playCount: m.playCount || 0,
                 createdAt: m.createdAt, updatedAt: m.updatedAt
             }));
         res.json({ success: true, mazes: list });
@@ -4009,9 +4339,28 @@ app.get('/api/admin/users/:userId/mazes', requireAdminAuth, (req, res) => {
                 return {
                     id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
                     size: m.size, isShared: m.isShared, noShare: !!m.noShare, disabled: !!m.disabled,
-                    popularId, playCount: m.playCount || 0, createdAt: m.createdAt, updatedAt: m.updatedAt
+                    isPublic: !!m.isPublic, popularId, playCount: m.playCount || 0, createdAt: m.createdAt, updatedAt: m.updatedAt
                 };
             });
+        res.json({ success: true, mazes: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 公开：获取某玩家的「公开地图」（个人主页展示用，默认私密，仅 isPublic 的可见；避免暴露私密图）
+app.get('/api/users/:clientId/public-mazes', (req, res) => {
+    try {
+        const cid = req.params.clientId;
+        const list = Array.from(playerMazes.values())
+            .filter(m => m.author === cid && m.isPublic === true && !m.disabled)
+            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+            .map(m => ({
+                id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
+                size: m.size, maze: m.maze, teleporters: m.teleporters || [], enemySpeed: m.enemySpeed || 1,
+                showShop: m.showShop !== false, authorName: m.authorName, playCount: m.playCount || 0,
+                createdAt: m.createdAt, updatedAt: m.updatedAt
+            }));
         res.json({ success: true, mazes: list });
     } catch (e) {
         res.status(500).json({ success: false, message: '获取失败' });
@@ -4027,6 +4376,7 @@ app.put('/api/admin/player-mazes/:mazeId', requireAdminAuth, async (req, res) =>
         const b = req.body || {};
         if (b.disabled !== undefined) maze.disabled = !!b.disabled;
         if (b.noShare !== undefined) maze.noShare = !!b.noShare;
+        if (b.isPublic !== undefined) maze.isPublic = !!b.isPublic;
         if (b.name !== undefined) maze.name = String(b.name).trim() || maze.name;
         maze.updatedAt = Date.now();
         playerMazes.set(mazeId, maze);
