@@ -3225,7 +3225,29 @@
     <div id="myMazes" class="hidden">
         <button class="back-button" onclick="showScreen('workshopMain')">返回</button>
         <h2 class="level-select-title">我的迷宫</h2>
-        
+
+        <!-- 云储存区（功能由全局设定 cloudStorage 控制，关闭则整体隐藏）-->
+        <div id="cloudStorageArea" class="hidden" style="margin-bottom:18px; padding:14px; background:rgba(33,150,243,0.12); border:1px solid rgba(33,150,243,0.4); border-radius:10px;">
+            <div id="cloudLoginBox">
+                <div style="font-weight:bold; margin-bottom:8px; color:#90caf9;">☁️ 云储存（注册账号后，最多保存 5 个地图，可在任意设备下载）</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <input id="cloudUser" type="text" placeholder="用户名" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <input id="cloudPass" type="password" placeholder="密码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <button onclick="cloudLogin()" style="padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">登录</button>
+                    <button onclick="cloudRegister()" style="padding:6px 14px; background:#4CAF50; color:#fff; border:none; border-radius:6px; cursor:pointer;">注册</button>
+                </div>
+                <div id="cloudMsg" style="font-size:12px; margin-top:6px; color:#ffb74d;"></div>
+            </div>
+            <div id="cloudPanelBox" class="hidden">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <span style="color:#90caf9;">☁️ 已登录：<b id="cloudCurUser"></b>（<span id="cloudCount">0</span>/<span id="cloudMax">5</span>）</span>
+                    <button onclick="cloudLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
+                </div>
+                <div id="cloudMazeList" style="display:flex; flex-direction:column; gap:8px;"></div>
+                <button onclick="cloudUploadCurrent()" id="cloudUploadBtn" style="margin-top:10px; padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">⬆️ 上传当前编辑器地图到云</button>
+            </div>
+        </div>
+
         <div class="mazes-container">
             <div id="myMazesList" class="maze-list"></div>
         </div>
@@ -4346,6 +4368,8 @@ function applyGlobalFunctions(settings) {
     if (typeof refreshDevUI === 'function') refreshDevUI();
     // 全局「使用新UI」策略变化后，立即刷新主菜单布局与切换按钮锁定状态
     if (typeof applyMainMenuUiMode === 'function') applyMainMenuUiMode();
+    // 云储存开关变化：若当前在"我的迷宫"页，刷新云区域可见性
+    if (typeof refreshCloudStorageVisibility === 'function') refreshCloudStorageVisibility();
     console.log('[功能设定] 已应用全局功能开关:', window.globalFunctionControl);
 }
 
@@ -8779,6 +8803,7 @@ function showScreen(screenId) {
                     // 我的迷宫页面初始化
                     console.log('进入我的迷宫页面');
                     showMyMazes();
+                    initCloudStorageUI();
                     break;
                     case 'browseMazes':
                         // 浏览迷宫页面初始化：加载社区分享地图
@@ -17701,7 +17726,11 @@ function renderBrowseMazeList(mazes) {
         const grid = m.maze;
         let size = m.size; if (typeof size === 'number') size = { width: size, height: size }; if (!size || typeof size.width !== 'number') size = (grid && grid[0]) ? { width: grid[0].length, height: grid.length } : { width: 10, height: 10 };
         const date = new Date(m.updatedAt || m.createdAt || Date.now());
-        const authorLine = m.authorName ? ('<span style="margin-left:15px;">作者: ' + escapeHtmlSafe(m.authorName) + '</span>') : '';
+        const authorLine = m.authorName
+            ? ('<span style="margin-left:15px;">作者: ' + (m.author
+                ? '<span style="cursor:pointer; text-decoration:underline; color:#6cf;" onclick="showPlayerProfileModal(\'' + String(m.author).replace(/'/g, "\\'") + '\', \'' + String(m.authorName).replace(/'/g, "\\'") + '\')">' + escapeHtmlSafe(m.authorName) + '</span>'
+                : escapeHtmlSafe(m.authorName)) + '</span>')
+            : '';
         mazeItem.innerHTML = '<h3>' + escapeHtmlSafe(m.name || '未命名') + '</h3><p>' + escapeHtmlSafe(m.description || '无描述') + '</p>' +
             '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">' +
             '<div><span style="margin-right:15px;">难度: ' + (m.difficulty || '中等') + '</span><span>大小: ' + size.width + 'x' + size.height + '</span>' + authorLine +
@@ -17899,9 +17928,14 @@ function loadPopularMazes() {
             const item = document.createElement('div');
             item.className = 'maze-item';
             item.style.cssText = 'background: rgba(255,255,255,0.1); padding:15px; margin:10px 0; border-radius:8px; border:1px solid rgba(76,175,80,0.3);';
+            const authorName = m.authorName || '';
+            const authorId = m.author || '';
+            const authorHtml = (authorName && authorId)
+                ? '<span style="margin-left:12px; color:#9ad;">作者: <span style="cursor:pointer; text-decoration:underline; color:#6cf;" onclick="showPlayerProfileModal(\'' + String(authorId).replace(/'/g, "\\'") + '\', \'' + String(authorName).replace(/'/g, "\\'") + '\')">' + escapeHtmlSafe(authorName) + '</span></span>'
+                : (authorName ? '<span style="margin-left:12px; color:#9ad;">作者: ' + escapeHtmlSafe(authorName) + '</span>' : '');
             item.innerHTML = '<h3>' + (m.name || '未命名') + '</h3><p>' + (m.description || '无描述') + '</p>' +
                 '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">' +
-                '<div><span style="margin-right:15px;">难度: ' + (m.difficulty || '简单') + '</span><span>大小: ' + size.width + 'x' + size.height + '</span></div>' +
+                '<div><span style="margin-right:15px;">难度: ' + (m.difficulty || '简单') + '</span><span>大小: ' + size.width + 'x' + size.height + '</span>' + authorHtml + '</div>' +
                 '<div><button onclick="playPopularMaze(' + i + ')" style="margin-right:8px; padding:5px 10px; background:#2196F3; color:#fff; border:none; border-radius:4px; cursor:pointer;">游玩</button></div></div>';
             popularList.appendChild(item);
         });
@@ -18246,7 +18280,7 @@ function showMyMazes() {
         const date = new Date(maze.updatedAt);
         
         mazeItem.innerHTML = `
-            <h3>${maze.name}</h3>
+            <h3>${maze.name}${maze.isCloudStorage ? ' <span style="font-size:13px; color:#64b5f6;">☁️云</span>' : ''}</h3>
             <p>${maze.description || '无描述'}</p>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
                 <div>
@@ -18273,6 +18307,186 @@ function showMyMazes() {
         
         mazesList.appendChild(mazeItem);
     });
+}
+
+// =============== 云储存（客户端）===============
+// token 持久化在 localStorage；地图下载后写入 savedMazes 并标注 isCloudStorage=true（"我的迷宫"里显示 ☁️ 云 标）。
+const CLOUD_TOKEN_KEY = 'cloudStorageToken';
+const CLOUD_USER_KEY = 'cloudStorageUser';
+function cloudApi(path, opts) {
+    const token = localStorage.getItem(CLOUD_TOKEN_KEY);
+    opts = opts || {};
+    opts.headers = Object.assign({
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + (token || '')
+    }, opts.headers || {});
+    return fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/cloud-storage' + path, opts);
+}
+function cloudIsEnabled() {
+    return !window.globalFunctionControl || window.globalFunctionControl.cloudStorage !== false;
+}
+// 功能设定变化时调用：仅控制云区域显隐（不改变登录态）
+function refreshCloudStorageVisibility() {
+    const area = document.getElementById('cloudStorageArea');
+    if (!area) return;
+    if (cloudIsEnabled()) area.classList.remove('hidden');
+    else area.classList.add('hidden');
+}
+// 进入"我的迷宫"时初始化云储存区
+function initCloudStorageUI() {
+    const area = document.getElementById('cloudStorageArea');
+    if (!area) return;
+    if (!cloudIsEnabled()) { area.classList.add('hidden'); return; }
+    area.classList.remove('hidden');
+    const token = localStorage.getItem(CLOUD_TOKEN_KEY);
+    const user = localStorage.getItem(CLOUD_USER_KEY);
+    if (token && user) {
+        document.getElementById('cloudLoginBox').classList.add('hidden');
+        document.getElementById('cloudPanelBox').classList.remove('hidden');
+        document.getElementById('cloudCurUser').textContent = user;
+        loadCloudMazeList();
+    } else {
+        document.getElementById('cloudLoginBox').classList.remove('hidden');
+        document.getElementById('cloudPanelBox').classList.add('hidden');
+    }
+}
+function cloudSetMsg(t, isErr) {
+    const el = document.getElementById('cloudMsg');
+    if (!el) return;
+    el.textContent = t || '';
+    el.style.color = isErr ? '#ff8a80' : '#aed581';
+}
+async function cloudRegister() {
+    const username = (document.getElementById('cloudUser').value || '').trim();
+    const password = document.getElementById('cloudPass').value || '';
+    cloudSetMsg('');
+    if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
+    try {
+        const r = await cloudApi('/register', { method: 'POST', body: JSON.stringify({ username, password }) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '注册失败');
+        localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
+        localStorage.setItem(CLOUD_USER_KEY, d.username);
+        initCloudStorageUI();
+        showNotification('☁️ 注册并登录成功');
+    } catch (e) { cloudSetMsg(e.message, true); }
+}
+async function cloudLogin() {
+    const username = (document.getElementById('cloudUser').value || '').trim();
+    const password = document.getElementById('cloudPass').value || '';
+    cloudSetMsg('');
+    if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
+    try {
+        const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
+        localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
+        localStorage.setItem(CLOUD_USER_KEY, d.username);
+        initCloudStorageUI();
+        showNotification('☁️ 登录成功');
+    } catch (e) { cloudSetMsg(e.message, true); }
+}
+function cloudLogout() {
+    localStorage.removeItem(CLOUD_TOKEN_KEY);
+    localStorage.removeItem(CLOUD_USER_KEY);
+    initCloudStorageUI();
+}
+async function loadCloudMazeList() {
+    const box = document.getElementById('cloudMazeList');
+    const maxEl = document.getElementById('cloudMax');
+    if (!box) return;
+    box.innerHTML = '<p style="color:#90caf9; font-size:12px;">加载中...</p>';
+    try {
+        const r = await cloudApi('/mazes');
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
+        const list = d.mazes || [];
+        if (maxEl) maxEl.textContent = d.maxMazes || 5;
+        const cnt = document.getElementById('cloudCount');
+        if (cnt) cnt.textContent = list.length;
+        // 达到上限时禁用上传按钮
+        const upBtn = document.getElementById('cloudUploadBtn');
+        if (upBtn) upBtn.disabled = list.length >= (d.maxMazes || 5);
+        if (list.length === 0) { box.innerHTML = '<p style="color:#90caf9; font-size:12px;">云中暂无地图，可上传当前编辑器地图。</p>'; return; }
+        box.innerHTML = list.map(m => `
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 10px; background:rgba(255,255,255,0.08); border-radius:8px;">
+                <div style="overflow:hidden;">
+                    <div style="font-weight:bold;">${escapeHtmlLocal(m.name)}</div>
+                    <div style="font-size:11px; color:#aaa;">难度:${escapeHtmlLocal(m.difficulty)} ${m.size ? '｜ ' + (m.size.width || '?') + 'x' + (m.size.height || '?') : ''}</div>
+                </div>
+                <div style="display:flex; gap:6px;">
+                    <button onclick="cloudDownloadMaze('${m.id}')" style="padding:4px 10px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">⬇️ 下载</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        box.innerHTML = '<p style="color:#ff8a80; font-size:12px;">加载失败：' + escapeHtmlLocal(e.message) + '</p>';
+    }
+}
+function escapeHtmlLocal(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// 下载云地图到"我的地图"（标注 isCloudStorage=true）
+async function cloudDownloadMaze(mazeId) {
+    try {
+        const r = await cloudApi('/mazes');
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
+        const m = (d.mazes || []).find(x => x.id === mazeId);
+        if (!m) throw new Error('地图不存在');
+        const savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
+        // 避免重复：同名同云 id 不重复加
+        if (savedMazes.some(x => x.cloudId === mazeId)) { showNotification('该云地图已在我的地图中'); return; }
+        const now = Date.now();
+        savedMazes.push({
+            name: m.name,
+            description: m.description || '',
+            difficulty: m.difficulty || '中等',
+            size: (m.size && (m.size.width || m.size.height)) ? m.size : { width: (m.maze[0] || []).length, height: m.maze.length },
+            maze: m.maze,
+            teleporters: m.teleporters || [],
+            enemySpeed: m.enemySpeed || 1,
+            showShop: m.showShop !== false,
+            isCloudStorage: true,
+            cloudId: mazeId,
+            createdAt: now,
+            updatedAt: now
+        });
+        localStorage.setItem('savedMazes', JSON.stringify(savedMazes));
+        showNotification('☁️ 已下载到「我的迷宫」并标注云储存');
+        showMyMazes();
+    } catch (e) { showNotification('下载失败：' + e.message); }
+}
+// 上传当前编辑器地图到云（保存=未分享；从编辑器直接上报）
+async function cloudUploadCurrent() {
+    if (!editorState.maze || editorState.maze.length === 0 || editorState.maze[0].length === 0) {
+        showNotification('请先在编辑器中创建迷宫'); return;
+    }
+    const name = (document.getElementById('mazeName') && document.getElementById('mazeName').value) || '云地图';
+    // 基于编辑器内容生成稳定 mazeId，使同一张图重新上传时覆盖而非新增（避免快速耗尽5个配额）
+    const cloudUser = (localStorage.getItem('cloudStorageUser') || 'local');
+    const mazeSig = JSON.stringify({ m: editorState.maze, t: editorState.teleporters || [], s: editorState.mazeSize });
+    let sigHash = 0;
+    for (let i = 0; i < mazeSig.length; i++) sigHash = (sigHash * 31 + mazeSig.charCodeAt(i)) >>> 0;
+    const mazeId = 'cloud_' + cloudUser + '_' + sigHash.toString(36);
+    const payload = {
+        mazeId,
+        name,
+        description: (document.getElementById('mazeDescription') && document.getElementById('mazeDescription').value) || '',
+        difficulty: (document.getElementById('mazeDifficulty') && document.getElementById('mazeDifficulty').value) || '中等',
+        size: editorState.mazeSize,
+        maze: editorState.maze,
+        teleporters: editorState.teleporters || [],
+        enemySpeed: editorState.enemySpeed || 1,
+        showShop: editorState.showShop !== false
+    };
+    try {
+        const r = await cloudApi('/mazes', { method: 'POST', body: JSON.stringify(payload) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '上传失败');
+        showNotification('☁️ 已上传到云（' + (d.maze && d.maze.name) + '）');
+        loadCloudMazeList();
+    } catch (e) { showNotification('上传失败：' + e.message); }
 }
 
 // 加载迷宫进行编辑
