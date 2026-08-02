@@ -5010,6 +5010,8 @@ async function registerPlayerOnline() {
     // 注册后立即同步一次管理员发放的金币（轮询会兜底）
     fetchMyCoins();
     console.log('[通知] 已注册玩家在线:', gameState.playerName, '(', gameState.clientId, ')');
+    // 进入游戏时把本地保存的工坊地图上报到服务器（admin 可查看/管理玩家地图）
+    reportLocalMazesToServer();
 }
 
 // ===== 个人主页（多人联机可见，emoji+颜色头像）=====
@@ -17555,7 +17557,46 @@ function reportMazeToServer(mazeData, isShared) {
     } catch (e) { console.warn('[工坊] 上报异常:', e); }
 }
 
-// 从URL参数加载迷宫
+// 游戏进入时，把本地保存的全部工坊地图一次性上报到服务器（供 admin「查看玩家工坊」）。
+// 每个本地地图用稳定的 mazeId（= clientId + 创建时间）上报，使重复进入游戏时原地更新而非新增重复。
+function reportLocalMazesToServer() {
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    if (!gameState.clientId) return;
+    let savedMazes = [];
+    try { savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || []; } catch (e) { return; }
+    if (!Array.isArray(savedMazes) || savedMazes.length === 0) return;
+    savedMazes.forEach(m => {
+        if (!m || !m.maze || m.maze.length === 0) return;
+        const createdAt = m.createdAt || 0;
+        const stableId = 'local_' + gameState.clientId + '_' + createdAt;
+        const payload = {
+            clientId: gameState.clientId,
+            accountId: gameState.accountId || null,
+            authorName: gameState.playerName || '玩家',
+            mazeId: stableId,
+            name: m.name || '未命名迷宫',
+            description: m.description || '',
+            difficulty: m.difficulty || '中等',
+            size: m.size,
+            maze: m.maze,
+            teleporters: m.teleporters || [],
+            enemySpeed: m.enemySpeed || 1,
+            showShop: m.showShop !== false,
+            isShared: !!m.isShared
+        };
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-mazes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(r => { try { return r.json(); } catch (e) { return null; } }).then(d => {
+            if (d && d.success) {
+                console.log('[工坊] 启动上报本地地图成功:', m.name, '(isShared=' + payload.isShared + ')');
+            } else {
+                console.warn('[工坊] 启动上报本地地图失败:', m.name, d && d.message);
+            }
+        }).catch(e => console.warn('[工坊] 启动上报异常:', e));
+    });
+}
 function loadMazeFromUrl() {
     const urlParams = new URLSearchParams(window.location.search);
     const mazeParam = urlParams.get('maze');
