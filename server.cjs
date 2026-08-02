@@ -220,6 +220,14 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         updated_at VARCHAR(32),
         INDEX idx_cloud_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        username VARCHAR(64) NOT NULL,
+        device VARCHAR(128),
+        created_at VARCHAR(32),
+        last_active_at VARCHAR(32),
+        INDEX idx_cloud_session_user (username)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -248,6 +256,7 @@ async function initDatabase() {
             conn.release();
             await createTables();
             DB_AVAILABLE = true;
+            loadCloudSessions(); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
             console.log('🗄️ 已连接 MySQL 数据库，数据将持久化到数据库。');
             return;
         } catch (e) {
@@ -4052,6 +4061,84 @@ async function dbGetAllCloudAccounts() {
 }
 loadCloudStorage();
 
+// ===== 云储存会话（设备）管理：记录每个账号在哪些设备/浏览器登录，支持远端退登 =====
+const CLOUD_SESSIONS_FILE = path.join(DATA_DIR, 'cloud-sessions.json');
+let cloudSessions = new Map(); // id -> { id, username, device, created_at, last_active_at, _lastTouch? }
+function loadCloudSessions() {
+    try {
+        if (DB_AVAILABLE && pool) {
+            pool.query('SELECT * FROM cloud_sessions', (err, rows) => {
+                if (!err && rows) rows.forEach(s => cloudSessions.set(s.id, s));
+                else if (err) console.error('[云储存] 会话 DB 载入失败:', err.message);
+            });
+            return;
+        }
+        if (fs.existsSync(CLOUD_SESSIONS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(CLOUD_SESSIONS_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(s => cloudSessions.set(s.id, s));
+        }
+    } catch (e) { console.error('[云储存] 会话载入失败:', e.message); }
+}
+function saveCloudSessions() {
+    try { ensureDataDir(); fs.writeFileSync(CLOUD_SESSIONS_FILE, JSON.stringify(Array.from(cloudSessions.values()), null, 2)); }
+    catch (e) { console.error('[云储存] 会话保存失败:', e.message); }
+}
+async function dbGetCloudSessions(username) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_sessions WHERE username=? ORDER BY last_active_at DESC', [username]);
+            if (rows) { rows.forEach(s => cloudSessions.set(s.id, s)); return rows; }
+        } catch (e) { console.error('[云储存] DB 读会话失败:', e.message); }
+    }
+    return Array.from(cloudSessions.values()).filter(s => s.username === username)
+        .sort((a, b) => (b.last_active_at || '').localeCompare(a.last_active_at || ''));
+}
+async function dbUpsertCloudSession(s) {
+    cloudSessions.set(s.id, s); // 内存始终同步，保证 requireCloudAuth 校验可用
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_sessions (id, username, device, created_at, last_active_at) VALUES (?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE device=VALUES(device), last_active_at=VALUES(last_active_at)',
+                [s.id, s.username, s.device, s.created_at, s.last_active_at]);
+            return;
+        } catch (e) { console.error('[云储存] DB 写会话失败:', e.message); }
+    }
+    saveCloudSessions();
+}
+async function dbDeleteCloudSession(id) {
+    cloudSessions.delete(id);
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_sessions WHERE id=?', [id]); } catch (e) { console.error('[云储存] DB 删会话失败:', e.message); }
+    }
+    saveCloudSessions();
+}
+async function dbDeleteCloudSessionsExcept(username, exceptId) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_sessions WHERE username=? AND id<>?', [username, exceptId]); } catch (e) { console.error('[云储存] DB 删会话失败:', e.message); }
+    }
+    for (const [k, s] of cloudSessions) if (s.username === username && k !== exceptId) cloudSessions.delete(k);
+    saveCloudSessions();
+}
+function genSessionId() { return 'cs_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 12); }
+function makeCloudSession(username, device) {
+    const id = genSessionId();
+    const now = new Date().toISOString();
+    const s = { id, username, device: (device || '未知设备').toString().slice(0, 128), created_at: now, last_active_at: now };
+    dbUpsertCloudSession(s).catch(e => console.error('[云储存] 创建会话失败:', e.message));
+    return s;
+}
+// 更新会话活跃时间（内存即时更新；DB 写入节流到每 60 秒一次，避免请求级写库打满连接池）
+function touchCloudSession(sess) {
+    sess.last_active_at = new Date().toISOString();
+    const now = Date.now();
+    if (!sess._lastTouch || now - sess._lastTouch > 60000) {
+        sess._lastTouch = now;
+        dbUpsertCloudSession(sess).catch(() => {});
+    }
+}
+loadCloudSessions();
+
 // 云储存功能总开关（受全局功能设定 cloudStorage 控制）
 function cloudStorageEnabled() { return globalFunctions.cloudStorage !== false; }
 
@@ -4061,6 +4148,18 @@ function requireCloudAuth(req, res, next) {
     if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, message: '未登录' });
     try {
         const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        if (decoded.type !== 'cloud' || !decoded.username) return res.status(401).json({ success: false, message: '无效的登录令牌' });
+        const sid = decoded.sid;
+        if (sid) {
+            // 新令牌带会话 id：校验会话未被远端退登
+            const sess = cloudSessions.get(sid);
+            if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' });
+            touchCloudSession(sess); // 更新活跃时间（节流写库）
+            req.cloudSessionId = sid;
+        } else {
+            // 旧版令牌（无会话，升级前登录）：向后兼容，不校验设备
+            req.cloudSessionId = null;
+        }
         req.cloudUser = decoded.username;
         next();
     } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
@@ -4085,8 +4184,10 @@ app.post('/api/cloud-storage/register', async (req, res) => {
         const now = new Date().toISOString();
         const acc = { username, password_hash, created_at: now, updated_at: now };
         await dbSaveCloudAccount(acc);
-        const token = jwt.sign({ username, type: 'cloud' }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ success: true, token, username });
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const sess = makeCloudSession(username, device);
+        const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云储存] 注册失败:', e);
         res.status(500).json({ success: false, message: '注册失败' });
@@ -4103,8 +4204,10 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
-        const token = jwt.sign({ username, type: 'cloud' }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ success: true, token, username });
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const sess = makeCloudSession(username, device);
+        const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云储存] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
@@ -4187,6 +4290,39 @@ app.delete('/api/cloud-storage/mazes/:id', requireCloudAuth, async (req, res) =>
         console.error('[云储存] 删除失败:', e);
         res.status(500).json({ success: false, message: '删除失败' });
     }
+});
+
+// 列出当前账号所有登录设备/会话（标记当前设备）
+app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
+    try {
+        const list = await dbGetCloudSessions(req.cloudUser);
+        const out = list.map(s => ({
+            id: s.id,
+            device: s.device || '未知设备',
+            current: s.id === req.cloudSessionId,
+            created_at: s.created_at,
+            last_active_at: s.last_active_at
+        }));
+        res.json({ success: true, sessions: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+// 退出指定设备（吊销会话）
+app.delete('/api/cloud-storage/sessions/:id', requireCloudAuth, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const list = await dbGetCloudSessions(req.cloudUser);
+        const target = list.find(s => s.id === id);
+        if (!target) return res.status(404).json({ success: false, message: '会话不存在' });
+        await dbDeleteCloudSession(id);
+        res.json({ success: true, message: id === req.cloudSessionId ? '已退出当前设备' : '已退出该设备' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+// 退出其他所有设备（保留当前）
+app.delete('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
+    try {
+        await dbDeleteCloudSessionsExcept(req.cloudUser, req.cloudSessionId);
+        res.json({ success: true, message: '已退出其他所有设备' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
 // ===== 云储存管理（管理员专用）=====
