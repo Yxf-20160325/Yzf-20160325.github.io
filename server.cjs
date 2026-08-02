@@ -4390,6 +4390,39 @@ app.put('/api/admin/player-mazes/:mazeId', requireAdminAuth, async (req, res) =>
     }
 });
 
+// 玩家本人：列出自己的全部地图（含服务端 isPublic 状态）。需 clientId 头。
+app.get('/api/player-mazes/self', (req, res) => {
+    try {
+        const clientId = (req.headers['x-client-id'] || '').toString();
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId' });
+        const list = Array.from(playerMazes.values())
+            .filter(m => m.author === clientId)
+            .map(m => ({ id: m.id, name: m.name, isPublic: !!m.isPublic, isShared: !!m.isShared, disabled: !!m.disabled }));
+        res.json({ success: true, mazes: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 玩家本人：设置自己地图是否公开（默认私密）。需 clientId 头，仅本人可改。
+app.put('/api/player-mazes/:mazeId/public', async (req, res) => {
+    try {
+        const mazeId = req.params.mazeId;
+        const clientId = (req.headers['x-client-id'] || (req.body && req.body.clientId) || '').toString();
+        const maze = playerMazes.get(mazeId);
+        if (!maze) return res.status(404).json({ success: false, message: '地图不存在' });
+        if (!clientId || maze.author !== clientId) return res.status(403).json({ success: false, message: '只能修改自己的地图' });
+        const b = req.body || {};
+        maze.isPublic = b.isPublic === true;
+        maze.updatedAt = Date.now();
+        playerMazes.set(mazeId, maze);
+        savePlayerMazes();
+        res.json({ success: true, isPublic: maze.isPublic, message: maze.isPublic ? '已设为公开' : '已设为私密' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
 // 管理员：删除玩家地图
 app.delete('/api/admin/player-mazes/:mazeId', requireAdminAuth, async (req, res) => {
     try {
