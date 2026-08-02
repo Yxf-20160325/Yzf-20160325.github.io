@@ -5115,6 +5115,7 @@ function showPlayerProfileModal(clientId, name) {
             <div id="ppmName" style="font-size:22px;font-weight:bold;">${esc(name)}</div>
             <div id="ppmId" style="font-size:13px;color:#888;margin:6px 0 14px;word-break:break-all;">ID: ${esc(clientId)}</div>
             <div id="ppmBody" style="font-size:14px;color:#444;white-space:pre-wrap;text-align:left;background:#f5f5f5;border-radius:8px;padding:12px;min-height:40px;">加载中…</div>
+            <div id="ppmMazes" style="margin-top:14px;text-align:left;display:none;"><div style="font-size:15px;font-weight:bold;color:#222;margin-bottom:8px;">🗺️ 公开地图</div><div id="ppmMazeList"></div></div>
             <div style="margin-top:16px;"><button onclick="closePlayerProfileModal()" style="padding:8px 20px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭</button></div>
         </div>
     `;
@@ -5122,6 +5123,7 @@ function showPlayerProfileModal(clientId, name) {
     let p = (window.playerProfiles && window.playerProfiles[String(clientId)]) || null;
     if (p) {
         renderProfileInto(modal, p);
+        loadPlayerPublicMazes(clientId, modal);
     } else if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
         fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/profile/' + encodeURIComponent(clientId))
             .then(r => r.json()).then(d => {
@@ -5130,10 +5132,12 @@ function showPlayerProfileModal(clientId, name) {
                     window.playerProfiles[String(clientId)] = d.profile;
                     renderProfileInto(modal, d.profile);
                 } else { renderProfileInto(modal, null); }
+                loadPlayerPublicMazes(clientId, modal);
             })
-            .catch(() => renderProfileInto(modal, null));
+            .catch(() => { renderProfileInto(modal, null); loadPlayerPublicMazes(clientId, modal); });
     } else {
         renderProfileInto(modal, null);
+        loadPlayerPublicMazes(clientId, modal);
     }
 }
 function renderProfileInto(modal, p) {
@@ -5147,6 +5151,37 @@ function renderProfileInto(modal, p) {
     }
     if (avatarEl) { avatarEl.textContent = p.avatar || '😀'; avatarEl.style.background = p.color || '#4CAF50'; }
     if (bodyEl) bodyEl.textContent = (p.bio && p.bio.trim()) ? p.bio : '（暂无简介）';
+}
+
+// 个人主页：加载并渲染该玩家的公开地图（GET /api/users/:clientId/public-mazes）
+function loadPlayerPublicMazes(clientId, modal) {
+    const box = modal && modal.querySelector('#ppmMazes');
+    const listEl = modal && modal.querySelector('#ppmMazeList');
+    if (!box || !listEl) return;
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { box.style.display = 'none'; return; }
+    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/users/' + encodeURIComponent(clientId) + '/public-mazes')
+        .then(r => r.json()).then(d => {
+            const mazes = (d && d.success && Array.isArray(d.mazes)) ? d.mazes : [];
+            window._publicMazeCache = mazes;
+            if (mazes.length === 0) { box.style.display = 'none'; return; }
+            box.style.display = 'block';
+            listEl.innerHTML = mazes.map((m, idx) => {
+                const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return '<div style="padding:8px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">' +
+                    '<div><div style="font-weight:bold; color:#222;">' + esc(m.name || '未命名') + '</div>' +
+                    '<div style="font-size:12px; color:#888;">难度: ' + esc(m.difficulty || '中等') + ' ｜ 游玩: ' + (m.playCount || 0) + ' 次</div></div>' +
+                    '<button onclick="playPublicMaze(' + idx + ')" style="padding:5px 12px; background:#2196F3; color:#fff; border:none; border-radius:4px; cursor:pointer;">游玩</button></div>';
+            }).join('');
+        })
+        .catch(() => { box.style.display = 'none'; });
+}
+// 个人主页公开地图：点击游玩
+function playPublicMaze(idx) {
+    const m = window._publicMazeCache && window._publicMazeCache[idx];
+    if (!m) return;
+    const grid = m.maze;
+    const size = m.size || (grid && grid[0] ? { width: grid[0].length, height: grid.length } : { width: 10, height: 10 });
+    playMaze({ maze: grid, teleporters: m.teleporters || [], size: size, enemySpeed: m.enemySpeed || 5, showShop: m.showShop !== false }, true);
 }
 function refreshOpenProfileModal(clientId, data) {
     const modal = document.getElementById('playerProfileModal');
@@ -17573,7 +17608,18 @@ function reportMazeToServer(mazeData, isShared) {
             body: JSON.stringify(payload)
         }).then(r => { try { return r.json(); } catch (e) { return null; } }).then(d => {
             if (d && d.success) {
-                editorState.serverMazeId = (d.maze && d.maze.id) || editorState.serverMazeId;
+                const sid = (d.maze && d.maze.id) || null;
+                if (sid) {
+                    editorState.serverMazeId = sid;
+                    // 把服务端 id 写回 localStorage 对应本地图，便于「我的迷宫」里做公开切换
+                    try {
+                        const arr = JSON.parse(localStorage.getItem('savedMazes')) || [];
+                        if (editorState.editingIndex >= 0 && arr[editorState.editingIndex]) {
+                            arr[editorState.editingIndex].serverMazeId = sid;
+                            localStorage.setItem('savedMazes', JSON.stringify(arr));
+                        }
+                    } catch (e) {}
+                }
                 console.log('[工坊] 地图已上报服务器:', editorState.serverMazeId, '(isShared=' + isShared + ')');
             } else {
                 console.warn('[工坊] 地图上报失败:', d && d.message);
@@ -17590,7 +17636,7 @@ function reportLocalMazesToServer() {
     let savedMazes = [];
     try { savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || []; } catch (e) { return; }
     if (!Array.isArray(savedMazes) || savedMazes.length === 0) return;
-    savedMazes.forEach(m => {
+    savedMazes.forEach((m, idx) => {
         if (!m || !m.maze || m.maze.length === 0) return;
         const createdAt = m.createdAt || 0;
         const stableId = 'local_' + gameState.clientId + '_' + createdAt;
@@ -17615,6 +17661,13 @@ function reportLocalMazesToServer() {
             body: JSON.stringify(payload)
         }).then(r => { try { return r.json(); } catch (e) { return null; } }).then(d => {
             if (d && d.success) {
+                const sid = (d.maze && d.maze.id) || null;
+                if (sid) {
+                    try {
+                        const arr = JSON.parse(localStorage.getItem('savedMazes')) || [];
+                        if (arr[idx]) { arr[idx].serverMazeId = sid; localStorage.setItem('savedMazes', JSON.stringify(arr)); }
+                    } catch (e) {}
+                }
                 console.log('[工坊] 启动上报本地地图成功:', m.name, '(isShared=' + payload.isShared + ')');
             } else {
                 console.warn('[工坊] 启动上报本地地图失败:', m.name, d && d.message);
@@ -18254,59 +18307,105 @@ function applyShopButtonVisibility() {
 function showMyMazes() {
     const mazesList = document.getElementById('myMazesList');
     mazesList.innerHTML = '';
-    
+    refreshCloudStorageVisibility();
+
     let savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
-    
+
     if (savedMazes.length === 0) {
         mazesList.innerHTML = '<p style="text-align: center; color: #888;">暂无保存的迷宫</p>';
+        // 仍尝试刷新云区域可见性
         return;
     }
-    
+
     // 保留原始索引后再排序，避免排序后 index 与 localStorage 中的实际位置不匹配
     const indexedMazes = savedMazes.map((maze, originalIndex) => ({ maze, originalIndex }));
     indexedMazes.sort((a, b) => b.maze.updatedAt - a.maze.updatedAt);
-    
-    indexedMazes.forEach(({ maze, originalIndex }) => {
-        const mazeItem = document.createElement('div');
-        mazeItem.className = 'maze-item';
-        mazeItem.style.cssText = `
-            background: rgba(255, 255, 255, 0.1);
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 8px;
-            border: 1px solid rgba(76, 175, 80, 0.3);
-        `;
-        
-        const date = new Date(maze.updatedAt);
-        
-        mazeItem.innerHTML = `
-            <h3>${maze.name}${maze.isCloudStorage ? ' <span style="font-size:13px; color:#64b5f6;">☁️云</span>' : ''}</h3>
-            <p>${maze.description || '无描述'}</p>
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                <div>
-                    <span style="margin-right: 15px;">难度: ${maze.difficulty}</span>
-                    <span>大小: ${maze.size.width}x${maze.size.height}</span>
-                    <br>
-                    <span style="font-size: 12px; color: #888; margin-top: 5px; display: block;">
-                        更新于: ${date.toLocaleString()}
-                    </span>
+
+    const renderItems = () => {
+        mazesList.innerHTML = '';
+        indexedMazes.forEach(({ maze, originalIndex }) => {
+            const mazeItem = document.createElement('div');
+            mazeItem.className = 'maze-item';
+            mazeItem.style.cssText = `
+                background: rgba(255, 255, 255, 0.1);
+                padding: 15px;
+                margin: 10px 0;
+                border-radius: 8px;
+                border: 1px solid rgba(76, 175, 80, 0.3);
+            `;
+            const date = new Date(maze.updatedAt);
+            const sid = maze.serverMazeId || '';
+            const isPublic = sid && window._selfMazePublic && window._selfMazePublic[sid] === true;
+            const pubTag = sid
+                ? `<button onclick="toggleMyMazePublic(${originalIndex})" style="margin-left:10px; padding:3px 8px; background:${isPublic ? '#7f8c8d' : '#3498db'}; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">${isPublic ? '🌐 已公开' : '🔒 设为公开'}</button>`
+                : '';
+            mazeItem.innerHTML = `
+                <h3>${maze.name}${maze.isCloudStorage ? ' <span style="font-size:13px; color:#64b5f6;">☁️云</span>' : ''}</h3>
+                <p>${maze.description || '无描述'}</p>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+                    <div>
+                        <span style="margin-right: 15px;">难度: ${maze.difficulty}</span>
+                        <span>大小: ${maze.size.width}x${maze.size.height}</span>
+                        <br>
+                        <span style="font-size: 12px; color: #888; margin-top: 5px; display: block;">
+                            更新于: ${date.toLocaleString()}
+                        </span>
+                    </div>
+                    <div>
+                        <button onclick="playMazeByIndex(${originalIndex})" style="margin-right: 6px; padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            游玩
+                        </button>
+                        <button onclick="loadMazeForEditing(${originalIndex})" style="margin-right: 6px; padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            编辑
+                        </button>
+                        <button onclick="deleteMaze(${originalIndex})" style="margin-right: 6px; padding: 5px 10px; background: #FF5252; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            删除
+                        </button>
+                        ${pubTag}
+                        <button onclick="cloudUploadByIndex(${originalIndex})" style="margin-right: 6px; padding: 5px 10px; background: #00BCD4; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            ☁️ 上传到云
+                        </button>
+                    </div>
                 </div>
-                <div>
-                    <button onclick="playMazeByIndex(${originalIndex})" style="margin-right: 10px; padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                        游玩
-                    </button>
-                    <button onclick="loadMazeForEditing(${originalIndex})" style="margin-right: 10px; padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                        编辑
-                    </button>
-                    <button onclick="deleteMaze(${originalIndex})" style="padding: 5px 10px; background: #FF5252; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                        删除
-                    </button>
-                </div>
-            </div>
-        `;
-        
-        mazesList.appendChild(mazeItem);
-    });
+            `;
+            mazesList.appendChild(mazeItem);
+        });
+    };
+    renderItems();
+
+    // 拉取服务端「我的地图」公开状态（仅本人）
+    if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0 && gameState.clientId) {
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-mazes/self', { headers: { 'x-client-id': gameState.clientId } })
+            .then(r => r.json()).then(d => {
+                if (d && d.success && Array.isArray(d.mazes)) {
+                    window._selfMazePublic = {};
+                    d.mazes.forEach(m => { window._selfMazePublic[m.id] = !!m.isPublic; });
+                    renderItems();
+                }
+            }).catch(() => {});
+    }
+}
+
+// 我的迷宫：切换某张地图的公开/私密状态（调用玩家本人接口）
+function toggleMyMazePublic(originalIndex) {
+    let savedMazes = [];
+    try { savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || []; } catch (e) { return; }
+    const maze = savedMazes[originalIndex];
+    if (!maze || !maze.serverMazeId) { showNotification('该地图尚未同步到服务器，请先保存/编辑一次'); return; }
+    const cur = (window._selfMazePublic && window._selfMazePublic[maze.serverMazeId]) === true;
+    const next = !cur;
+    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-mazes/' + encodeURIComponent(maze.serverMazeId) + '/public', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-client-id': gameState.clientId },
+        body: JSON.stringify({ isPublic: next })
+    }).then(r => r.json()).then(d => {
+        if (d && d.success) {
+            if (!window._selfMazePublic) window._selfMazePublic = {};
+            window._selfMazePublic[maze.serverMazeId] = next;
+            showMyMazes();
+            showNotification(next ? '已设为公开，其他人可在你的个人主页看到' : '已设为私密');
+        } else { showNotification('操作失败：' + (d && d.message || '未知')); }
+    }).catch(() => showNotification('操作失败'));
 }
 
 // =============== 云储存（客户端）===============
@@ -18486,6 +18585,65 @@ async function cloudUploadCurrent() {
         if (!r.ok || !d.success) throw new Error(d.message || '上传失败');
         showNotification('☁️ 已上传到云（' + (d.maze && d.maze.name) + '）');
         loadCloudMazeList();
+    } catch (e) { showNotification('上传失败：' + e.message); }
+}
+
+// 从「我的迷宫」列表中选一张地图上传到云储存（复用上传逻辑，基于内容生成稳定 mazeId 以实现覆盖）
+async function cloudUploadByIndex(index) {
+    const token = localStorage.getItem(CLOUD_TOKEN_KEY);
+    const cloudUser = localStorage.getItem(CLOUD_USER_KEY);
+    if (!token || !cloudUser) {
+        showNotification('请先在下方「☁️ 云储存」区登录/注册云账号');
+        initCloudStorageUI();
+        return;
+    }
+    let savedMazes = [];
+    try { savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || []; } catch (e) {}
+    const mazeData = savedMazes[index];
+    if (!mazeData || !mazeData.maze || !Array.isArray(mazeData.maze) || mazeData.maze.length === 0) {
+        showNotification('该地图数据无效，无法上传'); return;
+    }
+    const name = mazeData.name || '云地图';
+    const size = (mazeData.size && (mazeData.size.width || mazeData.size.height)) ? mazeData.size
+        : { width: (mazeData.maze[0] || []).length, height: mazeData.maze.length };
+    // 基于内容生成稳定 mazeId（同图再次上传会覆盖，避免耗尽 5 个配额）
+    const mazeSig = JSON.stringify({ m: mazeData.maze, t: mazeData.teleporters || [], s: size });
+    let sigHash = 0;
+    for (let i = 0; i < mazeSig.length; i++) sigHash = (sigHash * 31 + mazeSig.charCodeAt(i)) >>> 0;
+    const mazeId = 'cloud_' + cloudUser + '_' + sigHash.toString(36);
+    const payload = {
+        mazeId,
+        name,
+        description: mazeData.description || '',
+        difficulty: mazeData.difficulty || '中等',
+        size,
+        maze: mazeData.maze,
+        teleporters: mazeData.teleporters || [],
+        enemySpeed: mazeData.enemySpeed || 1,
+        showShop: mazeData.showShop !== false
+    };
+    try {
+        // 上传前检查配额：若已有同 id 则可覆盖，否则达上限则拦截
+        let allow = true;
+        try {
+            const rl = await cloudApi('/mazes');
+            const dl = await rl.json();
+            if (rl.ok && dl.success) {
+                const list = dl.mazes || [];
+                if (!list.some(m => m.id === mazeId) && list.length >= (dl.maxMazes || 5)) allow = false;
+            }
+        } catch (e) { /* 配额检查失败不阻断上传，交由后端最终裁决 */ }
+        if (!allow) { showNotification('云储存已达上限（5 个），请先删除部分云地图'); return; }
+        const r = await cloudApi('/mazes', { method: 'POST', body: JSON.stringify(payload) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '上传失败');
+        showNotification('☁️ 已上传到云（' + (d.maze && d.maze.name) + '）');
+        loadCloudMazeList();
+        // 在「我的迷宫」项上标注已上传，便于识别
+        if (!mazeData.cloudId) {
+            savedMazes[index].cloudId = d.maze && d.maze.id;
+            localStorage.setItem('savedMazes', JSON.stringify(savedMazes));
+        }
     } catch (e) { showNotification('上传失败：' + e.message); }
 }
 
