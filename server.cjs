@@ -228,6 +228,7 @@ const DB_TABLES_SQL = [
         id VARCHAR(64) PRIMARY KEY,
         username VARCHAR(64) NOT NULL,
         device VARCHAR(128),
+        ip VARCHAR(64),
         created_at VARCHAR(32),
         last_active_at VARCHAR(32),
         INDEX idx_cloud_session_user (username)
@@ -243,6 +244,11 @@ const DB_TABLES_SQL = [
         note VARCHAR(255),
         active TINYINT(1) DEFAULT 1,
         redeemed_by TEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_storage_progress (
+        username VARCHAR(64) PRIMARY KEY,
+        progress JSON,
+        updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -303,6 +309,15 @@ async function initDatabase() {
                 if (!disCols || disCols.length === 0) {
                     await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN disabled TINYINT(1) NOT NULL DEFAULT 0');
                     console.log('🗄️ 已为 cloud_storage_accounts 表补充 disabled 列（封禁账号）');
+                }
+                // 补充 ip 列：记录会话登录 IP，供"管理设备"展示
+                const [sessIpCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_sessions' AND COLUMN_NAME='ip'",
+                    [dbName]
+                );
+                if (!sessIpCols || sessIpCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_sessions ADD COLUMN ip VARCHAR(64)');
+                    console.log('🗄️ 已为 cloud_sessions 表补充 ip 列（记录登录 IP）');
                 }
             } catch (e) { console.error('[迁移] 检查/补充 max_mazes 列失败:', e.message); }
             DB_AVAILABLE = true;
@@ -2650,6 +2665,69 @@ app.patch('/api/admin/rooms/:roomId/privacy', requireAdminAuth, (req, res) => {
 // ===== 房间聊天监管（管理员可查看/发言/删除消息） =====
 // 聊天走 PeerJS P2P、服务器天然看不到，因此由发送方客户端把消息"镜像上报"到这里留存。
 
+// ===== 聊天脏话屏蔽（服务端兜底）=====
+// 聊天走 PeerJS P2P，正常情况由发送方客户端过滤后再广播；但改过的客户端可能把脏话直接
+// 发给本镜像上报接口，故服务端再过滤一次，保证管理员监管记录里也不会出现脏话。
+const PROFANITY_WORDS = [
+    '傻逼', '操你妈', '草泥马', '去死', '垃圾', '废物', '蠢货',
+    '脑残', '智障', '二百五', '王八蛋', '龟儿子', '杂种', '畜生',
+    '禽兽', '色狼', '变态', '婊子', '贱人', '傻屌', '妈蛋', '滚蛋',
+    '我操你妈', '我草泥马', '自杀', '紫砂', '毒品', '冰糖', '神经病', '圣经并',
+    '杜平', '毒瓶',
+    'fuck', 'shit', 'damn', 'bitch', 'asshole', 'dick', 'pussy',
+    'cunt', 'bastard', 'nigger', 'nigga', 'faggot', 'dyke', 'retard',
+    'whore', 'slut', 'douche', 'ass', 'shithead', 'sb', 'sbm', 'wcnm', 'fw',
+    'bt', 'die'
+];
+const PROFANITY_LEET = { '4': 'a', '@': 'a', '1': 'i', '!': 'i', '|': 'i', '0': 'o', '3': 'e', '$': 's', '5': 's', '7': 't', '8': 'b', '9': 'g', '6': 'b' };
+function profanityIsAlnumCJK(c) { return (c && /[a-z0-9一-鿿]/.test(c)); }
+function profanityIsCJK(c) { return (c && /[一-鿿]/.test(c)); }
+function profanityCleanFull(s) {
+    s = (s || '').toLowerCase();
+    let clean = ''; const om = [];
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (PROFANITY_LEET[ch] !== undefined) { clean += PROFANITY_LEET[ch]; om.push(i); }
+        else if (profanityIsAlnumCJK(ch)) { clean += ch; om.push(i); }
+    }
+    return { clean, om };
+}
+function profanityBoundaryOk(text, om, s, e) {
+    let bOk = (s === 0);
+    if (!bOk) { const p = om[s] - 1; bOk = (p < 0) || !profanityIsAlnumCJK(text[p]) || profanityIsCJK(text[p]); }
+    let aOk = (e >= om.length);
+    if (!aOk) { const afterOrig = om[e - 1] + 1; aOk = (afterOrig >= text.length) || !profanityIsAlnumCJK(text[afterOrig]) || profanityIsCJK(text[afterOrig]); }
+    return bOk && aOk;
+}
+function filterProfanityServer(text) {
+    if (!text) return text;
+    const { clean, om } = profanityCleanFull(text);
+    if (!clean) return text;
+    const bad = new Array(clean.length).fill(false);
+    for (const w of PROFANITY_WORDS) {
+        const cw = profanityCleanFull(w).clean;
+        if (!cw) continue;
+        let idx = 0;
+        while ((idx = clean.indexOf(cw, idx)) !== -1) {
+            const s = idx, e = idx + cw.length;
+            if (profanityBoundaryOk(text, om, s, e)) {
+                for (let i = s; i < e; i++) bad[i] = true;
+            }
+            idx = e;
+        }
+    }
+    if (!bad.some(Boolean)) return text;
+    let ci = 0, out = '';
+    for (const ch of text) {
+        const lc = ch.toLowerCase();
+        if (profanityIsAlnumCJK(lc) || PROFANITY_LEET[lc] !== undefined) {
+            out += bad[ci] ? '*' : ch;
+            ci++;
+        } else out += ch;
+    }
+    return out;
+}
+
 // API: 客户端镜像上报聊天消息（公开接口）
 app.post('/api/room-chat', (req, res) => {
     try {
@@ -2665,7 +2743,7 @@ app.post('/api/room-chat', (req, res) => {
             messageId: String(messageId),
             sender: String(sender || '玩家').slice(0, 50),
             clientId: clientId ? String(clientId) : null,
-            message: message ? String(message).slice(0, 2000) : null,
+            message: message ? filterProfanityServer(String(message)).slice(0, 2000) : null,
             image: image ? String(image).slice(0, 500000) : null, // 图片 base64 上限 ~500KB
             isAdmin: false,
             time: Date.now()
@@ -4016,13 +4094,15 @@ const CLOUD_STORAGE_FILE = path.join(DATA_DIR, 'cloud-storage.json');
 const CLOUD_MAX_MAZES = 5;
 let cloudAccounts = new Map(); // username -> { username, password_hash, created_at, updated_at }
 let cloudMazes = new Map();    // mazeId -> { id, username, name, maze, size, teleporters, enemy_speed, show_shop, description, difficulty, created_at, updated_at }
+let cloudProgress = new Map(); // username -> { username, progress: {...}, updated_at }
 function loadCloudStorage() {
     try {
         if (fs.existsSync(CLOUD_STORAGE_FILE)) {
             const s = JSON.parse(fs.readFileSync(CLOUD_STORAGE_FILE, 'utf8'));
             if (s && s.accounts) s.accounts.forEach(a => cloudAccounts.set(a.username, a));
             if (s && s.mazes) s.mazes.forEach(m => cloudMazes.set(m.id, m));
-            console.log(`[云储存] 已从 ${CLOUD_STORAGE_FILE} 加载 ${cloudAccounts.size} 账号 / ${cloudMazes.size} 地图`);
+            if (s && s.progress) s.progress.forEach(p => cloudProgress.set(p.username, p));
+            console.log(`[云储存] 已从 ${CLOUD_STORAGE_FILE} 加载 ${cloudAccounts.size} 账号 / ${cloudMazes.size} 地图 / ${cloudProgress.size} 通关进度`);
         }
     } catch (e) { console.error('[云储存] 加载失败:', e.message); }
 }
@@ -4031,7 +4111,8 @@ function saveCloudStorage() {
         ensureDataDir();
         fs.writeFileSync(CLOUD_STORAGE_FILE, JSON.stringify({
             accounts: Array.from(cloudAccounts.values()),
-            mazes: Array.from(cloudMazes.values())
+            mazes: Array.from(cloudMazes.values()),
+            progress: Array.from(cloudProgress.values())
         }, null, 2));
     } catch (e) { console.error('[云储存] 保存失败:', e.message); }
 }
@@ -4064,18 +4145,47 @@ async function dbGetCloudAccountByClient(clientId) {
     }
     return null;
 }
+// 云账号表可能缺失的列及其类型：写入失败（迁移未执行）时自愈补列，
+// 避免扩容码写入 max_mazes / 登录写 client_id / 封禁写 disabled 被静默吞掉。
+const CLOUD_ACCOUNT_COLUMNS = {
+    max_mazes: 'INT NOT NULL DEFAULT 5',
+    client_id: 'VARCHAR(64)',
+    disabled: 'TINYINT(1) NOT NULL DEFAULT 0'
+};
+const _healedAccountCols = {};
+async function _healAccountColumn(col) {
+    if (_healedAccountCols[col] || !CLOUD_ACCOUNT_COLUMNS[col]) return false;
+    try {
+        await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN ' + col + ' ' + CLOUD_ACCOUNT_COLUMNS[col]);
+        console.log('🗄️ 自愈：已为 cloud_storage_accounts 补充列 ' + col);
+        _healedAccountCols[col] = true;
+        return true;
+    } catch (e) {
+        console.error('[云储存] 自愈补列 ' + col + ' 失败:', e.message);
+        return false;
+    }
+}
 async function dbSaveCloudAccount(acc) {
-    const maxMazes = (acc.max_mazes != null) ? acc.max_mazes : CLOUD_MAX_MAZES;
+    const maxMazes = Number(acc.max_mazes != null ? acc.max_mazes : CLOUD_MAX_MAZES);
     const clientId = (acc.client_id != null) ? acc.client_id : null;
     const disabled = (acc.disabled != null) ? (acc.disabled ? 1 : 0) : 0;
+    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled) VALUES (?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled)';
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled];
     if (DB_AVAILABLE && pool) {
         try {
-            await pool.query(
-                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled) VALUES (?,?,?,?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled]);
+            await pool.query(SQL, PARAMS);
             return;
-        } catch (e) { console.error('[云储存] DB 写账号失败:', e.message); }
+        } catch (e) {
+            // 自愈：生产库若缺任意一列（迁移未执行），自动补列并重试一次
+            const m = String(e.message || '');
+            const mm = m.match(/Unknown column ['"]?([a-z_]+)['"]?/i);
+            if (mm && CLOUD_ACCOUNT_COLUMNS[mm[1]] && await _healAccountColumn(mm[1])) {
+                try { await pool.query(SQL, PARAMS); return; }
+                catch (e2) { console.error('[云储存] 自愈补列后写入仍失败:', e2.message); }
+            }
+            console.error('[云储存] DB 写账号失败:', e.message);
+        }
     }
     cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled }));
     saveCloudStorage();
@@ -4083,7 +4193,7 @@ async function dbSaveCloudAccount(acc) {
 // 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
 async function cloudMaxMazes(username) {
     const acc = await dbGetCloudAccount(username);
-    if (acc && acc.max_mazes != null) return acc.max_mazes;
+    if (acc && acc.max_mazes != null) return Number(acc.max_mazes);
     return CLOUD_MAX_MAZES;
 }
 async function dbDeleteCloudMaze(mazeId) {
@@ -4122,6 +4232,68 @@ async function dbGetCloudMazes(username) {
         } catch (e) { console.error('[云储存] DB 读图失败:', e.message); }
     }
     return cloudMazesOf(username);
+}
+// ===== 云储存「通关数据」：每个账号一条进度记录 =====
+// 规范化前端传来的进度，仅保留通关相关字段并做数值校验
+function normalizeCloudProgress(p) {
+    const out = { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+    if (p && typeof p === 'object') {
+        let ul = Number(p.unlockedLevel);
+        if (isFinite(ul) && ul >= 1 && Number.isInteger(ul)) out.unlockedLevel = ul;
+        if (Array.isArray(p.completedLevels)) {
+            out.completedLevels = p.completedLevels.filter(n => Number.isFinite(Number(n)) && Number(n) >= 1 && Number.isInteger(Number(n))).map(Number);
+        }
+        if (Array.isArray(p.puzzleCompletedLevels)) {
+            out.puzzleCompletedLevels = p.puzzleCompletedLevels.filter(n => Number.isFinite(Number(n)) && Number(n) >= 1 && Number.isInteger(Number(n))).map(Number);
+        }
+    }
+    return out;
+}
+// 合并两条进度：关卡数取最大，已通关列表取并集（进度只增不减）
+function mergeCloudProgress(a, b) {
+    const na = normalizeCloudProgress(a), nb = normalizeCloudProgress(b);
+    const setLv = new Set([...na.completedLevels, ...nb.completedLevels]);
+    const setPz = new Set([...na.puzzleCompletedLevels, ...nb.puzzleCompletedLevels]);
+    return {
+        unlockedLevel: Math.max(na.unlockedLevel, nb.unlockedLevel),
+        completedLevels: Array.from(setLv).sort((x, y) => x - y),
+        puzzleCompletedLevels: Array.from(setPz).sort((x, y) => x - y)
+    };
+}
+function cloudProgressOf(username) {
+    return cloudProgress.get(username) || null;
+}
+async function dbGetCloudProgress(username) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_storage_progress WHERE username=?', [username]);
+            if (rows && rows.length) {
+                let prog = rows[0].progress;
+                if (typeof prog === 'string') { try { prog = JSON.parse(prog); } catch (e) { prog = null; } }
+                return { progress: normalizeCloudProgress(prog), updated_at: rows[0].updated_at || null };
+            }
+            return { progress: null, updated_at: null };
+        } catch (e) { console.error('[云储存] DB 读进度失败:', e.message); }
+    }
+    const p = cloudProgressOf(username);
+    return p ? { progress: normalizeCloudProgress(p.progress), updated_at: p.updated_at || null } : { progress: null, updated_at: null };
+}
+async function dbSaveCloudProgress(username, incoming) {
+    const now = new Date().toISOString();
+    const cur = await dbGetCloudProgress(username);
+    const merged = mergeCloudProgress(cur.progress, incoming);
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_storage_progress (username, progress, updated_at) VALUES (?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE progress=VALUES(progress), updated_at=VALUES(updated_at)',
+                [username, JSON.stringify(merged), now]);
+            return { progress: merged, updated_at: now };
+        } catch (e) { console.error('[云储存] DB 写进度失败:', e.message); }
+    }
+    cloudProgress.set(username, { username, progress: merged, updated_at: now });
+    saveCloudStorage();
+    return { progress: merged, updated_at: now };
 }
 async function dbGetAllCloudAccounts() {
     if (DB_AVAILABLE && pool) {
@@ -4190,9 +4362,9 @@ async function dbUpsertCloudSession(s) {
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_sessions (id, username, device, created_at, last_active_at) VALUES (?,?,?,?,?) ' +
+                'INSERT INTO cloud_sessions (id, username, device, ip, created_at, last_active_at) VALUES (?,?,?,?,?,?) ' +
                 'ON DUPLICATE KEY UPDATE device=VALUES(device), last_active_at=VALUES(last_active_at)',
-                [s.id, s.username, s.device, s.created_at, s.last_active_at]);
+                [s.id, s.username, s.device, s.ip || '', s.created_at, s.last_active_at]);
             return;
         } catch (e) { console.error('[云储存] DB 写会话失败:', e.message); }
     }
@@ -4213,10 +4385,10 @@ async function dbDeleteCloudSessionsExcept(username, exceptId) {
     saveCloudSessions();
 }
 function genSessionId() { return 'cs_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 12); }
-function makeCloudSession(username, device) {
+function makeCloudSession(username, device, ip) {
     const id = genSessionId();
     const now = new Date().toISOString();
-    const s = { id, username, device: (device || '未知设备').toString().slice(0, 128), created_at: now, last_active_at: now };
+    const s = { id, username, device: (device || '未知设备').toString().slice(0, 128), ip: (ip || '').toString().slice(0, 64), created_at: now, last_active_at: now };
     dbUpsertCloudSession(s).catch(e => console.error('[云储存] 创建会话失败:', e.message));
     return s;
 }
@@ -4361,7 +4533,8 @@ app.post('/api/cloud-storage/register', async (req, res) => {
         const acc = { username, password_hash, created_at: now, updated_at: now, client_id: clientId };
         await dbSaveCloudAccount(acc);
         const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
-        const sess = makeCloudSession(username, device);
+        const ip = getClientIp(req);
+        const sess = makeCloudSession(username, device, ip);
         const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
@@ -4391,7 +4564,8 @@ app.post('/api/cloud-storage/login', async (req, res) => {
             await dbSaveCloudAccount(acc);
         }
         const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
-        const sess = makeCloudSession(username, device);
+        const ip = getClientIp(req);
+        const sess = makeCloudSession(username, device, ip);
         const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
@@ -4469,13 +4643,40 @@ app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
 // 删除自己的云地图
 app.delete('/api/cloud-storage/mazes/:id', requireCloudAuth, async (req, res) => {
     try {
-        const m = cloudMazes.get(req.params.id);
+        let m = cloudMazes.get(req.params.id);
+        if (!m) { const list = await dbGetCloudMazes(req.cloudUser); m = list.find(x => x.id === req.params.id); }
         if (!m || m.username !== req.cloudUser) return res.status(404).json({ success: false, message: '地图不存在' });
         await dbDeleteCloudMaze(req.params.id);
         res.json({ success: true, message: '已删除' });
     } catch (e) {
         console.error('[云储存] 删除失败:', e);
         res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 获取当前账号云端「通关数据」（无则返回 progress:null）
+app.get('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
+    try {
+        const r = await dbGetCloudProgress(req.cloudUser);
+        res.json({ success: true, progress: r.progress, updated_at: r.updated_at });
+    } catch (e) {
+        console.error('[云储存] 读进度失败:', e);
+        res.status(500).json({ success: false, message: '读取失败' });
+    }
+});
+
+// 上传（合并）当前账号「通关数据」到云端；进度只增不减（取最大关卡与并集通关列表）
+app.post('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
+    try {
+        const incoming = (req.body && req.body.progress) ? req.body.progress : req.body;
+        if (!incoming || typeof incoming !== 'object') {
+            return res.status(400).json({ success: false, message: '进度数据格式不正确' });
+        }
+        const r = await dbSaveCloudProgress(req.cloudUser, incoming);
+        res.json({ success: true, progress: r.progress, updated_at: r.updated_at, message: '已保存到云端' });
+    } catch (e) {
+        console.error('[云储存] 保存进度失败:', e);
+        res.status(500).json({ success: false, message: '保存失败' });
     }
 });
 
@@ -4486,6 +4687,7 @@ app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
         const out = list.map(s => ({
             id: s.id,
             device: s.device || '未知设备',
+            ip: s.ip || '',
             current: s.id === req.cloudSessionId,
             created_at: s.created_at,
             last_active_at: s.last_active_at
@@ -4549,14 +4751,24 @@ app.get('/api/admin/cloud-storage/accounts', requireAdminAuth, async (req, res) 
         if (q) list = list.filter(a => (a.username || '').toLowerCase().includes(q) || (a.client_id || '').toLowerCase().includes(q));
         const out = await Promise.all(list.map(async a => {
             let mazeCount = 0;
+            let lastIps = [];
             try { mazeCount = (await dbGetCloudMazes(a.username)).length; } catch (e) {}
+            try {
+                const sessions = await dbGetCloudSessions(a.username);
+                const seen = new Set();
+                for (const s of sessions) {
+                    const ip = s.ip && typeof s.ip === 'string' ? s.ip.trim() : '';
+                    if (ip && !seen.has(ip)) { seen.add(ip); lastIps.push(ip); }
+                }
+            } catch (e) {}
             return {
                 username: a.username,
                 created_at: a.created_at,
                 updated_at: a.updated_at,
                 client_id: a.client_id || null,
                 disabled: !!a.disabled,
-                mazeCount
+                mazeCount,
+                lastIps
             };
         }));
         res.json({ success: true, accounts: out });
@@ -4682,7 +4894,7 @@ app.post('/api/cloud-storage/redeem', requireCloudAuth, async (req, res) => {
         // 写回账号容量（取较大值，避免缩小）
         const acc = await dbGetCloudAccount(req.cloudUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
-        const newMax = Math.max((acc.max_mazes != null ? acc.max_mazes : CLOUD_MAX_MAZES), c.capacity);
+        const newMax = Math.max(Number(acc.max_mazes != null ? acc.max_mazes : CLOUD_MAX_MAZES), Number(c.capacity));
         acc.max_mazes = newMax;
         acc.updated_at = new Date().toISOString();
         await dbSaveCloudAccount(acc);
@@ -4776,7 +4988,7 @@ app.get('/api/admin/cloud-storage/usage', requireAdminAuth, async (req, res) => 
         });
         const totalBytes = mazes.reduce((s, m) => s + m.bytes, 0);
         const devices = (await dbGetCloudSessions(uname)).map(s => ({
-            id: s.id, device: s.device || '未知设备',
+            id: s.id, device: s.device || '未知设备', ip: s.ip || '',
             created_at: s.created_at, last_active_at: s.last_active_at
         }));
         res.json({
@@ -4795,7 +5007,7 @@ app.get('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res) =
         if (!acc && clientId) acc = await dbGetCloudAccountByClient(clientId);
         const uname = acc ? acc.username : username;
         const devices = (await dbGetCloudSessions(uname)).map(s => ({
-            id: s.id, device: s.device || '未知设备',
+            id: s.id, device: s.device || '未知设备', ip: s.ip || '',
             created_at: s.created_at, last_active_at: s.last_active_at
         }));
         res.json({ success: true, devices });
