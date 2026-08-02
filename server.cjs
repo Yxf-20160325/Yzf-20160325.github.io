@@ -206,7 +206,8 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         updated_at VARCHAR(32),
         max_mazes INT NOT NULL DEFAULT 5,
-        client_id VARCHAR(64)
+        client_id VARCHAR(64),
+        disabled TINYINT(1) NOT NULL DEFAULT 0
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -293,6 +294,15 @@ async function initDatabase() {
                 if (!cidCols || cidCols.length === 0) {
                     await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN client_id VARCHAR(64)');
                     console.log('🗄️ 已为 cloud_storage_accounts 表补充 client_id 列（关联游戏用户）');
+                }
+                // 补充 disabled 列：用于封禁云储存账号
+                const [disCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_accounts' AND COLUMN_NAME='disabled'",
+                    [dbName]
+                );
+                if (!disCols || disCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN disabled TINYINT(1) NOT NULL DEFAULT 0');
+                    console.log('🗄️ 已为 cloud_storage_accounts 表补充 disabled 列（封禁账号）');
                 }
             } catch (e) { console.error('[迁移] 检查/补充 max_mazes 列失败:', e.message); }
             DB_AVAILABLE = true;
@@ -4057,16 +4067,17 @@ async function dbGetCloudAccountByClient(clientId) {
 async function dbSaveCloudAccount(acc) {
     const maxMazes = (acc.max_mazes != null) ? acc.max_mazes : CLOUD_MAX_MAZES;
     const clientId = (acc.client_id != null) ? acc.client_id : null;
+    const disabled = (acc.disabled != null) ? (acc.disabled ? 1 : 0) : 0;
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id) VALUES (?,?,?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId]);
+                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled) VALUES (?,?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled)',
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled]);
             return;
         } catch (e) { console.error('[云储存] DB 写账号失败:', e.message); }
     }
-    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId }));
+    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled }));
     saveCloudStorage();
 }
 // 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
@@ -4115,11 +4126,30 @@ async function dbGetCloudMazes(username) {
 async function dbGetAllCloudAccounts() {
     if (DB_AVAILABLE && pool) {
         try {
-            const [rows] = await pool.query('SELECT username, created_at, updated_at, client_id FROM cloud_storage_accounts ORDER BY created_at DESC');
-            if (rows) return rows;
+            const [rows] = await pool.query('SELECT username, created_at, updated_at, client_id, disabled FROM cloud_storage_accounts ORDER BY created_at DESC');
+            if (rows) return rows.map(r => ({ username: r.username, created_at: r.created_at, updated_at: r.updated_at, client_id: r.client_id || null, disabled: !!r.disabled }));
         } catch (e) { console.error('[云储存] DB 读账号列表失败:', e.message); }
     }
-    return Array.from(cloudAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null }));
+    return Array.from(cloudAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null, disabled: !!a.disabled }));
+}
+
+// 级联删除云储存账号：删除账号本身 + 其全部地图 + 全部会话（内存与 DB 双写）
+async function dbDeleteCloudAccount(username) {
+    // 删除地图
+    const mazes = await dbGetCloudMazes(username);
+    for (const m of mazes) { await dbDeleteCloudMaze(m.id); }
+    // 删除会话
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_sessions WHERE username=?', [username]); } catch (e) { console.error('[云储存] DB 删会话失败:', e.message); }
+    }
+    for (const [k, s] of cloudSessions) if (s.username === username) cloudSessions.delete(k);
+    saveCloudSessions();
+    // 删除账号
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_storage_accounts WHERE username=?', [username]); } catch (e) { console.error('[云储存] DB 删账号失败:', e.message); }
+    }
+    cloudAccounts.delete(username);
+    saveCloudStorage();
 }
 loadCloudStorage();
 
@@ -4283,7 +4313,7 @@ loadCloudCodes();
 function cloudStorageEnabled() { return globalFunctions.cloudStorage !== false; }
 
 // 云储存鉴权：校验 Authorization: Bearer <jwt>
-function requireCloudAuth(req, res, next) {
+async function requireCloudAuth(req, res, next) {
     const h = req.headers.authorization || '';
     if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, message: '未登录' });
     try {
@@ -4301,6 +4331,11 @@ function requireCloudAuth(req, res, next) {
             req.cloudSessionId = null;
         }
         req.cloudUser = decoded.username;
+        // 封禁账号拦截：已封禁的账号持有的令牌在后续请求中一律拒绝
+        const acc = await dbGetCloudAccount(decoded.username);
+        if (acc && acc.disabled) {
+            return res.status(403).json({ success: false, message: '该云储存账号已被封禁，请联系管理员' });
+        }
         next();
     } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
 }
@@ -4344,6 +4379,9 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         const acc = await dbGetCloudAccount(username);
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        }
+        if (acc.disabled) {
+            return res.status(403).json({ success: false, message: '该云储存账号已被封禁，请联系管理员' });
         }
         // 登录时绑定/更新游戏 clientId（使管理端能用游戏用户定位云账号）
         const clientId = (req.body.clientId || '').toString().trim() || null;
@@ -4500,6 +4538,82 @@ app.get('/api/admin/cloud-storage/mazes', requireAdminAuth, async (req, res) => 
         res.json({ success: true, mazes: out });
     } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
 });
+
+// ===== 云储存账号管理（管理员）=====
+// 列出所有云储存账号（含封禁状态、地图数、关联游戏 clientId）
+app.get('/api/admin/cloud-storage/accounts', requireAdminAuth, async (req, res) => {
+    try {
+        const accounts = await dbGetAllCloudAccounts();
+        const q = ((req.query.q || '').toString().trim()).toLowerCase();
+        let list = accounts;
+        if (q) list = list.filter(a => (a.username || '').toLowerCase().includes(q) || (a.client_id || '').toLowerCase().includes(q));
+        const out = await Promise.all(list.map(async a => {
+            let mazeCount = 0;
+            try { mazeCount = (await dbGetCloudMazes(a.username)).length; } catch (e) {}
+            return {
+                username: a.username,
+                created_at: a.created_at,
+                updated_at: a.updated_at,
+                client_id: a.client_id || null,
+                disabled: !!a.disabled,
+                mazeCount
+            };
+        }));
+        res.json({ success: true, accounts: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取账号列表失败' }); }
+});
+
+// 删除云储存账号（级联删除其地图与会话）
+app.delete('/api/admin/cloud-storage/accounts/:username', requireAdminAuth, async (req, res) => {
+    try {
+        const username = decodeURIComponent(req.params.username || '');
+        if (!username) return res.status(400).json({ success: false, message: '缺少用户名' });
+        const acc = await dbGetCloudAccount(username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        await dbDeleteCloudAccount(username);
+        res.json({ success: true, message: '已删除账号及其地图/会话' });
+    } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+
+// 封禁 / 解封云储存账号
+app.put('/api/admin/cloud-storage/accounts/:username/ban', requireAdminAuth, async (req, res) => {
+    try {
+        const username = decodeURIComponent(req.params.username || '');
+        if (!username) return res.status(400).json({ success: false, message: '缺少用户名' });
+        const acc = await dbGetCloudAccount(username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const disabled = !!(req.body && req.body.disabled);
+        acc.disabled = disabled;
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        // 封禁时踢掉该账号所有在线会话，使其立即失效
+        if (disabled) {
+            if (DB_AVAILABLE && pool) {
+                try { await pool.query('DELETE FROM cloud_sessions WHERE username=?', [username]); } catch (e) { console.error('[云储存] DB 删会话失败:', e.message); }
+            }
+            for (const [k, s] of cloudSessions) if (s.username === username) cloudSessions.delete(k);
+            saveCloudSessions();
+        }
+        res.json({ success: true, disabled, message: disabled ? '已封禁该账号' : '已解封该账号' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 修改云储存账号密码
+app.put('/api/admin/cloud-storage/accounts/:username/password', requireAdminAuth, async (req, res) => {
+    try {
+        const username = decodeURIComponent(req.params.username || '');
+        if (!username) return res.status(400).json({ success: false, message: '缺少用户名' });
+        const acc = await dbGetCloudAccount(username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const password = (req.body && req.body.password || '').toString();
+        if (password.length < 4) return res.status(400).json({ success: false, message: '密码至少 4 位' });
+        acc.password_hash = bcrypt.hashSync(password, 10);
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        res.json({ success: true, message: '密码已修改' });
+    } catch (e) { res.status(500).json({ success: false, message: '修改失败' }); }
+});
+
 // 管理员改名云地图
 app.put('/api/admin/cloud-storage/mazes/:id', requireAdminAuth, async (req, res) => {
     try {
