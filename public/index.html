@@ -15749,11 +15749,12 @@ function movePlayer(rawKey, isFromSystem = false) {
 
 // ===== 虚拟摇杆模块 =====
 // 全局状态：记录当前激活方向与自动重复计时器
-// 摇杆持续按住某一方向满该时长（毫秒）则移动一格；继续按住则每满一次再移动一格
-const JOYSTICK_STEP_HOLD_MS = 4000;
+// 行为：摇杆推到某方向 → 立即移动一格；保持按住 → 每 interval 毫秒重复移动一格（灵敏度越高越快）。
+//       松开或回到死区 → 停止重复。
 const joystickState = {
-    activeDir: null,
-    holdTimer: null
+    activeDir: null,        // 当前激活方向（'ArrowUp'...），null 表示停止
+    holdTimer: null,        // 自动重复计时器
+    lastAppliedDir: null    // 上一次已生效方向（用于避免每帧重复重置计时器）
 };
 let joystickInstance = null;
 
@@ -15770,6 +15771,7 @@ function updateJoystickVisibility() {
     })();
     const show = !!s.joystickEnabled && onGameScreen && !modalOpen;
     container.classList.toggle('visible', show);
+    // 无论显示与否都调用：隐藏时销毁旧实例，避免 display:none 期间重复创建导致指针监听器泄漏
     if (show) {
         initJoystick();
     } else {
@@ -15847,39 +15849,41 @@ function positionKnob(knob, x, y) {
     knob.style.transform = 'translate(calc(-50% + ' + x + 'px), calc(-50% + ' + y + 'px))';
 }
 
-// 方向变化处理：仅在方向改变时触发。
-// 行为：将摇杆持续按住某一方向满 JOYSTICK_STEP_HOLD_MS 才移动一格；
-//       若一直按住则每满一次（每 4 秒）再移动一格（短暂轻推不会移动）。
+// 方向评估处理：dir 为 null 表示回到死区/松开（停止）。
+// 非 null 且与上一次生效方向不同 → 立即移动一格并启动自动重复；
+// 非 null 且与上一次相同 → 不重置计时器（保持连续重复，不要每帧重置）。
 function handleJoystickDirection(dir) {
-    if (dir === joystickState.activeDir) return;
+    if (dir === null) {
+        if (joystickState.holdTimer) {
+            clearInterval(joystickState.holdTimer);
+            joystickState.holdTimer = null;
+        }
+        joystickState.activeDir = null;
+        joystickState.lastAppliedDir = null;
+        return;
+    }
+    if (dir === joystickState.lastAppliedDir) return; // 同一方向持续按住：不重置计时器
     joystickState.activeDir = dir;
-    if (joystickState.holdTimer) {
-        clearTimeout(joystickState.holdTimer);
-        joystickState.holdTimer = null;
-    }
-    if (dir) {
-        scheduleJoystickStep();
-    }
-}
-
-// 持续按住某方向满指定时长移动一格，并保持按住则每满一次再移动一格
-function scheduleJoystickStep() {
-    if (!joystickState.activeDir) return;
-    joystickState.holdTimer = setTimeout(function () {
+    joystickState.lastAppliedDir = dir;
+    if (typeof movePlayer === 'function') movePlayer(dir); // 立即移动一格
+    const sens = Math.max(1, Math.min(10, Number(gameState.uiSettings.joystickSensitivity) || 5));
+    const interval = Math.round(8000 / sens); // sens=1→8000ms, sens=5→1600ms, sens=10→800ms
+    if (joystickState.holdTimer) clearInterval(joystickState.holdTimer);
+    joystickState.holdTimer = setInterval(function () {
         if (joystickState.activeDir && typeof movePlayer === 'function') {
             movePlayer(joystickState.activeDir);
         }
-        scheduleJoystickStep();
-    }, JOYSTICK_STEP_HOLD_MS);
+    }, interval);
 }
 
 // 仅卸载摇杆实例与事件/计时器，不改动容器可见性
 function teardownJoystickInstance() {
     if (joystickState.holdTimer) {
-        clearTimeout(joystickState.holdTimer);
+        clearInterval(joystickState.holdTimer);
         joystickState.holdTimer = null;
     }
     joystickState.activeDir = null;
+    joystickState.lastAppliedDir = null;
     if (joystickInstance) {
         joystickInstance.destroy();
         joystickInstance = null;
@@ -18449,7 +18453,7 @@ async function cloudRegister() {
     cloudSetMsg('');
     if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
     try {
-        const r = await cloudApi('/register', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent }) });
+        const r = await cloudApi('/register', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent, clientId: gameState.clientId }) });
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '注册失败');
         localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
@@ -18465,7 +18469,7 @@ async function cloudLogin() {
     cloudSetMsg('');
     if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
     try {
-        const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent }) });
+        const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent, clientId: gameState.clientId }) });
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
         localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
