@@ -3226,28 +3226,6 @@
         <button class="back-button" onclick="showScreen('workshopMain')">返回</button>
         <h2 class="level-select-title">我的迷宫</h2>
 
-        <!-- 云储存区（功能由全局设定 cloudStorage 控制，关闭则整体隐藏）-->
-        <div id="cloudStorageArea" class="hidden" style="margin-bottom:18px; padding:14px; background:rgba(33,150,243,0.12); border:1px solid rgba(33,150,243,0.4); border-radius:10px;">
-            <div id="cloudLoginBox">
-                <div style="font-weight:bold; margin-bottom:8px; color:#90caf9;">☁️ 云储存（注册账号后，最多保存 5 个地图，可在任意设备下载）</div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                    <input id="cloudUser" type="text" placeholder="用户名" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
-                    <input id="cloudPass" type="password" placeholder="密码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
-                    <button onclick="cloudLogin()" style="padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">登录</button>
-                    <button onclick="cloudRegister()" style="padding:6px 14px; background:#4CAF50; color:#fff; border:none; border-radius:6px; cursor:pointer;">注册</button>
-                </div>
-                <div id="cloudMsg" style="font-size:12px; margin-top:6px; color:#ffb74d;"></div>
-            </div>
-            <div id="cloudPanelBox" class="hidden">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                    <span style="color:#90caf9;">☁️ 已登录：<b id="cloudCurUser"></b>（<span id="cloudCount">0</span>/<span id="cloudMax">5</span>）</span>
-                    <button onclick="cloudLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
-                </div>
-                <div id="cloudMazeList" style="display:flex; flex-direction:column; gap:8px;"></div>
-                <button onclick="cloudUploadCurrent()" id="cloudUploadBtn" style="margin-top:10px; padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">⬆️ 上传当前编辑器地图到云</button>
-            </div>
-        </div>
-
         <div class="mazes-container">
             <div id="myMazesList" class="maze-list"></div>
         </div>
@@ -3386,6 +3364,7 @@
                     <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">📅 每日挑战</button>
                 </div>
                 <div class="main-tab-panel" data-tab="mine">
+                    <button class="menu-button" onclick="openCloudSpaceModal()">☁️ 云空间</button>
                     <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
                     <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
                     <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
@@ -5107,6 +5086,7 @@ function showPlayerProfileModal(clientId, name) {
     if (existing) existing.remove();
     const modal = document.createElement('div');
     modal.id = 'playerProfileModal';
+    modal.dataset.clientId = clientId;
     modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
     modal.innerHTML = `
         <div style="background:#fff;color:#222;border-radius:12px;max-width:480px;width:90%;padding:28px;text-align:center;position:relative;max-height:90vh;overflow-y:auto;">
@@ -18404,6 +18384,9 @@ function toggleMyMazePublic(originalIndex) {
             window._selfMazePublic[maze.serverMazeId] = next;
             showMyMazes();
             showNotification(next ? '已设为公开，其他人可在你的个人主页看到' : '已设为私密');
+            // 自动刷新个人主页（若当前打开的正是自己的主页），无需重新打开即可看到更新
+            const ppm = document.getElementById('playerProfileModal');
+            if (ppm && ppm.dataset.clientId === gameState.clientId) loadPlayerPublicMazes(gameState.clientId, ppm);
         } else { showNotification('操作失败：' + (d && d.message || '未知')); }
     }).catch(() => showNotification('操作失败'));
 }
@@ -18412,6 +18395,7 @@ function toggleMyMazePublic(originalIndex) {
 // token 持久化在 localStorage；地图下载后写入 savedMazes 并标注 isCloudStorage=true（"我的迷宫"里显示 ☁️ 云 标）。
 const CLOUD_TOKEN_KEY = 'cloudStorageToken';
 const CLOUD_USER_KEY = 'cloudStorageUser';
+const CLOUD_SID_KEY = 'cloudStorageSid';
 function cloudApi(path, opts) {
     const token = localStorage.getItem(CLOUD_TOKEN_KEY);
     opts = opts || {};
@@ -18419,7 +18403,10 @@ function cloudApi(path, opts) {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + (token || '')
     }, opts.headers || {});
-    return fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/cloud-storage' + path, opts);
+    return fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/cloud-storage' + path, opts).then(r => {
+        if (r.status === 401) cloudForceLogout();
+        return r;
+    });
 }
 function cloudIsEnabled() {
     return !window.globalFunctionControl || window.globalFunctionControl.cloudStorage !== false;
@@ -18444,6 +18431,7 @@ function initCloudStorageUI() {
         document.getElementById('cloudPanelBox').classList.remove('hidden');
         document.getElementById('cloudCurUser').textContent = user;
         loadCloudMazeList();
+        startCloudAutoRefresh(); // 进入云区即开启自动刷新，跨设备上传可自动显现
     } else {
         document.getElementById('cloudLoginBox').classList.remove('hidden');
         document.getElementById('cloudPanelBox').classList.add('hidden');
@@ -18461,11 +18449,12 @@ async function cloudRegister() {
     cloudSetMsg('');
     if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
     try {
-        const r = await cloudApi('/register', { method: 'POST', body: JSON.stringify({ username, password }) });
+        const r = await cloudApi('/register', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent }) });
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '注册失败');
         localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
         localStorage.setItem(CLOUD_USER_KEY, d.username);
+        if (d.sid) localStorage.setItem(CLOUD_SID_KEY, d.sid);
         initCloudStorageUI();
         showNotification('☁️ 注册并登录成功');
     } catch (e) { cloudSetMsg(e.message, true); }
@@ -18476,19 +18465,79 @@ async function cloudLogin() {
     cloudSetMsg('');
     if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
     try {
-        const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+        const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent }) });
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
         localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
         localStorage.setItem(CLOUD_USER_KEY, d.username);
+        if (d.sid) localStorage.setItem(CLOUD_SID_KEY, d.sid);
         initCloudStorageUI();
         showNotification('☁️ 登录成功');
     } catch (e) { cloudSetMsg(e.message, true); }
 }
 function cloudLogout() {
+    stopCloudAutoRefresh();
     localStorage.removeItem(CLOUD_TOKEN_KEY);
     localStorage.removeItem(CLOUD_USER_KEY);
+    localStorage.removeItem(CLOUD_SID_KEY);
     initCloudStorageUI();
+}
+// 被其他设备退登 / 会话失效时强制退出（幂等：无 token 直接返回）
+function cloudForceLogout() {
+    if (!localStorage.getItem(CLOUD_TOKEN_KEY)) return;
+    stopCloudAutoRefresh();
+    localStorage.removeItem(CLOUD_TOKEN_KEY);
+    localStorage.removeItem(CLOUD_USER_KEY);
+    localStorage.removeItem(CLOUD_SID_KEY);
+    initCloudStorageUI();
+    showNotification('⚠️ 你的云账号已在其他设备被退出登录，请重新登录');
+}
+// ===== 全屏「云空间」管理页（从「我的」标签页打开）=====
+// 云储存 UI 标记复用同一套 id（#cloudStorageArea 等），模态内唯一存在，故无 id 冲突
+function openCloudSpaceModal() {
+    if (document.getElementById('cloudSpaceModal')) closeCloudSpaceModal();
+    const overlay = document.createElement('div');
+    overlay.id = 'cloudSpaceModal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:32000;';
+    overlay.innerHTML = `
+      <div style="position:relative;width:min(680px,94vw);height:min(86vh,840px);background:#16161f;color:#fff;border-radius:14px;padding:22px;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <h2 style="margin:0;">☁️ 云空间</h2>
+          <button onclick="closeCloudSpaceModal()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
+        </div>
+        <div id="cloudStorageArea" class="hidden" style="padding:14px; background:rgba(33,150,243,0.12); border:1px solid rgba(33,150,243,0.4); border-radius:10px;">
+            <div id="cloudLoginBox">
+                <div style="font-weight:bold; margin-bottom:8px; color:#90caf9;">☁️ 云储存（注册账号后，最多保存 5 个地图，可在任意设备下载）</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <input id="cloudUser" type="text" placeholder="用户名" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <input id="cloudPass" type="password" placeholder="密码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <button onclick="cloudLogin()" style="padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">登录</button>
+                    <button onclick="cloudRegister()" style="padding:6px 14px; background:#4CAF50; color:#fff; border:none; border-radius:6px; cursor:pointer;">注册</button>
+                </div>
+                <div id="cloudMsg" style="font-size:12px; margin-top:6px; color:#ffb74d;"></div>
+            </div>
+            <div id="cloudPanelBox" class="hidden">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <span style="color:#90caf9;">☁️ 已登录：<b id="cloudCurUser"></b>（<span id="cloudCount">0</span>/<span id="cloudMax">5</span>）</span>
+                    <span>
+                        <button onclick="showCloudDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
+                        <button onclick="cloudLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
+                    </span>
+                </div>
+                <div id="cloudMazeList" style="display:flex; flex-direction:column; gap:8px;"></div>
+                <button onclick="cloudUploadCurrent()" id="cloudUploadBtn" style="margin-top:10px; padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">⬆️ 上传当前编辑器地图到云</button>
+            </div>
+        </div>
+      </div>`;
+    overlay.onclick = (e) => { if (e.target === overlay) closeCloudSpaceModal(); };
+    document.body.appendChild(overlay);
+    initCloudStorageUI();     // 渲染登录/面板（找到模态内的 #cloudStorageArea）
+    startCloudAutoRefresh();  // 已登录则开启自动刷新（跨设备上传自动显现）
+}
+function closeCloudSpaceModal() {
+    stopCloudAutoRefresh();
+    const m = document.getElementById('cloudSpaceModal');
+    if (m) m.remove();
 }
 async function loadCloudMazeList() {
     const box = document.getElementById('cloudMazeList');
@@ -18522,8 +18571,109 @@ async function loadCloudMazeList() {
         box.innerHTML = '<p style="color:#ff8a80; font-size:12px;">加载失败：' + escapeHtmlLocal(e.message) + '</p>';
     }
 }
+// 云储存自动刷新：已登录且云面板可见时，每 15 秒重新拉取云列表，
+// 使其他设备上传的地图能自动在本设备显现（解决"跨设备看不到"）。
+let _cloudAutoTimer = null;
+function startCloudAutoRefresh() {
+    stopCloudAutoRefresh();
+    if (!localStorage.getItem(CLOUD_TOKEN_KEY)) return;
+    _cloudAutoTimer = setInterval(() => {
+        const panel = document.getElementById('cloudPanelBox');
+        if (panel && !panel.classList.contains('hidden')) loadCloudMazeList();
+    }, 15000);
+}
+function stopCloudAutoRefresh() {
+    if (_cloudAutoTimer) { clearInterval(_cloudAutoTimer); _cloudAutoTimer = null; }
+}
 function escapeHtmlLocal(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// ===== 云储存「管理设备」：查看已登录设备并可远端退登 =====
+async function showCloudDevices() {
+    let modal = document.getElementById('cloudDevicesModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'cloudDevicesModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:30000;';
+        document.body.appendChild(modal);
+    }
+    modal.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(460px,92vw);max-height:84vh;overflow:auto;padding:20px;border-radius:12px;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+        '<h3 style="margin:0;">📱 管理设备</h3>' +
+        '<button onclick="closeCloudDevices()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;">✕</button></div>' +
+        '<div id="cloudDevicesList" style="font-size:13px;">加载中...</div>' +
+        '<div style="margin-top:14px;display:flex;gap:8px;">' +
+        '<button onclick="cloudRevokeOtherSessions()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
+        '</div></div>';
+    modal.onclick = (e) => { if (e.target === modal) closeCloudDevices(); };
+    await renderCloudDevices();
+}
+function closeCloudDevices() {
+    const m = document.getElementById('cloudDevicesModal');
+    if (m) m.remove();
+}
+async function renderCloudDevices() {
+    const box = document.getElementById('cloudDevicesList');
+    if (!box) return;
+    try {
+        const r = await cloudApi('/sessions');
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
+        const list = d.sessions || [];
+        if (list.length === 0) { box.innerHTML = '<p style="color:#aaa;">暂无设备信息</p>'; return; }
+        box.innerHTML = list.map(s => `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.06);border-radius:8px;margin-bottom:8px;">
+                <div style="overflow:hidden;">
+                    <div style="font-weight:bold;">${escapeHtmlLocal(parseUserAgent(s.device))}${s.current ? ' <span style="color:#4caf50;font-size:11px;">（当前设备）</span>' : ''}</div>
+                    <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)}</div>
+                </div>
+                <button onclick="cloudRevokeSession('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
+            </div>
+        `).join('');
+    } catch (e) { box.innerHTML = '<p style="color:#ff8a80;">加载失败：' + escapeHtmlLocal(e.message) + '</p>'; }
+}
+async function cloudRevokeSession(id, isCurrent) {
+    if (!confirm(isCurrent ? '确定退出当前设备？退出后需重新登录。' : '确定退登该设备？')) return;
+    try {
+        const r = await cloudApi('/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
+        if (isCurrent) { cloudForceLogout(); return; } // 退出自己 → 立即失效
+        showNotification('已退登该设备');
+        await renderCloudDevices();
+    } catch (e) { showNotification('退登失败：' + e.message); }
+}
+async function cloudRevokeOtherSessions() {
+    if (!confirm('确定退出其他所有设备？当前设备保持不变。')) return;
+    try {
+        const r = await cloudApi('/sessions', { method: 'DELETE' });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
+        showNotification('已退出其他所有设备');
+        await renderCloudDevices();
+    } catch (e) { showNotification('操作失败：' + e.message); }
+}
+// 由 User-Agent 推导可读的设备标签
+function parseUserAgent(ua) {
+    ua = (ua || '').toString();
+    if (!ua || ua === '未知设备') return '未知设备';
+    let os = '', br = '';
+    if (/Windows NT 10/.test(ua)) os = 'Windows';
+    else if (/Windows/.test(ua)) os = 'Windows';
+    else if (/Mac OS X|Macintosh/.test(ua)) os = 'macOS';
+    else if (/Android/.test(ua)) os = 'Android';
+    else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+    else if (/Linux/.test(ua)) os = 'Linux';
+    if (/Edg\//.test(ua)) br = 'Edge';
+    else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) br = 'Chrome';
+    else if (/Firefox\//.test(ua)) br = 'Firefox';
+    else if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) br = 'Safari';
+    const label = (br ? br : '') + (os ? ' · ' + os : '');
+    return label || ua.slice(0, 40);
+}
+function formatCloudTime(t) {
+    if (!t) return '—';
+    try { const d = new Date(t); if (isNaN(d.getTime())) return t; return d.toLocaleString('zh-CN', { hour12: false }); } catch (e) { return t; }
 }
 // 下载云地图到"我的地图"（标注 isCloudStorage=true）
 async function cloudDownloadMaze(mazeId) {
@@ -18593,8 +18743,8 @@ async function cloudUploadByIndex(index) {
     const token = localStorage.getItem(CLOUD_TOKEN_KEY);
     const cloudUser = localStorage.getItem(CLOUD_USER_KEY);
     if (!token || !cloudUser) {
-        showNotification('请先在下方「☁️ 云储存」区登录/注册云账号');
-        initCloudStorageUI();
+        showNotification('请先登录云账号');
+        openCloudSpaceModal();
         return;
     }
     let savedMazes = [];
@@ -18638,7 +18788,7 @@ async function cloudUploadByIndex(index) {
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '上传失败');
         showNotification('☁️ 已上传到云（' + (d.maze && d.maze.name) + '）');
-        loadCloudMazeList();
+        if (document.getElementById('cloudSpaceModal')) loadCloudMazeList();
         // 在「我的迷宫」项上标注已上传，便于识别
         if (!mazeData.cloudId) {
             savedMazes[index].cloudId = d.maze && d.maze.id;
