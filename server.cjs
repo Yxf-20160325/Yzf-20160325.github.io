@@ -204,7 +204,8 @@ const DB_TABLES_SQL = [
         username VARCHAR(64) PRIMARY KEY,
         password_hash VARCHAR(255) NOT NULL,
         created_at VARCHAR(32),
-        updated_at VARCHAR(32)
+        updated_at VARCHAR(32),
+        max_mazes INT NOT NULL DEFAULT 5
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -228,6 +229,18 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         last_active_at VARCHAR(32),
         INDEX idx_cloud_session_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_expansion_codes (
+        code VARCHAR(64) PRIMARY KEY,
+        max_uses INT NOT NULL DEFAULT 1,
+        used INT NOT NULL DEFAULT 0,
+        allowed_ips TEXT,
+        capacity INT NOT NULL DEFAULT 5,
+        created_at VARCHAR(32),
+        created_by VARCHAR(64),
+        note VARCHAR(255),
+        active TINYINT(1) DEFAULT 1,
+        redeemed_by TEXT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -4001,17 +4014,24 @@ async function dbGetCloudAccount(username) {
     return cloudAccounts.get(username) || null;
 }
 async function dbSaveCloudAccount(acc) {
+    const maxMazes = (acc.max_mazes != null) ? acc.max_mazes : CLOUD_MAX_MAZES;
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at) VALUES (?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at]);
+                'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes) VALUES (?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes)',
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes]);
             return;
         } catch (e) { console.error('[云储存] DB 写账号失败:', e.message); }
     }
-    cloudAccounts.set(acc.username, acc);
+    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes }));
     saveCloudStorage();
+}
+// 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
+async function cloudMaxMazes(username) {
+    const acc = await dbGetCloudAccount(username);
+    if (acc && acc.max_mazes != null) return acc.max_mazes;
+    return CLOUD_MAX_MAZES;
 }
 async function dbDeleteCloudMaze(mazeId) {
     if (DB_AVAILABLE && pool) {
@@ -4139,6 +4159,84 @@ function touchCloudSession(sess) {
 }
 loadCloudSessions();
 
+// =============== 云空间扩容码 ===============
+// 管理员生成、客户端兑换：可自定义使用次数 / 允许 IP / 扩容到的容量。
+// 存储：DB 优先（cloud_expansion_codes 表），失败回退 JSON 文件（data/cloud-codes.json）。
+const CLOUD_CODES_FILE = path.join(DATA_DIR, 'cloud-codes.json');
+let cloudCodes = new Map(); // code -> { code, max_uses, used, allowed_ips, capacity, created_at, created_by, note, active, redeemed_by[] }
+function loadCloudCodes() {
+    try {
+        if (fs.existsSync(CLOUD_CODES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(CLOUD_CODES_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(c => cloudCodes.set(c.code, c));
+            console.log(`[云储存] 已从 ${CLOUD_CODES_FILE} 加载 ${cloudCodes.size} 个扩容码`);
+        }
+    } catch (e) { console.error('[云储存] 扩容码载入失败:', e.message); }
+}
+function saveCloudCodes() {
+    try { ensureDataDir(); fs.writeFileSync(CLOUD_CODES_FILE, JSON.stringify(Array.from(cloudCodes.values()), null, 2)); }
+    catch (e) { console.error('[云储存] 扩容码保存失败:', e.message); }
+}
+async function dbGetCloudCode(code) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_expansion_codes WHERE code=?', [code]);
+            if (rows && rows.length) {
+                const c = rows[0];
+                c.redeemed_by = c.redeemed_by ? (Array.isArray(c.redeemed_by) ? c.redeemed_by : JSON.parse(c.redeemed_by || '[]')) : [];
+                c.allowed_ips = (c.allowed_ips === '*') ? '*' : (c.allowed_ips ? (Array.isArray(c.allowed_ips) ? c.allowed_ips : String(c.allowed_ips).split(',').map(s => s.trim()).filter(Boolean)) : []);
+                return c;
+            }
+        } catch (e) { console.error('[云储存] DB 读扩容码失败:', e.message); }
+    }
+    const c = cloudCodes.get(code);
+    if (c) return c;
+    return null;
+}
+async function dbAllCloudCodes() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_expansion_codes ORDER BY created_at DESC');
+            if (rows) return rows.map(c => {
+                c.redeemed_by = c.redeemed_by ? (Array.isArray(c.redeemed_by) ? c.redeemed_by : JSON.parse(c.redeemed_by || '[]')) : [];
+                c.allowed_ips = (c.allowed_ips === '*') ? '*' : (c.allowed_ips ? (Array.isArray(c.allowed_ips) ? c.allowed_ips : String(c.allowed_ips).split(',').map(s => s.trim()).filter(Boolean)) : []);
+                return c;
+            });
+        } catch (e) { console.error('[云储存] DB 读扩容码列表失败:', e.message); }
+    }
+    return Array.from(cloudCodes.values());
+}
+async function dbUpsertCloudCode(c) {
+    cloudCodes.set(c.code, c); // 内存同步，保证兑换校验即时可用
+    if (DB_AVAILABLE && pool) {
+        try {
+            const allowedIps = (c.allowed_ips === '*') ? '*' : (Array.isArray(c.allowed_ips) ? c.allowed_ips.join(',') : (c.allowed_ips || ''));
+            const redeemedBy = Array.isArray(c.redeemed_by) ? JSON.stringify(c.redeemed_by) : (c.redeemed_by || '[]');
+            await pool.query(
+                'INSERT INTO cloud_expansion_codes (code, max_uses, used, allowed_ips, capacity, created_at, created_by, note, active, redeemed_by) ' +
+                'VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE used=VALUES(used), allowed_ips=VALUES(allowed_ips), active=VALUES(active), redeemed_by=VALUES(redeemed_by)',
+                [c.code, c.max_uses, c.used, allowedIps, c.capacity, c.created_at, c.created_by, c.note || '', c.active ? 1 : 0, redeemedBy]);
+            return;
+        } catch (e) { console.error('[云储存] DB 写扩容码失败:', e.message); }
+    }
+    saveCloudCodes();
+}
+async function dbDeleteCloudCode(code) {
+    cloudCodes.delete(code);
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_expansion_codes WHERE code=?', [code]); } catch (e) { console.error('[云储存] DB 删扩容码失败:', e.message); }
+    }
+    saveCloudCodes();
+}
+// 生成可读扩容码：MZ + 16 位 base32，分组展示
+function genExpansionCode() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉易混字符 I O 0 1
+    let raw = '';
+    for (let i = 0; i < 16; i++) raw += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return 'MZ' + raw;
+}
+loadCloudCodes();
+
 // 云储存功能总开关（受全局功能设定 cloudStorage 控制）
 function cloudStorageEnabled() { return globalFunctions.cloudStorage !== false; }
 
@@ -4227,7 +4325,7 @@ app.get('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
             showShop: m.show_shop !== 0,
             created_at: m.created_at, updated_at: m.updated_at
         }));
-        res.json({ success: true, mazes: out, maxMazes: CLOUD_MAX_MAZES });
+        res.json({ success: true, mazes: out, maxMazes: await cloudMaxMazes(req.cloudUser) });
     } catch (e) {
         console.error('[云储存] 获取列表失败:', e);
         res.status(500).json({ success: false, message: '获取失败' });
@@ -4258,9 +4356,10 @@ app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
             await dbUpsertCloudMaze(m);
             return res.json({ success: true, maze: { id: m.id, name: m.name } });
         }
-        // 新建：检查上限
-        if (existingList.length >= CLOUD_MAX_MAZES) {
-            return res.status(403).json({ success: false, message: `每个账号最多保存 ${CLOUD_MAX_MAZES} 个云地图（可删除旧图后重试）` });
+        // 新建：检查上限（受扩容码影响的账号容量）
+        const maxMazes = await cloudMaxMazes(req.cloudUser);
+        if (existingList.length >= maxMazes) {
+            return res.status(403).json({ success: false, message: `每个账号最多保存 ${maxMazes} 个云地图（可删除旧图或兑换扩容码后重试）` });
         }
         // 优先使用客户端提供的稳定 mazeId（使覆盖/跨端引用/管理可追溯）；否则随机生成
         if (!mazeId) mazeId = 'cloud_' + req.cloudUser + '_' + now.toString(36) + '_' + Math.random().toString(36).substr(2, 5);
@@ -4385,6 +4484,153 @@ app.delete('/api/admin/cloud-storage/mazes/:id', requireAdminAuth, async (req, r
         await dbDeleteCloudMaze(req.params.id);
         res.json({ success: true, message: '已删除' });
     } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+
+// 客户端兑换扩容码：校验使用次数 / IP / 是否已用，写回账号容量
+app.post('/api/cloud-storage/redeem', requireCloudAuth, async (req, res) => {
+    try {
+        const raw = (req.body && req.body.code || '').toString().toUpperCase().replace(/[\s-]/g, '');
+        if (!raw) return res.status(400).json({ success: false, message: '请输入扩容码' });
+        const c = await dbGetCloudCode(raw);
+        if (!c) return res.status(404).json({ success: false, message: '扩容码无效' });
+        if (c.active === 0 || c.active === false) return res.status(410).json({ success: false, message: '该扩容码已作废' });
+        if (c.used >= c.max_uses) return res.status(403).json({ success: false, message: '该扩容码已达到使用上限' });
+        const redeemedBy = Array.isArray(c.redeemed_by) ? c.redeemed_by : [];
+        if (redeemedBy.includes(req.cloudUser)) return res.status(403).json({ success: false, message: '本账号已使用过该扩容码' });
+        // IP 限制
+        const clientIp = getClientIp(req);
+        if (c.allowed_ips !== '*' && Array.isArray(c.allowed_ips)) {
+            const ok = c.allowed_ips.some(ip => {
+                const t = ip.trim();
+                if (!t) return false;
+                return clientIp === t || clientIp.startsWith(t.replace(/\.\*$/, '.')) || clientIp === t.replace(/\.\*$/, '');
+            });
+            if (!ok) return res.status(403).json({ success: false, message: `该扩容码不允许当前 IP（${clientIp}）使用` });
+        }
+        // 写回账号容量（取较大值，避免缩小）
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const newMax = Math.max((acc.max_mazes != null ? acc.max_mazes : CLOUD_MAX_MAZES), c.capacity);
+        acc.max_mazes = newMax;
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        // 更新码状态
+        c.used = (c.used || 0) + 1;
+        redeemedBy.push(req.cloudUser);
+        c.redeemed_by = redeemedBy;
+        await dbUpsertCloudCode(c);
+        res.json({ success: true, maxMazes: newMax, capacity: c.capacity, message: `云空间已扩容至 ${newMax} 个` });
+    } catch (e) {
+        console.error('[云储存] 兑换失败:', e);
+        res.status(500).json({ success: false, message: '兑换失败' });
+    }
+});
+
+// 管理员生成扩容码（自定义使用次数 / 允许 IP / 扩容容量）
+app.post('/api/admin/cloud-codes', requireAdminAuth, async (req, res) => {
+    try {
+        const b = req.body || {};
+        let maxUses = parseInt(b.maxUses, 10);
+        if (!maxUses || maxUses < 1) maxUses = 1;
+        if (maxUses > 1000) maxUses = 1000;
+        let capacity = parseInt(b.capacity, 10);
+        if (!capacity || capacity < 1) capacity = 10;
+        if (capacity > 10000) capacity = 10000;
+        let allowedIps = '*';
+        if (b.allowedIps && String(b.allowedIps).trim() && String(b.allowedIps).trim() !== '*') {
+            allowedIps = String(b.allowedIps).split(',').map(s => s.trim()).filter(Boolean);
+            if (allowedIps.length === 0) allowedIps = '*';
+        }
+        const code = genExpansionCode();
+        const now = new Date().toISOString();
+        const obj = {
+            code, max_uses: maxUses, used: 0, allowed_ips: allowedIps, capacity,
+            created_at: now, created_by: (req.adminUser || 'admin'), note: (b.note || '').toString().slice(0, 255),
+            active: 1, redeemed_by: []
+        };
+        await dbUpsertCloudCode(obj);
+        res.json({ success: true, code, maxUses, capacity, allowedIps, message: '生成成功' });
+    } catch (e) {
+        console.error('[云储存] 生成扩容码失败:', e);
+        res.status(500).json({ success: false, message: '生成失败' });
+    }
+});
+
+// 管理员列出所有扩容码
+app.get('/api/admin/cloud-codes', requireAdminAuth, async (req, res) => {
+    try {
+        const list = await dbAllCloudCodes();
+        const out = list.map(c => ({
+            code: c.code, maxUses: c.max_uses, used: c.used,
+            allowedIps: c.allowed_ips, capacity: c.capacity,
+            created_at: c.created_at, created_by: c.created_by, note: c.note,
+            active: c.active !== 0 && c.active !== false
+        }));
+        res.json({ success: true, codes: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 管理员作废某个扩容码
+app.delete('/api/admin/cloud-codes/:code', requireAdminAuth, async (req, res) => {
+    try {
+        const code = (req.params.code || '').toUpperCase();
+        const c = await dbGetCloudCode(code);
+        if (!c) return res.status(404).json({ success: false, message: '扩容码不存在' });
+        await dbDeleteCloudCode(code);
+        res.json({ success: true, message: '已作废' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 管理员查看某云账号占用空间（容量 / 地图数 / 占用字节 / 设备列表）
+app.get('/api/admin/cloud-storage/usage', requireAdminAuth, async (req, res) => {
+    try {
+        const username = (req.query.username || '').toString().trim();
+        if (!username) return res.status(400).json({ success: false, message: '缺少 username' });
+        const acc = await dbGetCloudAccount(username);
+        if (!acc) return res.status(404).json({ success: false, message: '云账号不存在' });
+        const max = (acc.max_mazes != null) ? acc.max_mazes : CLOUD_MAX_MAZES;
+        const list = await dbGetCloudMazes(username);
+        const mazes = list.map(m => {
+            const bytes = Buffer.byteLength(JSON.stringify({
+                name: m.name, maze: m.maze, size: m.size, teleporters: m.teleporters,
+                description: m.description, difficulty: m.difficulty
+            }), 'utf8');
+            return { id: m.id, name: m.name, bytes, updated_at: m.updated_at };
+        });
+        const totalBytes = mazes.reduce((s, m) => s + m.bytes, 0);
+        const devices = (await dbGetCloudSessions(username)).map(s => ({
+            id: s.id, device: s.device || '未知设备',
+            created_at: s.created_at, last_active_at: s.last_active_at
+        }));
+        res.json({
+            success: true, username, maxMazes: max, count: list.length,
+            totalBytes, mazes, devices
+        });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 管理员查看某云账号的登录设备
+app.get('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res) => {
+    try {
+        const username = (req.query.username || '').toString().trim();
+        if (!username) return res.status(400).json({ success: false, message: '缺少 username' });
+        const devices = (await dbGetCloudSessions(username)).map(s => ({
+            id: s.id, device: s.device || '未知设备',
+            created_at: s.created_at, last_active_at: s.last_active_at
+        }));
+        res.json({ success: true, devices });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 管理员退登某云账号的指定设备
+app.delete('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res) => {
+    try {
+        const username = (req.query.username || '').toString().trim();
+        const id = (req.query.id || '').toString().trim();
+        if (!username || !id) return res.status(400).json({ success: false, message: '缺少 username 或 id' });
+        await dbDeleteCloudSession(id);
+        res.json({ success: true, message: '已退登该设备' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
 // 玩家上报/保存自己的地图（公开，需 clientId 归属）
