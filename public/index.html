@@ -3353,7 +3353,7 @@
             <div class="main-tabs" id="mainTabs">
                 <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">开始</button>
                 <button class="main-tab" data-tab="mine" onclick="switchMainTab('mine')">我的</button>
-                <button class="main-tab" data-tab="more" onclick="switchMainTab('more')">更多</button>
+                <button class="main-tab" data-tab="more" onclick="switchMainTab('more')">调试</button>
             </div>
             <div class="main-tab-panels">
                 <div class="main-tab-panel active" data-tab="start">
@@ -6405,7 +6405,8 @@ let editorState = {
     editingIndex: -1,  // -1 表示新建，>=0 表示正在编辑 localStorage 中的第 editingIndex 个迷宫
     enemySpeed: 5,      // 移动敌人速度倍率，默认5（普通）
     enemySpeedPrompted: false,  // 是否已提示过速度设置
-    hoverCell: null     // 当前鼠标悬停的单元格，用于高亮
+    hoverCell: null,    // 当前鼠标悬停的单元格，用于高亮
+    serverMazeId: null  // 已上报到服务器的地图ID（同一次编辑会话内复用，避免重复）
 };
 
 // 撤销/重做栈
@@ -8777,16 +8778,11 @@ function showScreen(screenId) {
                     console.log('进入我的迷宫页面');
                     showMyMazes();
                     break;
-                case 'browseMazes':
-                    // 浏览迷宫页面初始化
-                    console.log('进入浏览迷宫页面');
-                    {
-                        const browseList = document.getElementById('browseMazesList');
-                        if (browseList) {
-                            browseList.innerHTML = '<p style="text-align: center; color: #888;">使用上方搜索框查找迷宫</p>';
-                        }
-                    }
-                    break;
+                    case 'browseMazes':
+                        // 浏览迷宫页面初始化：加载社区分享地图
+                        console.log('进入浏览迷宫页面');
+                        loadBrowseMazes();
+                        break;
                 case 'popularMazes':
                     // 热门迷宫页面初始化
                     console.log('进入热门迷宫页面');
@@ -8845,20 +8841,15 @@ function showScreen(screenId) {
             return now.toISOString().split('T')[0];
         }
         
-        function generateDailyChallenge() {
-            const today = getTodayDateString();
-            const seed = today.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-            const types = Object.values(CHALLENGE_TYPES);
-            const typeIndex = seed % types.length;
-            const challengeType = types[typeIndex];
-            
-            const level = (seed % 20) + 1;
+        function computeSeedFromString(dateStr) {
+            return dateStr.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        }
+        function computeChallengeData(challengeType, seed, level) {
             let challengeData = {
                 level: level,
                 target: 0,
                 description: ''
             };
-            
             switch(challengeType.id) {
                 case 'speed':
                     const timeLimit = 30 + (seed % 60);
@@ -8879,6 +8870,17 @@ function showScreen(screenId) {
                     challengeData.description = `收集至少${challengeData.target}个金币完成第${level}关`;
                     break;
             }
+            return challengeData;
+        }
+        function generateDailyChallenge() {
+            const today = getTodayDateString();
+            const seed = computeSeedFromString(today);
+            const types = Object.values(CHALLENGE_TYPES);
+            const typeIndex = seed % types.length;
+            const challengeType = types[typeIndex];
+            
+            const level = (seed % 20) + 1;
+            const challengeData = computeChallengeData(challengeType, seed, level);
             
             return {
                 currentDate: today,
@@ -8901,6 +8903,59 @@ function showScreen(screenId) {
             
             updateDailyChallengeUI();
             startChallengeCountdown();
+            // 拉取 admin 自定义每日挑战配置（异步覆盖；过期/未启用则保持系统默认）
+            fetchDailyChallengeConfig();
+        }
+        
+        // 拉取 admin 自定义的每日挑战配置并覆盖本地生成（含有效期判断）
+        function fetchDailyChallengeConfig() {
+            if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL) return;
+            const url = GAME_SERVER_URL.replace(/\/+$/, '') + '/api/daily-challenge-config';
+            fetch(url).then(r => r.ok ? r.json() : null).then(d => {
+                if (!d || !d.enabled) {
+                    // 未启用或已过期：若当前是自定义覆盖状态，则恢复系统默认每日挑战
+                    if (gameState.dailyChallenge && gameState.dailyChallenge.__override) {
+                        gameState.dailyChallenge = generateDailyChallenge();
+                        saveDailyChallenge();
+                        updateDailyChallengeUI();
+                        startChallengeCountdown();
+                    }
+                    return;
+                }
+                const today = getTodayDateString();
+                // 用配置签名避免同一天重复重置玩家进度
+                const sig = `${d.type}|${d.level || 0}|${d.startDate}|${d.durationDays}`;
+                if (gameState.dailyChallenge.__overrideSig === sig) return;
+                const base = generateDailyChallenge(); // 复用日期种子
+                const ct = Object.values(CHALLENGE_TYPES).find(t => t.id === d.type) || base.challengeType;
+                const level = (d.level && d.level > 0) ? d.level : base.challengeData.level;
+                const seed = computeSeedFromString(today);
+                const challengeData = computeChallengeData(ct, seed, level);
+                // 克隆挑战类型对象，注入自定义奖励（不污染共享常量）
+                let challengeType = ct;
+                if (d.rewards && (d.rewards.coins > 0 || d.rewards.stars > 0)) {
+                    challengeType = Object.assign({}, ct, {
+                        rewards: {
+                            coins: d.rewards.coins > 0 ? d.rewards.coins : (ct.rewards ? ct.rewards.coins : 0),
+                            stars: d.rewards.stars > 0 ? d.rewards.stars : (ct.rewards ? ct.rewards.stars : 0)
+                        }
+                    });
+                }
+                gameState.dailyChallenge = {
+                    currentDate: today,
+                    challengeType: challengeType,
+                    challengeData: challengeData,
+                    isCompleted: false,
+                    isClaimed: false,
+                    progress: 0,
+                    history: [],
+                    __overrideSig: sig,
+                    __override: true
+                };
+                saveDailyChallenge();
+                updateDailyChallengeUI();
+                startChallengeCountdown();
+            }).catch(() => {});
         }
         
         function updateDailyChallengeUI() {
@@ -17370,46 +17425,42 @@ function saveMaze() {
 
     // 保存前清理残留的传送门配置（格子已不是传送门的）
     syncEditorTeleporters();
+
+    // 统一构建迷宫数据对象（编辑/新建共用）
+    const now = Date.now();
+    const mazeData = {
+        name: document.getElementById('mazeName').value || '未命名迷宫',
+        description: document.getElementById('mazeDescription').value || '',
+        difficulty: document.getElementById('mazeDifficulty').value || '中等',
+        size: editorState.mazeSize,
+        maze: editorState.maze,
+        teleporters: editorState.teleporters || [],
+        enemySpeed: editorState.enemySpeed || 1,
+        showShop: editorState.showShop !== false,
+        createdAt: now,
+        updatedAt: now
+    };
     
     let savedMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
     
     if (editorState.editingIndex >= 0 && editorState.editingIndex < savedMazes.length) {
         // 编辑现有迷宫：覆盖对应条目，保留 createdAt
         const original = savedMazes[editorState.editingIndex];
-        savedMazes[editorState.editingIndex] = {
-            name: document.getElementById('mazeName').value || '未命名迷宫',
-            description: document.getElementById('mazeDescription').value || '',
-            difficulty: document.getElementById('mazeDifficulty').value || '中等',
-            size: editorState.mazeSize,
-            maze: editorState.maze,
-            teleporters: editorState.teleporters || [],
-            enemySpeed: editorState.enemySpeed || 1,
-            showShop: editorState.showShop !== false,
-            createdAt: original.createdAt || Date.now(),
-            updatedAt: Date.now()
-        };
+        mazeData.createdAt = original.createdAt || now;
+        savedMazes[editorState.editingIndex] = mazeData;
         localStorage.setItem('savedMazes', JSON.stringify(savedMazes));
         alert('迷宫已更新！');
     } else {
         // 新建迷宫：追加
-        const mazeData = {
-            name: document.getElementById('mazeName').value || '未命名迷宫',
-            description: document.getElementById('mazeDescription').value || '',
-            difficulty: document.getElementById('mazeDifficulty').value || '中等',
-            size: editorState.mazeSize,
-            maze: editorState.maze,
-            teleporters: editorState.teleporters || [],
-            enemySpeed: editorState.enemySpeed || 1,
-            showShop: editorState.showShop !== false,
-            createdAt: Date.now(),
-            updatedAt: Date.now()
-        };
         savedMazes.push(mazeData);
         localStorage.setItem('savedMazes', JSON.stringify(savedMazes));
         // 保存完成后记录新索引，避免再次点击保存时重复新增
         editorState.editingIndex = savedMazes.length - 1;
         alert('迷宫保存成功！');
     }
+
+    // 上报到服务器（admin 工坊可查看/管理）；保存=未公开分享
+    reportMazeToServer(mazeData, false);
 }
 
 // 发布迷宫
@@ -17450,6 +17501,9 @@ function publishMaze() {
         
     const shareUrl = `${window.location.origin}${window.location.pathname}?maze=${encodedMaze}`;
     console.log('分享链接长度:', shareUrl.length, '字符');
+
+    // 上报到服务器并标记为已分享（admin 工坊可查看/管理）
+    reportMazeToServer(mazeData, true);
     
     // 复制到剪贴板
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -17463,6 +17517,42 @@ function publishMaze() {
         // 不支持 clipboard API（如旧版 iOS WebView）
         prompt('复制分享链接（请手动全选复制）：', shareUrl);
     }
+}
+
+// 将本地编辑的地图上报到服务器（玩家工坊）。isShared=true 表示玩家点击了"发布/分享"。
+// 同一编辑会话内复用 editorState.serverMazeId，避免每次保存都生成重复地图。
+function reportMazeToServer(mazeData, isShared) {
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    if (!gameState.clientId) return; // 无归属（未初始化）则不上报
+    try {
+        const payload = {
+            clientId: gameState.clientId,
+            accountId: gameState.accountId || null,
+            authorName: gameState.playerName || '玩家',
+            name: mazeData.name,
+            description: mazeData.description || '',
+            difficulty: mazeData.difficulty || '中等',
+            size: mazeData.size,
+            maze: mazeData.maze,
+            teleporters: mazeData.teleporters || [],
+            enemySpeed: mazeData.enemySpeed || 1,
+            showShop: mazeData.showShop !== false,
+            isShared: !!isShared
+        };
+        if (editorState.serverMazeId) payload.mazeId = editorState.serverMazeId;
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-mazes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(r => { try { return r.json(); } catch (e) { return null; } }).then(d => {
+            if (d && d.success) {
+                editorState.serverMazeId = (d.maze && d.maze.id) || editorState.serverMazeId;
+                console.log('[工坊] 地图已上报服务器:', editorState.serverMazeId, '(isShared=' + isShared + ')');
+            } else {
+                console.warn('[工坊] 地图上报失败:', d && d.message);
+            }
+        }).catch(e => console.warn('[工坊] 上报异常:', e));
+    } catch (e) { console.warn('[工坊] 上报异常:', e); }
 }
 
 // 从URL参数加载迷宫
@@ -17506,77 +17596,170 @@ function loadMazeFromUrl() {
     }
 }
 
-// 搜索迷宫
+// 搜索迷宫（优先社区分享缓存，无服务器时回退本地）
 function searchMazes() {
-    const searchTerm = document.getElementById('searchMazes').value.toLowerCase().trim();
+    const searchTerm = (document.getElementById('searchMazes').value || '').toLowerCase().trim();
     const filterDifficulty = document.getElementById('filterDifficulty').value;
-    
     const browseList = document.getElementById('browseMazesList');
-    
-    // 从本地存储获取所有迷宫
-    let allMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
-    
-    // 保留原始索引
-    let results = allMazes.map((maze, originalIndex) => ({ maze, originalIndex }));
-    
-    // 按名称/描述过滤
-    if (searchTerm) {
-        results = results.filter(({ maze }) =>
-            (maze.name || '').toLowerCase().includes(searchTerm) ||
-            (maze.description || '').toLowerCase().includes(searchTerm)
-        );
-    }
-    
-    // 按难度过滤
-    if (filterDifficulty && filterDifficulty !== 'all') {
-        results = results.filter(({ maze }) => maze.difficulty === filterDifficulty);
-    }
-    
-    if (results.length === 0) {
-        browseList.innerHTML = `<p style="text-align: center; color: #888;">${searchTerm || filterDifficulty ? '没有找到符合条件的迷宫' : '使用上方搜索框查找迷宫'}</p>`;
+    if (!browseList) return;
+
+    const serverOk = (typeof GAME_SERVER_URL !== 'undefined') && GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0;
+
+    // 已加载社区数据：直接过滤缓存
+    if (Array.isArray(window._browseMazesCache) && window._browseMazesCache.length > 0) {
+        applyBrowseFilter(window._browseMazesCache, searchTerm, filterDifficulty);
         return;
     }
-    
-    browseList.innerHTML = `<p style="text-align: center; color: #888;">找到 ${results.length} 个迷宫：</p>`;
-    
-    results.forEach(({ maze, originalIndex }) => {
+
+    // 服务器可用但尚未加载：先拉取，再搜索
+    if (serverOk) {
+        browseList.innerHTML = '<p style="text-align: center; color: #888;">正在加载社区地图...</p>';
+        loadBrowseMazes();
+        return;
+    }
+
+    // 无服务器：回退到本地保存的迷宫
+    const localMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
+    if (localMazes.length === 0) {
+        browseList.innerHTML = '<p style="text-align: center; color: #888;">你还没有保存任何迷宫，去工坊创建一个吧！</p>';
+        return;
+    }
+    applyBrowseFilter(localMazes, searchTerm, filterDifficulty);
+}
+
+// 根据关键词/难度过滤并渲染迷宫列表
+function applyBrowseFilter(list, searchTerm, filterDifficulty) {
+    const browseList = document.getElementById('browseMazesList');
+    if (!browseList) return;
+    const results = list.filter(m => {
+        const name = (m.name || '').toLowerCase();
+        const desc = (m.description || '').toLowerCase();
+        const author = (m.authorName || '').toLowerCase();
+        const matchTerm = !searchTerm || name.includes(searchTerm) || desc.includes(searchTerm) || author.includes(searchTerm);
+        const matchDiff = !filterDifficulty || m.difficulty === filterDifficulty;
+        return matchTerm && matchDiff;
+    });
+    if (results.length === 0) {
+        browseList.innerHTML = '<p style="text-align: center; color: #888;">' +
+            (searchTerm || filterDifficulty ? '没有找到符合条件的迷宫' : '社区暂无分享地图，去工坊创建一个吧！') + '</p>';
+        return;
+    }
+    renderBrowseMazeList(results);
+}
+
+// 渲染浏览迷宫列表（社区或本地通用）。每个 item 通过索引引用 window._browseRenderCache
+function renderBrowseMazeList(mazes) {
+    const browseList = document.getElementById('browseMazesList');
+    if (!browseList) return;
+    window._browseRenderCache = mazes;
+    browseList.innerHTML = '<p style="text-align: center; color: #888;">找到 ' + mazes.length + ' 个迷宫：</p>';
+    mazes.forEach((m, i) => {
         const mazeItem = document.createElement('div');
         mazeItem.className = 'maze-item';
-        mazeItem.style.cssText = `
-            background: rgba(255, 255, 255, 0.1);
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 8px;
-            border: 1px solid rgba(76, 175, 80, 0.3);
-        `;
-        
-        const date = new Date(maze.updatedAt);
-        
-        mazeItem.innerHTML = `
-            <h3>${maze.name}</h3>
-            <p>${maze.description || '无描述'}</p>
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                <div>
-                    <span style="margin-right: 15px;">难度: ${maze.difficulty}</span>
-                    <span>大小: ${maze.size.width}x${maze.size.height}</span>
-                    <br>
-                    <span style="font-size: 12px; color: #888; margin-top: 5px; display: block;">
-                        更新于: ${date.toLocaleString()}
-                    </span>
-                </div>
-                <div>
-                    <button onclick="playMazeByIndex(${originalIndex})" style="margin-right: 8px; padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                        游玩
-                    </button>
-                    <button onclick="downloadMaze(${originalIndex})" style="padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                        下载
-                    </button>
-                </div>
-            </div>
-        `;
-        
+        mazeItem.style.cssText = 'background: rgba(255,255,255,0.1); padding:15px; margin:10px 0; border-radius:8px; border:1px solid rgba(76,175,80,0.3);';
+        const grid = m.maze;
+        let size = m.size; if (typeof size === 'number') size = { width: size, height: size }; if (!size || typeof size.width !== 'number') size = (grid && grid[0]) ? { width: grid[0].length, height: grid.length } : { width: 10, height: 10 };
+        const date = new Date(m.updatedAt || m.createdAt || Date.now());
+        const authorLine = m.authorName ? ('<span style="margin-left:15px;">作者: ' + escapeHtmlSafe(m.authorName) + '</span>') : '';
+        mazeItem.innerHTML = '<h3>' + escapeHtmlSafe(m.name || '未命名') + '</h3><p>' + escapeHtmlSafe(m.description || '无描述') + '</p>' +
+            '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">' +
+            '<div><span style="margin-right:15px;">难度: ' + (m.difficulty || '中等') + '</span><span>大小: ' + size.width + 'x' + size.height + '</span>' + authorLine +
+            '<br><span style="font-size:12px; color:#888; margin-top:5px; display:block;">更新于: ' + date.toLocaleString() + '</span></div>' +
+            '<div><button onclick="playSharedByIndex(' + i + ')" style="margin-right:8px; padding:5px 10px; background:#2196F3; color:#fff; border:none; border-radius:4px; cursor:pointer;">游玩</button>' +
+            '<button onclick="downloadSharedByIndex(' + i + ')" style="padding:5px 10px; background:#4CAF50; color:#fff; border:none; border-radius:4px; cursor:pointer;">下载</button></div></div>';
         browseList.appendChild(mazeItem);
     });
+}
+
+// 浏览页：加载社区分享地图（GET /api/browse-mazes）
+function loadBrowseMazes() {
+    const browseList = document.getElementById('browseMazesList');
+    if (!browseList) return;
+    browseList.innerHTML = '<p style="text-align: center; color: #888;">加载社区地图中...</p>';
+    window._browseMazesCache = [];
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) {
+        renderBrowseFromLocal();
+        return;
+    }
+    const url = GAME_SERVER_URL.replace(/\/+$/, '') + '/api/browse-mazes';
+    fetch(url).then(r => { try { return r.json(); } catch (e) { return null; } }).then(d => {
+        const mazes = (d && d.success && Array.isArray(d.mazes)) ? d.mazes : [];
+        if (mazes.length === 0) {
+            // 社区暂无分享：回退本地，让页面不空
+            renderBrowseFromLocal();
+            return;
+        }
+        window._browseMazesCache = mazes;
+        renderBrowseMazeList(mazes);
+    }).catch(() => {
+        renderBrowseFromLocal();
+    });
+}
+
+// 浏览页：无服务器/社区为空时，回退渲染本地保存的迷宫
+function renderBrowseFromLocal() {
+    const browseList = document.getElementById('browseMazesList');
+    if (!browseList) return;
+    const localMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
+    if (localMazes.length === 0) {
+        browseList.innerHTML = '<p style="text-align: center; color: #888;">社区暂无分享地图，去工坊创建一个并发布吧！</p>';
+        return;
+    }
+    renderBrowseMazeList(localMazes);
+}
+
+// 按当前渲染缓存索引游玩/下载
+function playSharedByIndex(i) {
+    const m = window._browseRenderCache && window._browseRenderCache[i];
+    if (!m) { alert('地图不存在或已失效'); return; }
+    playMazeObject(m);
+}
+function downloadSharedByIndex(i) {
+    const m = window._browseRenderCache && window._browseRenderCache[i];
+    if (!m) { alert('地图不存在或已失效'); return; }
+    downloadMazeObject(m);
+}
+
+// 从迷宫对象直接游玩（社区/本地通用）
+function playMazeObject(m) {
+    const grid = m.maze;
+    if (!grid) { alert('地图数据缺失，无法游玩'); return; }
+    const size = m.size || (grid && grid[0] ? { width: grid[0].length, height: grid.length } : { width: 10, height: 10 });
+    playMaze({ maze: grid, teleporters: m.teleporters || [], size: size, enemySpeed: m.enemySpeed || 5, showShop: m.showShop !== false }, true);
+}
+
+// 从迷宫对象直接下载 JSON
+function downloadMazeObject(m) {
+    const mazeData = {
+        name: m.name,
+        description: m.description || '',
+        difficulty: m.difficulty || '中等',
+        size: m.size,
+        maze: m.maze,
+        teleporters: m.teleporters || [],
+        enemySpeed: m.enemySpeed || 5,
+        showShop: m.showShop !== false,
+        createdAt: m.createdAt,
+        updatedAt: m.updatedAt
+    };
+    const mazeJson = JSON.stringify(mazeData, null, 2);
+    const blob = new Blob([mazeJson], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (m.name || 'maze').replace(/\s+/g, '_') + '_maze.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert('迷宫下载成功！');
+}
+
+// 简单的 HTML 转义，避免名称/描述中的尖括号破坏渲染
+function escapeHtmlSafe(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // 根据索引游玩迷宫
@@ -17653,64 +17836,66 @@ function downloadMaze(index) {
 // 加载热门迷宫（按更新时间排序，展示最新的迷宫）
 function loadPopularMazes() {
     const popularList = document.getElementById('popularMazesList');
-    popularList.innerHTML = `<p style="text-align: center; color: #888;">加载中...</p>`;
-    
-    // 从本地存储获取所有迷宫
-    let allMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
-    
-    // 按更新时间排序，显示最新的 5 个迷宫作为热门迷宫
-    let popularMazes = allMazes
-        .map((maze, originalIndex) => ({ maze, originalIndex }))
-        .sort((a, b) => b.maze.updatedAt - a.maze.updatedAt)
-        .slice(0, 5);
-    
-    setTimeout(() => {
-        if (popularMazes.length === 0) {
-            popularList.innerHTML = `<p style="text-align: center; color: #888;">暂无迷宫，去工坊创建一个吧！</p>`;
+    if (!popularList) return;
+    popularList.innerHTML = '<p style="text-align: center; color: #888;">加载中...</p>';
+    window._popularMazesCache = [];
+    if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL) {
+        renderPopularFromLocal();
+        return;
+    }
+    const url = GAME_SERVER_URL.replace(/\/+$/, '') + '/api/mazes';
+    fetch(url).then(r => r.ok ? r.json() : null).then(d => {
+        const mazes = (d && d.success && Array.isArray(d.mazes)) ? d.mazes : [];
+        if (mazes.length === 0) {
+            popularList.innerHTML = '<p style="text-align: center; color: #888;">暂无热门迷宫，去工坊创建一个吧！</p>';
             return;
         }
-        
-        popularList.innerHTML = `<p style="text-align: center; color: #888;">最新收录的迷宫：</p>`;
-        
-        popularMazes.forEach(({ maze, originalIndex }) => {
-            const mazeItem = document.createElement('div');
-            mazeItem.className = 'maze-item';
-            mazeItem.style.cssText = `
-                background: rgba(255, 255, 255, 0.1);
-                padding: 15px;
-                margin: 10px 0;
-                border-radius: 8px;
-                border: 1px solid rgba(76, 175, 80, 0.3);
-            `;
-            
-            const date = new Date(maze.updatedAt);
-            
-            mazeItem.innerHTML = `
-                <h3>${maze.name}</h3>
-                <p>${maze.description || '无描述'}</p>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                    <div>
-                        <span style="margin-right: 15px;">难度: ${maze.difficulty}</span>
-                        <span>大小: ${maze.size.width}x${maze.size.height}</span>
-                        <br>
-                        <span style="font-size: 12px; color: #888; margin-top: 5px; display: block;">
-                            更新于: ${date.toLocaleString()}
-                        </span>
-                    </div>
-                    <div>
-                        <button onclick="playMazeByIndex(${originalIndex})" style="margin-right: 8px; padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                            游玩
-                        </button>
-                        <button onclick="downloadMaze(${originalIndex})" style="padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">
-                            下载
-                        </button>
-                    </div>
-                </div>
-            `;
-            
-            popularList.appendChild(mazeItem);
+        popularList.innerHTML = '<p style="text-align: center; color: #888;">管理员推荐的热门迷宫：</p>';
+        mazes.forEach((m, i) => {
+            window._popularMazesCache[i] = m;
+            const grid = m.data || m.maze;
+            let size = m.size; if (typeof size === 'number') size = { width: size, height: size }; if (!size || typeof size.width !== 'number') size = (grid && grid[0]) ? { width: grid[0].length, height: grid.length } : { width: 10, height: 10 };
+            const item = document.createElement('div');
+            item.className = 'maze-item';
+            item.style.cssText = 'background: rgba(255,255,255,0.1); padding:15px; margin:10px 0; border-radius:8px; border:1px solid rgba(76,175,80,0.3);';
+            item.innerHTML = '<h3>' + (m.name || '未命名') + '</h3><p>' + (m.description || '无描述') + '</p>' +
+                '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">' +
+                '<div><span style="margin-right:15px;">难度: ' + (m.difficulty || '简单') + '</span><span>大小: ' + size.width + 'x' + size.height + '</span></div>' +
+                '<div><button onclick="playPopularMaze(' + i + ')" style="margin-right:8px; padding:5px 10px; background:#2196F3; color:#fff; border:none; border-radius:4px; cursor:pointer;">游玩</button></div></div>';
+            popularList.appendChild(item);
         });
-    }, 300);
+    }).catch(() => { renderPopularFromLocal(); });
+}
+function playPopularMaze(i) {
+    const m = window._popularMazesCache && window._popularMazesCache[i];
+    if (!m) return;
+    const grid = m.data || m.maze;
+    const size = m.size || (grid && grid[0] ? { width: grid[0].length, height: grid.length } : { width: 10, height: 10 });
+    playMaze({ maze: grid, teleporters: m.teleporters || [], size: size, enemySpeed: m.enemySpeed || 5, showShop: m.showShop !== false }, true);
+}
+function renderPopularFromLocal() {
+    const popularList = document.getElementById('popularMazesList');
+    if (!popularList) return;
+    let allMazes = JSON.parse(localStorage.getItem('savedMazes')) || [];
+    let popularMazes = allMazes.map((maze, originalIndex) => ({ maze, originalIndex }))
+        .sort((a, b) => b.maze.updatedAt - a.maze.updatedAt).slice(0, 5);
+    if (popularMazes.length === 0) {
+        popularList.innerHTML = '<p style="text-align: center; color: #888;">暂无迷宫，去工坊创建一个吧！</p>';
+        return;
+    }
+    popularList.innerHTML = '<p style="text-align: center; color: #888;">最新收录的迷宫：</p>';
+    popularMazes.forEach(({ maze, originalIndex }) => {
+        const mazeItem = document.createElement('div');
+        mazeItem.className = 'maze-item';
+        mazeItem.style.cssText = 'background: rgba(255,255,255,0.1); padding:15px; margin:10px 0; border-radius:8px; border:1px solid rgba(76,175,80,0.3);';
+        const date = new Date(maze.updatedAt);
+        mazeItem.innerHTML = '<h3>' + (maze.name || '未命名') + '</h3><p>' + (maze.description || '无描述') + '</p>' +
+            '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">' +
+            '<div><span style="margin-right:15px;">难度: ' + (maze.difficulty || '中等') + '</span><span>大小: ' + maze.size.width + 'x' + maze.size.height + '</span><br><span style="font-size:12px; color:#888; margin-top:5px; display:block;">更新于: ' + date.toLocaleString() + '</span></div>' +
+            '<div><button onclick="playMazeByIndex(' + originalIndex + ')" style="margin-right:8px; padding:5px 10px; background:#2196F3; color:#fff; border:none; border-radius:4px; cursor:pointer;">游玩</button>' +
+            '<button onclick="downloadMaze(' + originalIndex + ')" style="padding:5px 10px; background:#4CAF50; color:#fff; border:none; border-radius:4px; cursor:pointer;">下载</button></div></div>';
+        popularList.appendChild(mazeItem);
+    });
 }
 
 // 敌人速度已统一在编辑器"⚙️ 设置"弹窗中配置，此函数保留兼容旧调用
