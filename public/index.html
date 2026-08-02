@@ -8202,6 +8202,8 @@ function completePuzzleLevel() {
     if (!gameState.puzzleCompletedLevels.includes(level)) {
         gameState.puzzleCompletedLevels.push(level);
         localStorage.setItem('puzzleCompletedLevels', JSON.stringify(gameState.puzzleCompletedLevels));
+        // 解密通关后自动云端备份（延时合并上传）
+        cloudScheduleAutoSaveProgress();
         recordAchievement('levelComplete', 1);
         reportTelemetry('puzzle-complete', level);
         // 自动判定“解密高手”：通关全部 60 个解密挑战
@@ -9312,6 +9314,98 @@ function showScreen(screenId) {
             } catch (e) { /* 忽略 */ }
         }
 
+        // ===== 多人联机聊天脏话屏蔽（发送端 / 接收端共用）=====
+        // 设计目标：① 发送端过滤后广播（防止自己账号发出脏话）；② 接收端再次过滤显示的原文
+        //          （防止对方使用改过的客户端绕过本地过滤直接发脏话）；③ 算法抗常见绕过：大小写、
+        //          字母间插入空格/标点、简单 leet 替换（4→a、1→i、0→o、3→e、$→s 等）。
+        // ④ 用"字母/数字/CJK 边界"判定，避免误伤 class / bass / diet 等正常词。
+        const CHAT_PROFANITY_WORDS = [
+            // 中文脏话
+            '傻逼', '操你妈', '草泥马', '去死', '垃圾', '废物', '蠢货',
+            '脑残', '智障', '二百五', '王八蛋', '龟儿子', '杂种', '畜生',
+            '禽兽', '色狼', '变态', '婊子', '贱人', '傻屌', '妈蛋', '滚蛋',
+            '我操你妈', '我草泥马', '自杀', '紫砂', '毒品', '冰糖', '神经病', '圣经并',
+            '杜平', '毒瓶',
+            // 英文脏话
+            'fuck', 'shit', 'damn', 'bitch', 'asshole', 'dick', 'pussy',
+            'cunt', 'bastard', 'nigger', 'nigga', 'faggot', 'dyke', 'retard',
+            'whore', 'slut', 'douche', 'ass', 'shithead', 'sb', 'sbm', 'wcnm', 'fw',
+            'bt', 'die'
+        ];
+        // 简单 leet 映射（用于检测/替换时归一化）
+        const CHAT_PROFANITY_LEET = { '4': 'a', '@': 'a', '1': 'i', '!': 'i', '|': 'i', '0': 'o', '3': 'e', '$': 's', '5': 's', '7': 't', '8': 'b', '9': 'g', '6': 'b' };
+        function chatIsAlnumCJK(c) { return (c && /^[a-z0-9一-鿿]$/.test(c)); }
+        function chatIsCJK(c) { return (c && /^[一-鿿]$/.test(c)); }
+        // 归一化：小写 + leet 替换 + 仅保留 字母/数字/CJK；同时记录每个 clean 字符对应的原文下标
+        function chatCleanFull(s) {
+            s = (s || '').toLowerCase();
+            let clean = '';
+            const om = [];
+            for (let i = 0; i < s.length; i++) {
+                const ch = s[i];
+                if (CHAT_PROFANITY_LEET[ch] !== undefined) { clean += CHAT_PROFANITY_LEET[ch]; om.push(i); }
+                else if (chatIsAlnumCJK(ch)) { clean += ch; om.push(i); }
+                // 其它字符（空格/标点）丢弃，使"a s s""a.m.s"等插入式绕过能被识别
+            }
+            return { clean, om };
+        }
+        // 边界判定：命中串两侧若紧贴"分隔符或 CJK"（含跨脚本边界），视为独立词；
+        // 仅当两侧都是拉丁/数字且连续时才不算边界（避免误伤 class / bass）。
+        function chatBoundaryOk(text, om, s, e) {
+            let bOk = (s === 0);
+            if (!bOk) { const p = om[s] - 1; bOk = (p < 0) || !chatIsAlnumCJK(text[p]) || chatIsCJK(text[p]); }
+            let aOk = (e >= om.length);
+            if (!aOk) { const afterOrig = om[e - 1] + 1; aOk = (afterOrig >= text.length) || !chatIsAlnumCJK(text[afterOrig]) || chatIsCJK(text[afterOrig]); }
+            return bOk && aOk;
+        }
+        // 检测是否含脏话（带边界判定）
+        function chatContainsProfanity(text) {
+            if (!text) return false;
+            const { clean, om } = chatCleanFull(text);
+            for (const w of CHAT_PROFANITY_WORDS) {
+                const cw = chatCleanFull(w).clean;
+                if (!cw) continue;
+                let idx = 0;
+                while ((idx = clean.indexOf(cw, idx)) !== -1) {
+                    const s = idx, e = idx + cw.length;
+                    if (chatBoundaryOk(text, om, s, e)) return true;
+                    idx = e;
+                }
+            }
+            return false;
+        }
+        // 过滤脏话：把命中的字母/数字/CJK 字符替换为 *（保留空格/标点等分隔符，已无害）
+        function chatFilterProfanity(text) {
+            if (!text) return text;
+            const { clean, om } = chatCleanFull(text);
+            if (!clean) return text;
+            const bad = new Array(clean.length).fill(false);
+            for (const w of CHAT_PROFANITY_WORDS) {
+                const cw = chatCleanFull(w).clean;
+                if (!cw) continue;
+                let idx = 0;
+                while ((idx = clean.indexOf(cw, idx)) !== -1) {
+                    const s = idx, e = idx + cw.length;
+                    if (chatBoundaryOk(text, om, s, e)) {
+                        for (let i = s; i < e; i++) bad[i] = true;
+                    }
+                    idx = e;
+                }
+            }
+            if (!bad.some(Boolean)) return text;
+            let ci = 0, out = '';
+            for (const ch of text) {
+                const lc = ch.toLowerCase();
+                if (chatIsAlnumCJK(lc) || CHAT_PROFANITY_LEET[lc] !== undefined) {
+                    out += bad[ci] ? '*' : ch;
+                    ci++;
+                } else {
+                    out += ch; // 分隔符原样保留
+                }
+            }
+            return out;
+        }
+
         function sendChatMessage() {
             // 检查两个输入框
             const messageInput1 = document.getElementById('chatInput');
@@ -9346,42 +9440,8 @@ function showScreen(screenId) {
                     return;
                 }
                 
-                // 脏话检测和过滤
-                // 脏话列表，包含中英文常见脏话
-                const profanityList = [
-                    // 中文脏话
-                    '傻逼', '操你妈', '草泥马', '去死', '垃圾', '废物', '蠢货',
-                    '脑残', '智障', '二百五', '王八蛋', '龟儿子', '杂种', '畜生',
-                    '禽兽', '色狼', '变态', '婊子', '贱人', '傻屌', '妈蛋', '滚蛋',
-                    '我操你妈','我草泥马','自杀','紫砂','毒品','冰糖','神经病','圣经并',
-                    '杜平','毒瓶',
-                    // 英文脏话
-                    'fuck', 'shit', 'damn', 'bitch', 'asshole', 'dick', 'pussy',
-                    'cunt', 'bastard', 'nigger', 'nigga', 'faggot', 'dyke', 'retard',
-                    'whore', 'slut', 'douche', 'ass', 'shithead','sb','sbm','wcnm','fw',
-                    'bt','die'
-                ];
-                
-                // 检测文本中是否包含脏话
-                function containsProfanity(text) {
-                    const lowercaseText = text.toLowerCase();
-                    return profanityList.some(profanity => 
-                        lowercaseText.includes(profanity.toLowerCase())
-                    );
-                }
-                
-                // 过滤文本中的脏话，替换为星号
-                function filterProfanity(text) {
-                    let filteredText = text;
-                    profanityList.forEach(profanity => {
-                        const regex = new RegExp(profanity, 'gi');
-                        filteredText = filteredText.replace(regex, '*'.repeat(profanity.length));
-                    });
-                    return filteredText;
-                }
-                
-                // 检查消息是否包含脏话
-                const hasProfanity = containsProfanity(message);
+                // 脏话检测和过滤（使用模块级 chatContainsProfanity / chatFilterProfanity，发送端+接收端共用）
+                const hasProfanity = chatContainsProfanity(message);
                 if (hasProfanity) {
                     // 获取本地存储的脏话计数
                     let localProfanityCount = parseInt(localStorage.getItem('localProfanityCount')) || 0;
@@ -9390,7 +9450,7 @@ function showScreen(screenId) {
                     localProfanityCount++;
                     
                     // 过滤脏话
-                    message = filterProfanity(message);
+                    message = chatFilterProfanity(message);
                     
                     // 显示警告消息，包含当前脏话次数
                     addChatMessage('系统', `您的消息中包含不文明用语，已自动过滤。脏话次数: ${localProfanityCount}/10`, '#FF5252');
@@ -15453,6 +15513,9 @@ function completeLevel() {
         localStorage.setItem('completedLevels', JSON.stringify(gameState.completedLevels));
     }
     
+    // 4.5 通关后自动云端备份（延时合并上传，跨设备同步进度）
+    cloudScheduleAutoSaveProgress();
+    
     // 5. 显示通关面板
     document.getElementById('singlePlayerComplete').classList.remove('hidden');
 
@@ -18435,6 +18498,7 @@ function initCloudStorageUI() {
         document.getElementById('cloudPanelBox').classList.remove('hidden');
         document.getElementById('cloudCurUser').textContent = user;
         loadCloudMazeList();
+        loadCloudProgressInfo(); // 刷新云端通关数据摘要（元素不存在时内部已做保护）
         startCloudAutoRefresh(); // 进入云区即开启自动刷新，跨设备上传可自动显现
     } else {
         document.getElementById('cloudLoginBox').classList.remove('hidden');
@@ -18529,6 +18593,15 @@ function openCloudSpaceModal() {
                         <button onclick="cloudLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
                     </span>
                 </div>
+                    <div style="padding:12px; background:rgba(76,175,80,0.12); border:1px solid rgba(76,175,80,0.4); border-radius:10px; margin-bottom:12px;">
+                    <div style="font-weight:bold; color:#a5d6a7; margin-bottom:6px;">📊 通关数据（云端备份）</div>
+                    <div id="cloudProgressInfo" style="font-size:12px; color:#bbb; margin-bottom:8px;">云端暂无通关数据</div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button onclick="cloudUploadProgress()" style="padding:5px 12px; background:#43A047; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">⬆️ 上传我的通关数据</button>
+                        <button onclick="cloudDownloadProgress()" style="padding:5px 12px; background:#1E88E5; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">⬇️ 下载并应用到本机</button>
+                        <span id="cloudProgressMsg" style="font-size:12px; color:#ffb74d; align-self:center;"></span>
+                    </div>
+                </div>
                 <div id="cloudMazeList" style="display:flex; flex-direction:column; gap:8px;"></div>
                 <button onclick="cloudUploadCurrent()" id="cloudUploadBtn" style="margin-top:10px; padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">⬆️ 上传当前编辑器地图到云</button>
             </div>
@@ -18569,12 +18642,108 @@ async function loadCloudMazeList() {
                 </div>
                 <div style="display:flex; gap:6px;">
                     <button onclick="cloudDownloadMaze('${m.id}')" style="padding:4px 10px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">⬇️ 下载</button>
+                    <button onclick="cloudDeleteMaze('${m.id}')" style="padding:4px 10px; background:#e53935; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">🗑️ 删除</button>
                 </div>
             </div>
         `).join('');
     } catch (e) {
         box.innerHTML = '<p style="color:#ff8a80; font-size:12px;">加载失败：' + escapeHtmlLocal(e.message) + '</p>';
     }
+}
+// ===== 云储存「通关数据」：上传 / 下载 / 摘要 =====
+function cloudCollectLocalProgress() {
+    return {
+        unlockedLevel: (typeof gameState.unlockedLevel === 'number' && gameState.unlockedLevel >= 1) ? gameState.unlockedLevel : 1,
+        completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels.filter(n => typeof n === 'number' && n >= 1).slice() : [],
+        puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels.filter(n => typeof n === 'number' && n >= 1).slice() : []
+    };
+}
+function cloudSetProgressMsg(t) {
+    const el = document.getElementById('cloudProgressMsg');
+    if (el) el.textContent = t || '';
+}
+function cloudRenderProgressInfo(progress, updatedAt) {
+    const el = document.getElementById('cloudProgressInfo');
+    if (!el) return;
+    if (!progress) { el.textContent = '云端暂无通关数据'; return; }
+    const ul = progress.unlockedLevel || 1;
+    const cl = Array.isArray(progress.completedLevels) ? progress.completedLevels.length : 0;
+    const pl = Array.isArray(progress.puzzleCompletedLevels) ? progress.puzzleCompletedLevels.length : 0;
+    let t = `已解锁 ${ul} 关 ｜ 单人通关 ${cl} 关 ｜ 解密通关 ${pl} 关`;
+    if (updatedAt) t += ' ｜ 更新：' + String(updatedAt).replace('T', ' ').slice(0, 16);
+    el.textContent = t;
+}
+async function loadCloudProgressInfo() {
+    const infoEl = document.getElementById('cloudProgressInfo');
+    if (!infoEl) return;
+    cloudRenderProgressInfo(null, null);
+    try {
+        const r = await cloudApi('/progress');
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
+        cloudRenderProgressInfo(d.progress, d.updated_at);
+    } catch (e) {
+        infoEl.textContent = '读取云端通关数据失败：' + e.message;
+    }
+}
+async function cloudUploadProgress() {
+    if (!localStorage.getItem(CLOUD_TOKEN_KEY)) { showNotification('请先登录云账号'); return; }
+    cloudSetProgressMsg('上传中…');
+    try {
+        const payload = cloudCollectLocalProgress();
+        const r = await cloudApi('/progress', { method: 'POST', body: JSON.stringify({ progress: payload }) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '上传失败');
+        cloudRenderProgressInfo(d.progress, d.updated_at);
+        cloudSetProgressMsg('');
+        showNotification('☁️ 通关数据已上传到云端');
+        if (document.getElementById('cloudSpaceModal')) loadCloudProgressInfo();
+    } catch (e) {
+        cloudSetProgressMsg('失败');
+        showNotification('上传失败：' + e.message);
+    }
+}
+// 防止下载应用后又立刻自动回传（避免无谓请求与潜在循环）
+let _cloudApplyingProgress = false;
+async function cloudDownloadProgress() {
+    if (!localStorage.getItem(CLOUD_TOKEN_KEY)) { showNotification('请先登录云账号'); return; }
+    cloudSetProgressMsg('下载中…');
+    try {
+        const r = await cloudApi('/progress');
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '下载失败');
+        if (!d.progress) { cloudSetProgressMsg('云端暂无数据'); showNotification('云端暂无通关数据'); return; }
+        const before = cloudCollectLocalProgress();
+        // 下载即合并到本机（关卡取最大、通关列表取并集），与 applyServerProgress 语义一致；进度只增不减
+        _cloudApplyingProgress = true;
+        applyServerProgress({
+            unlockedLevel: d.progress.unlockedLevel,
+            completedLevels: d.progress.completedLevels,
+            puzzleCompletedLevels: d.progress.puzzleCompletedLevels
+        });
+        _cloudApplyingProgress = false;
+        if (typeof generateLevelButtons === 'function') generateLevelButtons();
+        if (typeof initPuzzleLevelSelect === 'function') initPuzzleLevelSelect();
+        const after = cloudCollectLocalProgress();
+        cloudRenderProgressInfo(d.progress, d.updated_at);
+        cloudSetProgressMsg('');
+        showNotification(`☁️ 已应用云端通关数据（解锁 ${after.unlockedLevel} 关 / 单人 ${after.completedLevels.length} / 解密 ${after.puzzleCompletedLevels.length}）`);
+    } catch (e) {
+        _cloudApplyingProgress = false;
+        cloudSetProgressMsg('失败');
+        showNotification('下载失败：' + e.message);
+    }
+}
+// 云储存自动备份：通关后延时上传（防抖，避免频繁请求）；仅已登录且非正在应用下载时触发
+let _cloudAutoSaveTimer = null;
+function cloudScheduleAutoSaveProgress() {
+    if (!localStorage.getItem(CLOUD_TOKEN_KEY)) return;
+    if (_cloudApplyingProgress) return;
+    if (_cloudAutoSaveTimer) clearTimeout(_cloudAutoSaveTimer);
+    _cloudAutoSaveTimer = setTimeout(() => {
+        _cloudAutoSaveTimer = null;
+        cloudUploadProgress().catch(() => {});
+    }, 8000);
 }
 // 云储存自动刷新：已登录且云面板可见时，每 15 秒重新拉取云列表，
 // 使其他设备上传的地图能自动在本设备显现（解决"跨设备看不到"）。
@@ -18645,7 +18814,7 @@ async function renderCloudDevices() {
             <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.06);border-radius:8px;margin-bottom:8px;">
                 <div style="overflow:hidden;">
                     <div style="font-weight:bold;">${escapeHtmlLocal(parseUserAgent(s.device))}${s.current ? ' <span style="color:#4caf50;font-size:11px;">（当前设备）</span>' : ''}</div>
-                    <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)}</div>
+                    <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)} ｜ IP:${escapeHtmlLocal(s.ip || '—')}</div>
                 </div>
                 <button onclick="cloudRevokeSession('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
             </div>
@@ -18726,6 +18895,17 @@ async function cloudDownloadMaze(mazeId) {
         showNotification('☁️ 已下载到「我的迷宫」并标注云储存');
         showMyMazes();
     } catch (e) { showNotification('下载失败：' + e.message); }
+}
+// 删除自己的云地图（仅本人，服务端鉴权）
+async function cloudDeleteMaze(mazeId) {
+    if (!confirm('确定要删除这张云地图吗？此操作不可逆。')) return;
+    try {
+        const r = await cloudApi('/mazes/' + encodeURIComponent(mazeId), { method: 'DELETE' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.success) throw new Error(d.message || '删除失败');
+        showNotification('☁️ 云地图已删除');
+        loadCloudMazeList();
+    } catch (e) { showNotification('删除失败：' + e.message); }
 }
 // 上传当前编辑器地图到云（保存=未分享；从编辑器直接上报）
 async function cloudUploadCurrent() {
@@ -20139,7 +20319,9 @@ function handleMultiplayerData(data, peerId) {
                     if (chatSender) {
                         // 使用消息中携带的颜色，如果没有则使用玩家默认颜色
                         const messageColor = data.color || chatSender.color;
-                        addChatMessage(chatSender.name, data.message, messageColor, null, data.messageId);
+                        // 接收端再次过滤：防止对方使用改过的客户端绕过本地过滤直接发脏话
+                        const incomingMsg = data.message ? chatFilterProfanity(data.message) : data.message;
+                        addChatMessage(chatSender.name, incomingMsg, messageColor, null, data.messageId);
                     }
                     break;
                 case 'chat-image':
