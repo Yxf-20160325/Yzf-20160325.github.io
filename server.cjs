@@ -3938,13 +3938,21 @@ app.post('/api/player-mazes', async (req, res) => {
         const name = (b.name || '').toString().trim();
         if (!name) return res.status(400).json({ success: false, message: '地图名称不能为空' });
         let maze = null;
-        if (b.mazeId && playerMazes.has(b.mazeId)) {
-            const existing = playerMazes.get(b.mazeId);
-            if (existing.author === clientId) maze = existing; // 仅作者可更新自己的图
+        let resolvedId = null;
+        // 客户端可携带稳定 mazeId（编辑器 serverMazeId 或本地图 local_xxx），用于幂等更新：
+        // 1) 该 id 已存在且作者一致 → 原地更新；
+        // 2) 该 id 从未出现过（客户端首次自建）→ 直接采用该 id 作为地图 id，避免重复进入游戏时生成多份。
+        if (b.mazeId) {
+            if (playerMazes.has(b.mazeId)) {
+                const existing = playerMazes.get(b.mazeId);
+                if (existing.author === clientId) { maze = existing; resolvedId = b.mazeId; }
+            } else {
+                resolvedId = b.mazeId; // 新 id，由客户端提供，直接采用
+            }
         }
         const now = Date.now();
         if (!maze) {
-            maze = { id: 'pmaze_' + now.toString(36) + '_' + Math.random().toString(36).substr(2, 5), createdAt: now, noShare: false, disabled: false, playCount: 0 };
+            maze = { id: resolvedId || ('pmaze_' + now.toString(36) + '_' + Math.random().toString(36).substr(2, 5)), createdAt: now, noShare: false, disabled: false, playCount: 0 };
         }
         maze.name = name;
         maze.description = b.description || '';
@@ -3995,11 +4003,15 @@ app.get('/api/admin/users/:userId/mazes', requireAdminAuth, (req, res) => {
         const list = Array.from(playerMazes.values())
             .filter(m => m.author === uid || m.accountId === uid)
             .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-            .map(m => ({
-                id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
-                size: m.size, isShared: m.isShared, noShare: !!m.noShare, disabled: !!m.disabled,
-                playCount: m.playCount || 0, createdAt: m.createdAt, updatedAt: m.updatedAt
-            }));
+            .map(m => {
+                let popularId = null;
+                for (const pm of mazes.values()) { if (pm.sourceMazeId === m.id) { popularId = pm.id; break; } }
+                return {
+                    id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
+                    size: m.size, isShared: m.isShared, noShare: !!m.noShare, disabled: !!m.disabled,
+                    popularId, playCount: m.playCount || 0, createdAt: m.createdAt, updatedAt: m.updatedAt
+                };
+            });
         res.json({ success: true, mazes: list });
     } catch (e) {
         res.status(500).json({ success: false, message: '获取失败' });
@@ -4042,6 +4054,55 @@ app.delete('/api/admin/player-mazes/:mazeId', requireAdminAuth, async (req, res)
     } catch (e) {
         console.error('[API] 删除玩家地图失败:', e);
         res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 管理员：将某玩家地图设为热门地图（复制到热门迷宫列表，按 sourceMazeId 去重）
+app.post('/api/admin/player-mazes/:mazeId/promote', requireAdminAuth, async (req, res) => {
+    try {
+        const mazeId = req.params.mazeId;
+        const maze = playerMazes.get(mazeId);
+        if (!maze) return res.status(404).json({ success: false, message: '玩家地图不存在' });
+        if (!maze.maze || (Array.isArray(maze.maze) && maze.maze.length === 0)) {
+            return res.status(400).json({ success: false, message: '该地图没有可游玩的迷宫数据，无法设为热门' });
+        }
+        const grid = maze.maze;
+        let sz;
+        if (maze.size && typeof maze.size.width === 'number') sz = maze.size.width;
+        else if (typeof maze.size === 'number') sz = maze.size;
+        else if (grid && grid[0]) sz = grid[0].length;
+        else sz = 10;
+        // 去重：若该玩家地图已被设为热门，则原地更新而非重复新增
+        let existing = null;
+        for (const pm of mazes.values()) { if (pm.sourceMazeId === maze.id) { existing = pm; break; } }
+        const pm = existing || { id: generateMazeId(), createdAt: Date.now() };
+        pm.name = String(maze.name || '未命名地图').trim();
+        pm.description = maze.description || '';
+        pm.difficulty = maze.difficulty || '中等';
+        pm.size = sz;
+        pm.data = grid;
+        pm.teleporters = maze.teleporters || [];
+        pm.enemySpeed = maze.enemySpeed || 1;
+        pm.showShop = maze.showShop !== false;
+        pm.sourceMazeId = maze.id;
+        pm.author = maze.author;
+        pm.authorName = maze.authorName || '玩家';
+        pm.updatedAt = Date.now();
+        mazes.set(pm.id, pm);
+        saveMazes();
+        // 设为热门时，自动将该玩家地图转为可公开游玩状态（避免出现“热门却已被禁用/禁分享”的矛盾）
+        maze.disabled = false;
+        maze.noShare = false;
+        maze.isShared = true;
+        maze.updatedAt = Date.now();
+        playerMazes.set(maze.id, maze);
+        savePlayerMazes();
+        appendAudit('admin', 'player-maze-promote', `将玩家地图 ${maze.name} (${maze.id}) 设为热门 (${pm.id})`);
+        console.log(`[Admin] 玩家地图设为热门: ${maze.name} -> ${pm.id} (${existing ? '更新' : '新增'})`);
+        res.json({ success: true, message: existing ? '已更新热门地图' : '已设为热门地图', popularId: pm.id, alreadyPromoted: !!existing });
+    } catch (e) {
+        console.error('[API] 设为热门地图失败:', e);
+        res.status(500).json({ success: false, message: '设为热门失败' });
     }
 });
 
