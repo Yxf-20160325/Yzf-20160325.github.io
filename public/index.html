@@ -18626,7 +18626,7 @@ async function cloudRedeemCode() {
         if (r.status === 401) { cloudForceLogout(); return; }
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '兑换失败');
-        showNotification('🎁 ' + (d.message || '扩容成功'));
+        showNotification('🎁 扩容成功！云空间上限已提升至 ' + (d.maxMazes || '?') + ' 个');
         loadCloudMazeList(); // 刷新容量显示（上限随新容量更新）
     } catch (e) {
         showNotification('兑换失败：' + e.message);
@@ -18678,11 +18678,12 @@ function parseUserAgent(ua) {
     ua = (ua || '').toString();
     if (!ua || ua === '未知设备') return '未知设备';
     let os = '', br = '';
-    if (/Windows NT 10/.test(ua)) os = 'Windows';
+    // 注意先后顺序：iOS/iPad 的 UA 内含 "Mac OS X"，必须先于 Mac 判断，否则会被误判为 macOS。
+    if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+    else if (/Android/.test(ua)) os = 'Android';
+    else if (/Windows NT 10/.test(ua)) os = 'Windows';
     else if (/Windows/.test(ua)) os = 'Windows';
     else if (/Mac OS X|Macintosh/.test(ua)) os = 'macOS';
-    else if (/Android/.test(ua)) os = 'Android';
-    else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
     else if (/Linux/.test(ua)) os = 'Linux';
     if (/Edg\//.test(ua)) br = 'Edge';
     else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) br = 'Chrome';
