@@ -194,6 +194,11 @@ const DB_TABLES_SQL = [
         id VARCHAR(32) PRIMARY KEY,
         data JSON NOT NULL,
         updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS daily_challenge_config (
+        id VARCHAR(32) PRIMARY KEY,
+        data JSON NOT NULL,
+        updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -309,6 +314,78 @@ async function saveGlobalFunctions() {
     ensureDataDir();
     try { fs.writeFileSync(GLOBAL_FUNCTIONS_FILE, JSON.stringify(globalFunctions, null, 2)); }
     catch (e) { console.error('[Func] 保存全局功能控制失败:', e.message); }
+}
+
+// ===== 每日挑战自定义配置（admin 可编辑并设持续天数，默认1天）=====
+const DAILY_CHALLENGE_FILE = path.join(DATA_DIR, 'daily-challenge-config.json');
+// 结构：{ enabled, type, level(0=自动), durationDays(默认1), startDate(YYYY-MM-DD), rewards:{coins,stars}|null, createdAt, createdBy }
+let dailyChallengeConfig = {
+    enabled: false,
+    type: 'speed',
+    level: 0,
+    durationDays: 1,
+    startDate: '',
+    rewards: null,
+    createdAt: null,
+    createdBy: null
+};
+
+function serverTodayString() {
+    return new Date().toISOString().split('T')[0];
+}
+// 在 YYYY-MM-DD 上加 n 天，返回 YYYY-MM-DD
+function addDaysToDateString(dateStr, n) {
+    const d = new Date(dateStr + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().split('T')[0];
+}
+
+// 加载每日挑战配置：DB 优先（daily_challenge_config 表，单例行 id='current'），失败回退 JSON 文件
+async function loadDailyChallengeConfig() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query("SELECT data FROM daily_challenge_config WHERE id='current'");
+            if (rows && rows.length && rows[0].data) {
+                const parsed = (typeof rows[0].data === 'string') ? JSON.parse(rows[0].data) : rows[0].data;
+                if (parsed && typeof parsed === 'object') {
+                    dailyChallengeConfig = Object.assign({}, dailyChallengeConfig, parsed);
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('[DailyChallenge] DB 读取失败，回退 JSON:', e.message);
+        }
+    }
+    try {
+        if (fs.existsSync(DAILY_CHALLENGE_FILE)) {
+            const s = JSON.parse(fs.readFileSync(DAILY_CHALLENGE_FILE, 'utf8'));
+            if (s && typeof s === 'object') {
+                dailyChallengeConfig = Object.assign({}, dailyChallengeConfig, s);
+            }
+        }
+    } catch (e) { console.error('[DailyChallenge] 加载失败:', e.message); }
+    if (DB_AVAILABLE && pool) {
+        try { await saveDailyChallengeConfig(); } catch (_) {}
+    }
+}
+// 保存每日挑战配置：DB 优先（UPSERT 单行），失败回退 JSON 文件
+async function saveDailyChallengeConfig() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const updatedAt = new Date().toISOString();
+            await pool.query(
+                "INSERT INTO daily_challenge_config (id, data, updated_at) VALUES ('current', ?, ?) " +
+                "ON DUPLICATE KEY UPDATE data=VALUES(data), updated_at=VALUES(updated_at)",
+                [JSON.stringify(dailyChallengeConfig), updatedAt]
+            );
+            return;
+        } catch (e) {
+            console.error('[DailyChallenge] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
+    ensureDataDir();
+    try { fs.writeFileSync(DAILY_CHALLENGE_FILE, JSON.stringify(dailyChallengeConfig, null, 2)); }
+    catch (e) { console.error('[DailyChallenge] 保存失败:', e.message); }
 }
 
 // ===== 多账号系统（超级管理员可创建 admin / superadmin 账号，自定义名称+密码）=====
@@ -1252,26 +1329,39 @@ app.post('/api/superadmin/login', async (req, res) => {
 app.post('/api/superadmin/change-password', requireSuperAdminAuth, async (req, res) => {
     try {
         const { target, newPassword } = req.body || {};
-        if (target !== 'superadmin' && target !== 'admin') {
-            return res.status(400).json({ success: false, message: 'target 必须为 superadmin 或 admin' });
-        }
         if (!newPassword || String(newPassword).length < 1) {
             return res.status(400).json({ success: false, message: '新密码不能为空' });
         }
-        const filePath = target === 'admin' ? path.join(__dirname, 'admin-password.txt') : SUPERADMIN_PASSWORD_PATH;
-        fs.writeFileSync(filePath, bcrypt.hashSync(String(newPassword), 10));
-        // 同步更新默认账号（acc_admin / acc_superadmin）的密码哈希，保持一致
-        const defId = target === 'admin' ? 'acc_admin' : 'acc_superadmin';
-        const defAcc = getAccountById(defId);
-        if (defAcc) { defAcc.passwordHash = bcrypt.hashSync(String(newPassword), 10); saveAccounts(); }
-        if (target === 'admin') {
-            adminTokens.clear(); // 改密后使旧管理员令牌失效
-            appendAudit('superadmin', 'change-admin-password', '修改了管理员密码', req);
-        } else {
-            superAdminTokens.clear();
-            appendAudit('superadmin', 'change-superadmin-password', '修改了超级管理员密码', req);
+        // target 可以是内置角色 'admin'/'superadmin'，也可以是自定义账号 id（acc_xxx）
+        const isBuiltIn = target === 'admin' || target === 'superadmin';
+        const account = isBuiltIn ? null : getAccountById(target);
+        if (!isBuiltIn && !account) {
+            return res.status(404).json({ success: false, message: '账号不存在' });
         }
-        res.json({ success: true, message: `已更新 ${target} 密码` });
+        const hash = bcrypt.hashSync(String(newPassword), 10);
+        if (isBuiltIn) {
+            const filePath = target === 'admin' ? path.join(__dirname, 'admin-password.txt') : SUPERADMIN_PASSWORD_PATH;
+            fs.writeFileSync(filePath, hash);
+            // 同步更新默认账号（acc_admin / acc_superadmin）的密码哈希，保持一致
+            const defId = target === 'admin' ? 'acc_admin' : 'acc_superadmin';
+            const defAcc = getAccountById(defId);
+            if (defAcc) { defAcc.passwordHash = hash; await saveAccounts(); }
+            if (target === 'admin') {
+                adminTokens.clear(); // 改密后使旧管理员令牌失效
+                appendAudit('superadmin', 'change-admin-password', '修改了管理员密码', req);
+            } else {
+                superAdminTokens.clear();
+                appendAudit('superadmin', 'change-superadmin-password', '修改了超级管理员密码', req);
+            }
+            res.json({ success: true, message: `已更新 ${target} 密码` });
+        } else {
+            account.passwordHash = hash;
+            await saveAccounts();
+            // 使该角色所有令牌失效，确保被改密账号立即下线
+            if (account.role === 'superadmin') superAdminTokens.clear(); else adminTokens.clear();
+            appendAudit('superadmin', 'change-account-password', `修改了 ${account.role} 账号「${account.name}」的密码`, req);
+            res.json({ success: true, message: `已更新账号 ${account.name} 的密码` });
+        }
     } catch (e) {
         console.error('[SuperAdmin] 改密失败:', e);
         res.status(500).json({ success: false, message: '操作失败' });
@@ -1330,6 +1420,33 @@ app.get('/api/superadmin/accounts', requireSuperAdminAuth, (req, res) => {
         createdBy: a.createdBy, createdAt: a.createdAt, lastIp: a.lastIp, disabled: !!a.disabled
     }));
     res.json({ success: true, accounts: list });
+});
+
+// 删除自定义账号（不能删除内置默认账号 acc_admin / acc_superadmin）
+app.delete('/api/superadmin/accounts/:accountId', requireSuperAdminAuth, async (req, res) => {
+    try {
+        const accountId = req.params.accountId;
+        if (accountId === 'acc_admin' || accountId === 'acc_superadmin') {
+            return res.status(400).json({ success: false, message: '不能删除内置默认账号' });
+        }
+        const idx = accounts.findIndex(a => a.id === accountId);
+        if (idx === -1) return res.status(404).json({ success: false, message: '账号不存在' });
+        const account = accounts[idx];
+        accounts.splice(idx, 1);
+        // 同步从数据库删除
+        if (DB_AVAILABLE && pool) {
+            try { await pool.query('DELETE FROM accounts WHERE id=?', [accountId]); }
+            catch (e) { console.error('[Accounts] DB 删除账号失败:', e.message); }
+        }
+        await saveAccounts();
+        // 使该角色所有令牌失效，确保被删除账号立即下线
+        if (account.role === 'superadmin') superAdminTokens.clear(); else adminTokens.clear();
+        appendAudit('superadmin', 'delete-account', `删除了 ${account.role} 账号「${account.name}」`, req);
+        res.json({ success: true, message: `已删除账号 ${account.name}` });
+    } catch (e) {
+        console.error('[SuperAdmin] 删除账号失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
 });
 
 // 禁用 / 启用 管理员账号
@@ -3790,6 +3907,144 @@ app.delete('/api/admin/mazes/:mazeId', requireAdminAuth, (req, res) => {
     }
 });
 
+// ===== 玩家工坊地图（玩家保存/分享，按作者归属；admin 可查看/删除/禁用/禁止分享）=====
+const playerMazes = new Map(); // mazeId -> 玩家地图对象
+const PLAYER_MAZES_FILE = path.join(DATA_DIR, 'player-mazes.json');
+function loadPlayerMazes() {
+    try {
+        if (fs.existsSync(PLAYER_MAZES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(PLAYER_MAZES_FILE, 'utf8'));
+            if (Array.isArray(arr)) {
+                arr.forEach(m => playerMazes.set(m.id, m));
+                console.log(`[工坊] 已从 ${PLAYER_MAZES_FILE} 加载 ${playerMazes.size} 个玩家地图`);
+            }
+        }
+    } catch (e) { console.error('[工坊] 加载玩家地图失败:', e.message); }
+}
+function savePlayerMazes() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(PLAYER_MAZES_FILE, JSON.stringify(Array.from(playerMazes.values()), null, 2));
+    } catch (e) { console.error('[工坊] 保存玩家地图失败:', e.message); }
+}
+loadPlayerMazes();
+
+// 玩家上报/保存自己的地图（公开，需 clientId 归属）
+app.post('/api/player-mazes', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const clientId = b.clientId || (req.headers['x-client-id'] || '').toString() || '';
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId，无法归属地图' });
+        const name = (b.name || '').toString().trim();
+        if (!name) return res.status(400).json({ success: false, message: '地图名称不能为空' });
+        let maze = null;
+        if (b.mazeId && playerMazes.has(b.mazeId)) {
+            const existing = playerMazes.get(b.mazeId);
+            if (existing.author === clientId) maze = existing; // 仅作者可更新自己的图
+        }
+        const now = Date.now();
+        if (!maze) {
+            maze = { id: 'pmaze_' + now.toString(36) + '_' + Math.random().toString(36).substr(2, 5), createdAt: now, noShare: false, disabled: false, playCount: 0 };
+        }
+        maze.name = name;
+        maze.description = b.description || '';
+        maze.difficulty = b.difficulty || '中等';
+        maze.size = b.size || (b.maze && b.maze[0] ? { width: b.maze[0].length, height: b.maze.length } : { width: 10, height: 10 });
+        maze.maze = b.maze || null;
+        maze.teleporters = b.teleporters || [];
+        maze.enemySpeed = b.enemySpeed || 1;
+        maze.showShop = b.showShop !== false;
+        maze.author = clientId;
+        maze.authorName = b.authorName || '玩家';
+        maze.accountId = b.accountId || null;
+        maze.isShared = b.isShared === true;
+        // noShare / disabled 由 admin 控制，玩家更新时不覆盖
+        maze.updatedAt = now;
+        playerMazes.set(maze.id, maze);
+        savePlayerMazes();
+        console.log(`[工坊] 玩家 ${clientId} ${b.mazeId ? '更新' : '保存'}地图: ${maze.name} (${maze.id})`);
+        res.json({ success: true, message: '地图已保存', maze: { id: maze.id, name: maze.name, isShared: maze.isShared } });
+    } catch (e) {
+        console.error('[工坊] 保存玩家地图失败:', e);
+        res.status(500).json({ success: false, message: '保存失败' });
+    }
+});
+
+// 公开：浏览玩家分享的地图（过滤禁分享/禁用）
+app.get('/api/browse-mazes', (req, res) => {
+    try {
+        const list = Array.from(playerMazes.values())
+            .filter(m => m.isShared && !m.noShare && !m.disabled)
+            .sort((a, b) => (b.playCount || 0) - (a.playCount || 0) || (b.createdAt || 0) - (a.createdAt || 0))
+            .map(m => ({
+                id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
+                size: m.size, maze: m.maze, teleporters: m.teleporters || [], enemySpeed: m.enemySpeed || 1,
+                showShop: m.showShop !== false, authorName: m.authorName, playCount: m.playCount || 0,
+                createdAt: m.createdAt, updatedAt: m.updatedAt
+            }));
+        res.json({ success: true, mazes: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 管理员：获取某玩家的全部地图（按 clientId 或 accountId）
+app.get('/api/admin/users/:userId/mazes', requireAdminAuth, (req, res) => {
+    try {
+        const uid = req.params.userId;
+        const list = Array.from(playerMazes.values())
+            .filter(m => m.author === uid || m.accountId === uid)
+            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+            .map(m => ({
+                id: m.id, name: m.name, description: m.description, difficulty: m.difficulty,
+                size: m.size, isShared: m.isShared, noShare: !!m.noShare, disabled: !!m.disabled,
+                playCount: m.playCount || 0, createdAt: m.createdAt, updatedAt: m.updatedAt
+            }));
+        res.json({ success: true, mazes: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 管理员：更新玩家地图标志（禁用/禁止分享/改名）
+app.put('/api/admin/player-mazes/:mazeId', requireAdminAuth, async (req, res) => {
+    try {
+        const mazeId = req.params.mazeId;
+        const maze = playerMazes.get(mazeId);
+        if (!maze) return res.status(404).json({ success: false, message: '地图不存在' });
+        const b = req.body || {};
+        if (b.disabled !== undefined) maze.disabled = !!b.disabled;
+        if (b.noShare !== undefined) maze.noShare = !!b.noShare;
+        if (b.name !== undefined) maze.name = String(b.name).trim() || maze.name;
+        maze.updatedAt = Date.now();
+        playerMazes.set(mazeId, maze);
+        savePlayerMazes();
+        appendAudit('admin', 'player-maze-edit', `编辑玩家地图 ${maze.name} (${mazeId}) disabled=${maze.disabled} noShare=${maze.noShare}`);
+        console.log(`[Admin] 编辑玩家地图: ${maze.name} (${mazeId})`);
+        res.json({ success: true, message: '已更新', maze: { id: maze.id, disabled: maze.disabled, noShare: maze.noShare } });
+    } catch (e) {
+        console.error('[API] 编辑玩家地图失败:', e);
+        res.status(500).json({ success: false, message: '更新失败' });
+    }
+});
+
+// 管理员：删除玩家地图
+app.delete('/api/admin/player-mazes/:mazeId', requireAdminAuth, async (req, res) => {
+    try {
+        const mazeId = req.params.mazeId;
+        if (!playerMazes.has(mazeId)) return res.status(404).json({ success: false, message: '地图不存在' });
+        const m = playerMazes.get(mazeId);
+        playerMazes.delete(mazeId);
+        savePlayerMazes();
+        appendAudit('admin', 'player-maze-delete', `删除玩家地图 ${m.name} (${mazeId})`);
+        console.log(`[Admin] 删除玩家地图: ${mazeId}`);
+        res.json({ success: true, message: '地图删除成功' });
+    } catch (e) {
+        console.error('[API] 删除玩家地图失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
 // ===== 新增：用户页面访问控制 / 功能控制（管理员专用） =====
 app.post('/api/admin/access', requireAdminAuth, (req, res) => {
     try {
@@ -3854,6 +4109,71 @@ app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
         res.json({ success: true, message: '全局功能设定已保存并广播', functions: Object.assign({}, globalFunctions) });
     } catch (error) {
         console.error('[API] 保存全局功能设定失败:', error);
+        res.status(500).json({ success: false, message: '保存失败' });
+    }
+});
+
+// ===== 每日挑战自定义配置（admin 可编辑并设持续天数，默认1天）=====
+const VALID_DAILY_TYPES = ['speed', 'steps', 'no_traps', 'collection'];
+
+// 公开接口：游戏客户端拉取当前生效的每日挑战配置（含过期判断）。无需鉴权。
+app.get('/api/daily-challenge-config', (req, res) => {
+    const cfg = dailyChallengeConfig || {};
+    if (!cfg.enabled) return res.json({ enabled: false });
+    const today = serverTodayString();
+    const start = cfg.startDate || today;
+    const dur = Math.max(1, parseInt(cfg.durationDays, 10) || 1);
+    const expire = addDaysToDateString(start, dur); // 生效区间 [start, expire)
+    if (today < start || today >= expire) {
+        return res.json({ enabled: false, expired: true });
+    }
+    res.json({
+        enabled: true,
+        type: VALID_DAILY_TYPES.includes(cfg.type) ? cfg.type : 'speed',
+        level: parseInt(cfg.level, 10) || 0, // 0 = 客户端按日期自动
+        durationDays: dur,
+        startDate: start,
+        expiresOn: expire,
+        rewards: (cfg.rewards && (cfg.rewards.coins > 0 || cfg.rewards.stars > 0))
+            ? { coins: parseInt(cfg.rewards.coins, 10) || 0, stars: parseInt(cfg.rewards.stars, 10) || 0 }
+            : null
+    });
+});
+
+// 管理接口：保存每日挑战自定义配置（需管理员令牌）
+app.put('/api/admin/daily-challenge', requireAdminAuth, async (req, res) => {
+    try {
+        const b = req.body || {};
+        const enabled = b.enabled === true;
+        const type = VALID_DAILY_TYPES.includes(b.type) ? b.type : (dailyChallengeConfig.type || 'speed');
+        const level = Math.max(0, parseInt(b.level, 10) || 0);
+        const durationDays = Math.max(1, Math.min(365, parseInt(b.durationDays, 10) || 1));
+        const startDate = (typeof b.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.startDate))
+            ? b.startDate
+            : serverTodayString();
+        let rewards = null;
+        if (b.rewards && (parseInt(b.rewards.coins, 10) > 0 || parseInt(b.rewards.stars, 10) > 0)) {
+            rewards = {
+                coins: Math.max(0, parseInt(b.rewards.coins, 10) || 0),
+                stars: Math.max(0, parseInt(b.rewards.stars, 10) || 0)
+            };
+        }
+        dailyChallengeConfig = {
+            enabled: enabled,
+            type: type,
+            level: level,
+            durationDays: durationDays,
+            startDate: startDate,
+            rewards: rewards,
+            createdAt: new Date().toISOString(),
+            createdBy: (req.admin && (req.admin.name || req.admin.role)) || 'admin'
+        };
+        await saveDailyChallengeConfig();
+        appendAudit('admin', 'daily-challenge-edit', `编辑每日挑战: type=${type}, level=${level}, duration=${durationDays}天, enabled=${enabled}`);
+        console.log('[Admin] 每日挑战配置已保存:', dailyChallengeConfig);
+        res.json({ success: true, message: '每日挑战配置已保存', config: Object.assign({}, dailyChallengeConfig) });
+    } catch (error) {
+        console.error('[API] 保存每日挑战配置失败:', error);
         res.status(500).json({ success: false, message: '保存失败' });
     }
 });
@@ -4748,7 +5068,7 @@ server.listen(PORT, () => {
     await loadUserRoles();
     await loadUserSettings();
     await loadGlobalFunctions();
+    await loadDailyChallengeConfig();
     await loadAccounts();
     await loadHomeProfiles();
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
-x
