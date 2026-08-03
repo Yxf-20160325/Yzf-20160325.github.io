@@ -1098,7 +1098,7 @@ function getRevokedKeys(userId) {
 // 上报本地进度时把管理员“全部通关”授予的进度整体覆盖掉。
 function mergeProgress(id, p) {
     if (!id || !p || typeof p !== 'object') return;
-    const cur = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], lastReportedAt: null };
+    const cur = reportedProgress.get(id) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], customCompletedLevels: [], lastReportedAt: null };
     if (typeof p.unlockedLevel === 'number' && !isNaN(p.unlockedLevel)) cur.unlockedLevel = Math.max(cur.unlockedLevel || 1, p.unlockedLevel);
     if (Array.isArray(p.completedLevels)) {
         const set = new Set([...(cur.completedLevels || []), ...p.completedLevels]);
@@ -1107,6 +1107,10 @@ function mergeProgress(id, p) {
     if (Array.isArray(p.puzzleCompletedLevels)) {
         const set = new Set([...(cur.puzzleCompletedLevels || []), ...p.puzzleCompletedLevels]);
         cur.puzzleCompletedLevels = Array.from(set).filter(n => typeof n === 'number' && n > 0).slice(0, 200);
+    }
+    if (Array.isArray(p.customCompletedLevels)) {
+        const set = new Set([...(cur.customCompletedLevels || []), ...p.customCompletedLevels]);
+        cur.customCompletedLevels = Array.from(set).filter(n => typeof n === 'number' && n > 0).slice(0, 200);
     }
     cur.lastReportedAt = Date.now();
     reportedProgress.set(id, cur);
@@ -1995,7 +1999,7 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = req.body || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
         // 客户端上报的 UI 设置（供管理员后台查看/修改）
         if (uiSettings) setClientUISettings(id, uiSettings);
@@ -2004,7 +2008,7 @@ app.post('/api/player-online', (req, res) => {
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
         // 记录玩家上报的关卡进度（供管理员查看过关历史）
-        mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
+        mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels });
         // 记录玩家上报的成就数据（供管理员查看）
         if (achievements) mergeAchievements(id, achievements);
         const ip = getClientIp(req);
@@ -2058,7 +2062,8 @@ app.post('/api/player-online', (req, res) => {
             progress: {
                 unlockedLevel: prog.unlockedLevel || 1,
                 completedLevels: Array.isArray(prog.completedLevels) ? prog.completedLevels : [],
-                puzzleCompletedLevels: Array.isArray(prog.puzzleCompletedLevels) ? prog.puzzleCompletedLevels : []
+                puzzleCompletedLevels: Array.isArray(prog.puzzleCompletedLevels) ? prog.puzzleCompletedLevels : [],
+                customCompletedLevels: Array.isArray(prog.customCompletedLevels) ? prog.customCompletedLevels : []
             }
         });
     } catch (e) {
@@ -3354,7 +3359,7 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = data || {};
+        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = data || {};
         if (!id) return;
         const ip = getClientIp(socket.request);
         const role = getUserRole(id);
@@ -3377,7 +3382,7 @@ io.on('connection', (socket) => {
         }
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
-        mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels });
+        mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels });
         if (achievements) mergeAchievements(id, achievements);
         const _prof0 = playerProfiles.get(id) || {};
         const _locked = _prof0.statsAdminLocked === true;
@@ -3640,16 +3645,17 @@ io.on('connection', (socket) => {
             if (!targetId) return socket.emit('admin-action-result', { success: false, message: '缺少目标玩家' });
             const completedLevels = []; for (let i = 1; i <= MAX_SINGLE_LEVEL; i++) completedLevels.push(i);
             const puzzleCompletedLevels = []; for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) puzzleCompletedLevels.push(i);
-            mergeProgress(targetId, { unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels });
+            const customCompletedLevels = []; for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) customCompletedLevels.push(i);
+            mergeProgress(targetId, { unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels, customCompletedLevels });
             const cur = reportedAchievements.get(targetId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
             cur.allLevelsCompleted = true; cur.puzzleMaster = true;
             reportedAchievements.set(targetId, cur);
             const revoked = revokedAchievements.get(targetId);
             if (revoked) { revoked.delete('allLevelsCompleted'); revoked.delete('puzzleMaster'); if (revoked.size === 0) revokedAchievements.delete(targetId); else revokedAchievements.set(targetId, revoked); }
             io.emit('achievement-update', { clientId: targetId, achievements: cur });
-            io.emit('progress-update', { clientId: targetId, unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels });
-            appendAudit('superadmin', 'complete-all', `（游戏内SA）将 ${targetId} 单人/解密全部通关`);
-            socket.emit('admin-action-result', { success: true, message: `已将 ${targetId} 单人、解密全部通关` });
+            io.emit('progress-update', { clientId: targetId, unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels, customCompletedLevels });
+            appendAudit('superadmin', 'complete-all', `（游戏内SA）将 ${targetId} 单人/解密/自定义全部通关`);
+            socket.emit('admin-action-result', { success: true, message: `已将 ${targetId} 单人、解密、自定义全部通关` });
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
 
@@ -4340,7 +4346,7 @@ async function dbGetCloudMazes(username) {
 // ===== 云储存「通关数据」：每个账号一条进度记录 =====
 // 规范化前端传来的进度，仅保留通关相关字段并做数值校验
 function normalizeCloudProgress(p) {
-    const out = { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [] };
+    const out = { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], customCompletedLevels: [] };
     if (p && typeof p === 'object') {
         let ul = Number(p.unlockedLevel);
         if (isFinite(ul) && ul >= 1 && Number.isInteger(ul)) out.unlockedLevel = ul;
@@ -4350,6 +4356,9 @@ function normalizeCloudProgress(p) {
         if (Array.isArray(p.puzzleCompletedLevels)) {
             out.puzzleCompletedLevels = p.puzzleCompletedLevels.filter(n => Number.isFinite(Number(n)) && Number(n) >= 1 && Number.isInteger(Number(n))).map(Number);
         }
+        if (Array.isArray(p.customCompletedLevels)) {
+            out.customCompletedLevels = p.customCompletedLevels.filter(n => Number.isFinite(Number(n)) && Number(n) >= 1 && Number.isInteger(Number(n))).map(Number);
+        }
     }
     return out;
 }
@@ -4358,10 +4367,12 @@ function mergeCloudProgress(a, b) {
     const na = normalizeCloudProgress(a), nb = normalizeCloudProgress(b);
     const setLv = new Set([...na.completedLevels, ...nb.completedLevels]);
     const setPz = new Set([...na.puzzleCompletedLevels, ...nb.puzzleCompletedLevels]);
+    const setCz = new Set([...na.customCompletedLevels, ...nb.customCompletedLevels]);
     return {
         unlockedLevel: Math.max(na.unlockedLevel, nb.unlockedLevel),
         completedLevels: Array.from(setLv).sort((x, y) => x - y),
-        puzzleCompletedLevels: Array.from(setPz).sort((x, y) => x - y)
+        puzzleCompletedLevels: Array.from(setPz).sort((x, y) => x - y),
+        customCompletedLevels: Array.from(setCz).sort((x, y) => x - y)
     };
 }
 function cloudProgressOf(username) {
@@ -4700,6 +4711,7 @@ app.post('/api/cloud-storage/login', async (req, res) => {
 
 // 获取当前账号的云地图列表（含网格，用于下载）
 app.get('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const list = await dbGetCloudMazes(req.cloudUser);
         const out = list.map(m => ({
@@ -4720,6 +4732,7 @@ app.get('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
 
 // 上传/更新一张云地图（同 id 则覆盖；超过上限报错）
 app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const b = req.body || {};
         const name = (b.name || '').toString().trim();
@@ -4766,6 +4779,7 @@ app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
 
 // 删除自己的云地图
 app.delete('/api/cloud-storage/mazes/:id', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         let m = cloudMazes.get(req.params.id);
         if (!m) { const list = await dbGetCloudMazes(req.cloudUser); m = list.find(x => x.id === req.params.id); }
@@ -4780,6 +4794,7 @@ app.delete('/api/cloud-storage/mazes/:id', requireCloudAuth, async (req, res) =>
 
 // 获取当前账号云端「通关数据」（无则返回 progress:null）
 app.get('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const r = await dbGetCloudProgress(req.cloudUser);
         res.json({ success: true, progress: r.progress, updated_at: r.updated_at });
@@ -4791,6 +4806,7 @@ app.get('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
 
 // 上传（合并）当前账号「通关数据」到云端；进度只增不减（取最大关卡与并集通关列表）
 app.post('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const incoming = (req.body && req.body.progress) ? req.body.progress : req.body;
         if (!incoming || typeof incoming !== 'object') {
@@ -4806,6 +4822,7 @@ app.post('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
 
 // 列出当前账号所有登录设备/会话（标记当前设备）
 app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const list = await dbGetCloudSessions(req.cloudUser);
         const out = list.map(s => ({
@@ -4821,6 +4838,7 @@ app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
 });
 // 退出指定设备（吊销会话）
 app.delete('/api/cloud-storage/sessions/:id', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const id = req.params.id;
         const list = await dbGetCloudSessions(req.cloudUser);
@@ -4832,6 +4850,7 @@ app.delete('/api/cloud-storage/sessions/:id', requireCloudAuth, async (req, res)
 });
 // 退出其他所有设备（保留当前）
 app.delete('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         await dbDeleteCloudSessionsExcept(req.cloudUser, req.cloudSessionId);
         res.json({ success: true, message: '已退出其他所有设备' });
@@ -4889,6 +4908,7 @@ app.post('/api/admin/cloud-storage/accounts', requireAdminAuth, async (req, res)
             max_mazes: maxMazes, client_id: null, disabled: 0
         };
         await dbSaveCloudAccount(acc);
+        appendAudit('admin', 'cloud-account-create', `创建云储存账号「${username}」（容量 ${maxMazes >= CLOUD_UNLIMITED_THRESHOLD ? '无限' : maxMazes}）`, req);
         res.json({
             success: true,
             message: '云储存账号已创建',
@@ -4943,6 +4963,7 @@ app.delete('/api/admin/cloud-storage/accounts/:username', requireAdminAuth, asyn
         const acc = await dbGetCloudAccount(username);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         await dbDeleteCloudAccount(username);
+        appendAudit('admin', 'cloud-account-delete', `删除云储存账号「${username}」及其全部地图/会话`, req);
         res.json({ success: true, message: '已删除账号及其地图/会话' });
     } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
 });
@@ -4967,6 +4988,7 @@ app.put('/api/admin/cloud-storage/accounts/:username/ban', requireAdminAuth, asy
             acc.banned_until = null;
         }
         await dbSaveCloudAccount(acc);
+        appendAudit('admin', 'cloud-account-ban', `云储存账号「${username}」${disabled ? (acc.banned_until ? '限时封禁至 ' + acc.banned_until : '永久封禁') : '解封'}，并已退登其全部设备`, req);
         res.json({
             success: true, disabled,
             bannedUntil: acc.banned_until || null,
@@ -4989,6 +5011,7 @@ app.put('/api/admin/cloud-storage/accounts/:username/password', requireAdminAuth
         acc.password_hash = bcrypt.hashSync(password, 10);
         acc.updated_at = new Date().toISOString();
         await dbSaveCloudAccount(acc);
+        appendAudit('admin', 'cloud-account-password', `重置云储存账号「${username}」的密码`, req);
         res.json({ success: true, message: '密码已修改' });
     } catch (e) { res.status(500).json({ success: false, message: '修改失败' }); }
 });
@@ -5010,6 +5033,7 @@ app.put('/api/admin/cloud-storage/mazes/:id', requireAdminAuth, async (req, res)
         m.name = name;
         m.updated_at = new Date().toISOString();
         await dbUpsertCloudMaze(m);
+        appendAudit('admin', 'cloud-maze-rename', `将云地图 ${m.id} 改名为「${name}」`, req);
         res.json({ success: true, maze: { id: m.id, name: m.name } });
     } catch (e) { res.status(500).json({ success: false, message: '改名失败' }); }
 });
@@ -5025,12 +5049,14 @@ app.delete('/api/admin/cloud-storage/mazes/:id', requireAdminAuth, async (req, r
         }
         if (!exists) return res.status(404).json({ success: false, message: '地图不存在' });
         await dbDeleteCloudMaze(req.params.id);
+        appendAudit('admin', 'cloud-maze-delete', `删除云地图 ${req.params.id}`, req);
         res.json({ success: true, message: '已删除' });
     } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
 });
 
 // 客户端兑换扩容码：校验使用次数 / IP / 是否已用，写回账号容量
 app.post('/api/cloud-storage/redeem', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
         const raw = (req.body && req.body.code || '').toString().toUpperCase().replace(/[\s-]/g, '');
         if (!raw) return res.status(400).json({ success: false, message: '请输入扩容码' });
@@ -5102,6 +5128,7 @@ app.post('/api/admin/cloud-codes', requireAdminAuth, async (req, res) => {
             active: 1, redeemed_by: []
         };
         await dbUpsertCloudCode(obj);
+        appendAudit('admin', 'cloud-code-create', `生成扩容码 ${code}（容量 ${capacity}，可用 ${maxUses} 次）`, req);
         res.json({ success: true, code, maxUses, capacity, allowedIps, message: '生成成功' });
     } catch (e) {
         console.error('[云储存] 生成扩容码失败:', e);
@@ -5130,6 +5157,7 @@ app.delete('/api/admin/cloud-codes/:code', requireAdminAuth, async (req, res) =>
         const c = await dbGetCloudCode(code);
         if (!c) return res.status(404).json({ success: false, message: '扩容码不存在' });
         await dbDeleteCloudCode(code);
+        appendAudit('admin', 'cloud-code-void', `作废扩容码 ${code}`, req);
         res.json({ success: true, message: '已作废' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
@@ -5193,6 +5221,7 @@ app.delete('/api/admin/cloud-storage/devices', requireAdminAuth, async (req, res
         const uname = acc ? acc.username : username;
         if (!uname) return res.status(400).json({ success: false, message: '缺少 username 或 clientId' });
         await dbDeleteCloudSession(id);
+        appendAudit('admin', 'cloud-device-logout', `退登云储存账号「${uname}」的设备 ${id}`, req);
         res.json({ success: true, message: '已退登该设备' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
@@ -5959,16 +5988,18 @@ app.post('/api/admin/rooms/:roomId/change-max-players', requireAdminAuth, (req, 
 app.get('/api/admin/users/:userId/level-history', requireAdminAuth, (req, res) => {
     try {
         const userId = req.params.userId;
-        const p = reportedProgress.get(userId) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], lastReportedAt: null };
+        const p = reportedProgress.get(userId) || { unlockedLevel: 1, completedLevels: [], puzzleCompletedLevels: [], customCompletedLevels: [], lastReportedAt: null };
         res.json({
             success: true,
             userId: userId,
             unlockedLevel: p.unlockedLevel || 1,
             completedLevels: Array.isArray(p.completedLevels) ? p.completedLevels : [],
             puzzleCompletedLevels: Array.isArray(p.puzzleCompletedLevels) ? p.puzzleCompletedLevels : [],
+            customCompletedLevels: Array.isArray(p.customCompletedLevels) ? p.customCompletedLevels : [],
             lastReportedAt: p.lastReportedAt || null,
             maxSingle: 80,
-            maxPuzzle: 60
+            maxPuzzle: 60,
+            maxCustom: 60
         });
     } catch (error) {
         console.error('[API] 获取过关历史失败:', error);
@@ -5994,8 +6025,8 @@ app.post('/api/admin/users/:userId/level-permission', requireAdminAuth, (req, re
     try {
         const userId = req.params.userId;
         const { key, state } = req.body || {};
-        if (!/^(single|puzzle):\d+$/.test(key || '')) {
-            return res.status(400).json({ success: false, message: 'key 格式应为 single:N 或 puzzle:N' });
+        if (!/^(single|puzzle|custom):\d+$/.test(key || '')) {
+            return res.status(400).json({ success: false, message: 'key 格式应为 single:N / puzzle:N / custom:N' });
         }
         if (!['forbidden', 'forced', 'normal'].includes(state)) {
             return res.status(400).json({ success: false, message: 'state 必须为 forbidden / forced / normal' });
@@ -6125,8 +6156,11 @@ app.post('/api/admin/users/:userId/complete-all', requireAdminAuth, (req, res) =
         // 解密关卡 1..MAX_PUZZLE_LEVEL 全部完成
         const puzzleCompletedLevels = [];
         for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) puzzleCompletedLevels.push(i);
+        // 自定义关卡 1..MAX_PUZZLE_LEVEL 全部完成
+        const customCompletedLevels = [];
+        for (let i = 1; i <= MAX_PUZZLE_LEVEL; i++) customCompletedLevels.push(i);
 
-        mergeProgress(userId, { unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels });
+        mergeProgress(userId, { unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels, customCompletedLevels });
 
         // 授予成就：迷宫大师（全部单人通关）+ 解密高手（全部解密通关）
         const cur = reportedAchievements.get(userId) || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
@@ -6149,11 +6183,12 @@ app.post('/api/admin/users/:userId/complete-all', requireAdminAuth, (req, res) =
             clientId: userId,
             unlockedLevel: MAX_SINGLE_LEVEL,
             completedLevels: completedLevels,
-            puzzleCompletedLevels: puzzleCompletedLevels
+            puzzleCompletedLevels: puzzleCompletedLevels,
+            customCompletedLevels: customCompletedLevels
         });
-        console.log(`[Admin] 已将 ${userId} 单人 / 解密全部通关，并授予 迷宫大师 + 解密高手`);
-        appendAudit('admin', 'complete-all', `将 ${userId} 单人/解密全部通关`);
-        res.json({ success: true, message: `已将 ${userId} 单人、解密全部通关`, achievements: cur });
+        console.log(`[Admin] 已将 ${userId} 单人 / 解密 / 自定义全部通关，并授予 迷宫大师 + 解密高手`);
+        appendAudit('admin', 'complete-all', `将 ${userId} 单人/解密/自定义全部通关`);
+        res.json({ success: true, message: `已将 ${userId} 单人、解密、自定义全部通关`, achievements: cur });
     } catch (error) {
         console.error('[API] 全部通关失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
@@ -6427,6 +6462,7 @@ app.delete('/api/admin/server-errors', requireAdminAuth, (req, res) => {
     serverErrors = [];
     recentLogs = [];
     try { if (fs.existsSync(SERVER_ERRORS_FILE)) fs.writeFileSync(SERVER_ERRORS_FILE, ''); } catch (_) {}
+    appendAudit('admin', 'clear-server-errors', '清空了全部服务端报错与运行日志', req);
     res.json({ success: true, message: '已清空服务器报错与日志' });
 });
 // 全局请求级错误兜底：捕获路由内未处理的异常，避免进程崩溃并记入日志
