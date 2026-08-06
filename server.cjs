@@ -36,7 +36,7 @@ let DB_AVAILABLE = false;
 // 默认数据库连接（已写入 server；部署到 onrender 等平台时，若设置了同名环境变量则覆盖此处默认值）。
 // 你已配好的 DB_HOST / DB_PORT 通过环境变量传入即可覆盖下面两个默认值。
 const DEFAULT_DB = {
-    host: process.env.DB_HOST || 'nu3uys.h.filess.io',
+    host: process.env.DB_HOST,
     port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3307,
     user: process.env.DB_USER || 'maze_graysetsor',
     password: process.env.DB_PASSWORD || '4c613aeb828b9923c8b12b63b11373f2a31a3357',
@@ -1291,18 +1291,23 @@ async function dbSaveBanHistory(rec) {
     saveBanHistoryJson();
 }
 
-// 标记某条历史为「已解封」（按 type+target 找最新一条未解封记录）
+// 标记历史为「已解封」：同一 type+target 可能有多条独立记录（每次封禁一条），
+// 取 bannedAt 最新的一条未解封记录标记（代表当前生效的那次封禁）
 async function dbUpdateBanHistoryUnban(type, target, by) {
     if (!target) return;
-    const key = 'bh_' + type + '_' + target;
-    const rec = banHistory.get(key);
-    if (!rec || rec.unbannedAt) return; // 没有记录或已解封则无需更新
-    rec.unbannedAt = new Date().toISOString();
-    rec.unbannedBy = by || 'admin';
+    let latest = null;
+    for (const rec of banHistory.values()) {
+        if (rec.type !== type || rec.target !== target) continue;
+        if (rec.unbannedAt) continue;
+        if (!latest || String(rec.bannedAt) > String(latest.bannedAt)) latest = rec;
+    }
+    if (!latest) return; // 没有未解封记录则无需更新
+    latest.unbannedAt = new Date().toISOString();
+    latest.unbannedBy = by || 'admin';
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query('UPDATE ban_history SET unbanned_at=?, unbanned_by=? WHERE id=?',
-                [rec.unbannedAt, rec.unbannedBy, key]);
+                [latest.unbannedAt, latest.unbannedBy, latest.id]);
             return;
         } catch (e) { console.error('[封禁历史] DB 解封更新失败:', e.message); }
     }
@@ -1358,7 +1363,7 @@ async function applyIPBan(ipKey, reason, expiresAt, actor, meta) {
     await dbSaveBannedIP(rec);
     // 写入封禁历史（供反作弊标签页展示，含后续解封状态）
     await dbSaveBanHistory({
-        id: 'bh_ip_' + rec.ip,
+        id: 'bh_ip_' + rec.ip + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         type: 'ip',
         target: rec.ip,
         username: rec.username,
@@ -1450,6 +1455,30 @@ const IP_BAN_CHEAT_TYPES = {
     anti_debug_tamper: 5,
     devtools_open: 5
 };
+// 反调试类封禁时长：首次 3 小时，按被封次数翻倍递增，封顶 7 天（168 小时）
+// 用于「打开开发者工具 / 篡改反调试遮罩」这类对抗行为的渐进式惩罚
+const DEVTOOLS_BAN_BASE_HOURS = 3;
+const DEVTOOLS_BAN_MAX_HOURS = 24 * 7;
+
+// 统计某 clientId 历史上的反调试类 IP 封禁次数（用于按次数递增封禁时长）
+async function countDevtoolsBans(clientId) {
+    if (!clientId) return 0;
+    const key = String(clientId).slice(0, 64);
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query(
+                "SELECT COUNT(*) AS c FROM ban_history WHERE client_id=? AND type='ip' AND (reason LIKE ? OR reason LIKE ?)",
+                [key, '%开发者工具%', '%反调试%']
+            );
+            return (rows[0] && rows[0].c) || 0;
+        } catch (e) { /* 回退 JSON 模式 */ }
+    }
+    let c = 0;
+    banHistory.forEach(r => {
+        if (r.clientId === key && r.type === 'ip' && /开发者工具|反调试/.test(r.reason || '')) c++;
+    });
+    return c;
+}
 const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, message, image, isAdmin, time}]，房间聊天记录（客户端镜像上报，供管理员监管），每房间上限 200 条
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
@@ -2991,23 +3020,46 @@ app.post('/api/report-cheat', (req, res) => {
 
         // ===== 严重违规：直接按 IP 封禁 =====
         // 篡改/移除反调试遮罩属于主动对抗反作弊系统的行为，比普通作弊更严重，
-        // 因此不只封玩法，而是连同 IP 一起封禁（时长见 IP_BAN_CHEAT_TYPES）。
+        // 因此不只封玩法，而是连同 IP 一起封禁。反调试类按次数递增时长（见下方）。
         const ipBanDays = IP_BAN_CHEAT_TYPES[report.type];
         if (ipBanDays) {
             const cheatIp = getClientIp(req);
             if (cheatIp) {
-                const banReason = `反作弊系统自动封禁：检测到${CHEAT_TYPE_NAMES[report.type] || report.type}`;
-                const expiresAt = new Date(Date.now() + ipBanDays * 86400000).toISOString();
-                // 反查云账号用户名（若有），便于反作弊标签页展示被封玩家身份；失败不影响封禁
+                const isDevtoolsType = (report.type === 'devtools_open' || report.type === 'anti_debug_tamper');
+                let banReason = `反作弊系统自动封禁：检测到${CHEAT_TYPE_NAMES[report.type] || report.type}`;
                 Promise.resolve()
                     .then(async () => {
-                        try { const acc = await dbGetCloudAccountByClient(report.clientId); return acc ? acc.username : null; }
-                        catch (e) { return null; }
+                        // 优先用游戏内玩家名展示身份，其次回退云账号名（不再默认显示云账号名）
+                        const acc = await dbGetCloudAccountByClient(report.clientId).catch(() => null);
+                        const banUsername = (req.body && req.body.playerName) ? String(req.body.playerName).slice(0, 128) : (acc ? acc.username : null);
+                        let expiresAt, durationText;
+                        if (isDevtoolsType) {
+                            // 反调试类：首次 3 小时，按历史次数翻倍递增，封顶 7 天
+                            const prev = await countDevtoolsBans(report.clientId); // 历史次数（不含本次）
+                            const nextCount = prev + 1;
+                            let hours = DEVTOOLS_BAN_BASE_HOURS * Math.pow(2, prev);
+                            const permanent = hours >= DEVTOOLS_BAN_MAX_HOURS;
+                            if (permanent) hours = DEVTOOLS_BAN_MAX_HOURS;
+                            expiresAt = permanent ? null : new Date(Date.now() + hours * 3600000).toISOString();
+                            durationText = permanent ? '永久' : (hours + ' 小时');
+                            banReason += `（第 ${nextCount} 次，封禁 ${durationText}）`;
+                            report._devCount = nextCount;
+                            report._devDurationText = durationText;
+                        } else {
+                            expiresAt = new Date(Date.now() + ipBanDays * 86400000).toISOString();
+                            durationText = ipBanDays + ' 天';
+                        }
+                        report._devExpiresAt = expiresAt;
+                        return { banUsername, expiresAt, durationText };
                     })
-                    .then(banUsername => applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat', { username: banUsername, clientId: report.clientId }))
+                    .then(({ banUsername, expiresAt, durationText }) =>
+                        applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat', { username: banUsername, clientId: report.clientId }))
                     .then(() => {
-                        console.log(`[反作弊] IP ${cheatIp} 因 ${report.type} 被自动封禁 ${ipBanDays} 天（至 ${expiresAt}）`);
-                        appendAudit('anti-cheat', 'ban-ip', `反作弊自动封禁 IP ${cheatIp} ${ipBanDays} 天（${report.type}，clientId=${report.clientId}）`, req);
+                        const dt = report._devDurationText || (ipBanDays + ' 天');
+                        const times = report._devCount ? `（第 ${report._devCount} 次）` : '';
+                        const expiresTxt = report._devExpiresAt || '永久';
+                        console.log(`[反作弊] IP ${cheatIp} 因 ${report.type} 被自动封禁 ${dt}${times}（至 ${expiresTxt}）`);
+                        appendAudit('anti-cheat', 'ban-ip', `反作弊自动封禁 IP ${cheatIp} ${dt}${times}（${report.type}，clientId=${report.clientId}）`, req);
                     })
                     .catch(e => console.error('[反作弊] 自动封禁 IP 失败:', e.message));
             } else {
@@ -5420,7 +5472,7 @@ app.put('/api/admin/cloud-storage/accounts/:username/ban', requireAdminAuth, asy
         if (disabled) {
             // 写入封禁历史（供反作弊标签页展示）
             await dbSaveBanHistory({
-                id: 'bh_cloud_' + username,
+                id: 'bh_cloud_' + username + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
                 type: 'cloud',
                 target: username,
                 username: username,
