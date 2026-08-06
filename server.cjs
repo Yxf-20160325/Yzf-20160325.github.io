@@ -250,6 +250,14 @@ const DB_TABLES_SQL = [
         progress JSON,
         updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS banned_ips (
+        ip VARCHAR(64) PRIMARY KEY,
+        reason TEXT,
+        banned_at VARCHAR(32),
+        expires_at VARCHAR(32) DEFAULT NULL,
+        banned_by VARCHAR(64),
+        INDEX idx_banned_expires (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS popular_mazes (
         id VARCHAR(64) PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
@@ -348,6 +356,7 @@ async function initDatabase() {
             } catch (e) { console.error('[迁移] 检查/补充 max_mazes 列失败:', e.message); }
             DB_AVAILABLE = true;
             loadCloudSessions().catch(e => console.error('[云储存] 会话载入失败:', e.message)); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
+            loadBannedIPs().catch(e => console.error('[IP封禁] 载入失败:', e.message));        // 从库恢复 IP 封禁（含限时封禁的剩余时长）
             console.log('🗄️ 已连接 MySQL 数据库，数据将持久化到数据库。');
             return;
         } catch (e) {
@@ -806,6 +815,13 @@ function getOperatorRole(req) {
 
 // 审计日志：记录谁(actor)在什么时间做了什么(action)
 function appendAudit(actor, action, detail, req) {
+    // 若 actor 是通用角色字面量、且本次请求携带真实管理员身份，则附加账号名，
+    // 便于追溯「哪个管理员对哪个用户做了什么」（detail 中已写明被操作的目标用户）
+    if ((actor === 'admin' || actor === 'superadmin') && req && req.admin) {
+        const nm = req.admin.name;
+        const role = req.admin.role || actor;
+        actor = nm ? (nm + '（' + role + '）') : role;
+    }
     const ip = (req && clientIp(req)) || currentReqIp || null;
     const entry = { ts: new Date().toISOString(), actor, action, detail: detail || '', ip };
     ensureDataDir();
@@ -1036,10 +1052,47 @@ function getClientIp(req) {
     } catch (e) { return ''; }
 }
 
-// 判断某 IP 是否已被管理员封禁
+// 判断某 IP 是否处于封禁中。expiresAt 为 null/空表示永久封禁；
+// 已到期的记录在此处惰性清理（内存 + 持久层），确保判定与存储始终一致。
 function isIPBanned(ip) {
     if (!ip) return false;
-    return bannedIPs.has(String(ip));
+    const key = String(ip);
+    const rec = bannedIPs.get(key);
+    if (!rec) return false;
+    if (ipBanExpired(rec)) {
+        bannedIPs.delete(key);
+        Promise.resolve(dbDeleteBannedIP(key)).catch(() => {});
+        return false;
+    }
+    return true;
+}
+
+// 封禁记录是否已到期（永久封禁恒为 false）
+function ipBanExpired(rec) {
+    if (!rec || !rec.expiresAt) return false;
+    const t = Date.parse(rec.expiresAt);
+    return !isNaN(t) && t <= Date.now();
+}
+
+// 取有效封禁记录（已到期返回 null，不做清理）
+function getIPBan(ip) {
+    if (!ip) return null;
+    const rec = bannedIPs.get(String(ip));
+    if (!rec || ipBanExpired(rec)) return null;
+    return rec;
+}
+
+// 人类可读的封禁期限描述，用于弹窗/日志
+function describeIPBan(rec) {
+    if (!rec || !rec.expiresAt) return '永久';
+    const ms = Date.parse(rec.expiresAt) - Date.now();
+    if (isNaN(ms) || ms <= 0) return '已到期';
+    const d = Math.floor(ms / 86400000);
+    const h = Math.floor((ms % 86400000) / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    if (d > 0) return `剩余 ${d} 天 ${h} 小时`;
+    if (h > 0) return `剩余 ${h} 小时 ${m} 分钟`;
+    return `剩余 ${Math.max(1, m)} 分钟`;
 }
 
 // 合并/更新玩家档案（保留历史 IP 与最近一次上报的字段）
@@ -1056,10 +1109,188 @@ function savePlayerProfile(id, fields) {
 const userAccess = new Map();      // userId -> 页面访问权限设置
 const userFunctions = new Map();   // userId -> 功能控制设置
 const userBans = new Map();        // userId(clientId) -> { multiplayer:bool, single:bool, puzzle:bool, chat:bool, reasons:{} }，管理员封禁状态
-const bannedIPs = new Map();     // ip -> { reason, bannedAt }，管理员按 IP 封禁（所有功能禁用 + 客户端强制全屏弹窗）
+// ip -> { ip, reason, bannedAt, expiresAt, bannedBy }，管理员按 IP 封禁（所有功能禁用 + 客户端强制全屏弹窗）
+// expiresAt 为 null 表示永久封禁，否则为 ISO 时间字符串（到期自动解封）。持久化到 banned_ips 表，JSON 兜底。
+const bannedIPs = new Map();
+
+// ===== IP 封禁持久化（DB 优先 + JSON 兜底，重启不丢失）=====
+const BANNED_IPS_FILE = path.join(DATA_DIR, 'banned-ips.json');
+
+function saveBannedIPsJson() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(BANNED_IPS_FILE, JSON.stringify(Array.from(bannedIPs.values()), null, 2));
+    } catch (e) { console.error('[IP封禁] JSON 保存失败:', e.message); }
+}
+
+// 统一把一行 DB 记录/JSON 记录归一化为内存结构
+function normalizeBanRecord(r) {
+    if (!r) return null;
+    return {
+        ip: String(r.ip || ''),
+        reason: r.reason || '',
+        bannedAt: r.bannedAt || r.banned_at || '',
+        expiresAt: r.expiresAt || r.expires_at || null,   // null = 永久
+        bannedBy: r.bannedBy || r.banned_by || 'admin'
+    };
+}
+
+async function loadBannedIPs() {
+    try {
+        if (DB_AVAILABLE && pool) {
+            const [rows] = await pool.query('SELECT * FROM banned_ips');
+            if (rows) rows.forEach(r => {
+                const rec = normalizeBanRecord(r);
+                if (rec && rec.ip) bannedIPs.set(rec.ip, rec);
+            });
+        } else if (fs.existsSync(BANNED_IPS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(BANNED_IPS_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(r => {
+                const rec = normalizeBanRecord(r);
+                if (rec && rec.ip) bannedIPs.set(rec.ip, rec);
+            });
+        }
+        // 启动即清掉已到期的记录，避免脏数据长期驻留
+        let expired = 0;
+        for (const [ip, rec] of Array.from(bannedIPs.entries())) {
+            if (ipBanExpired(rec)) { bannedIPs.delete(ip); await dbDeleteBannedIP(ip); expired++; }
+        }
+        console.log(`[IP封禁] 已载入 ${bannedIPs.size} 条封禁记录${expired ? `（清理过期 ${expired} 条）` : ''}`);
+    } catch (e) { console.error('[IP封禁] 载入失败:', e.message); }
+}
+
+async function dbSaveBannedIP(rec) {
+    if (!rec || !rec.ip) return;
+    bannedIPs.set(rec.ip, rec);
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO banned_ips (ip, reason, banned_at, expires_at, banned_by) VALUES (?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE reason=VALUES(reason), banned_at=VALUES(banned_at), expires_at=VALUES(expires_at), banned_by=VALUES(banned_by)',
+                [rec.ip, rec.reason || '', rec.bannedAt || '', rec.expiresAt || null, rec.bannedBy || 'admin']);
+            return;
+        } catch (e) { console.error('[IP封禁] DB 写入失败:', e.message); }
+    }
+    saveBannedIPsJson();
+}
+
+async function dbDeleteBannedIP(ip) {
+    if (!ip) return;
+    bannedIPs.delete(String(ip));
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM banned_ips WHERE ip=?', [String(ip)]); return; }
+        catch (e) { console.error('[IP封禁] DB 删除失败:', e.message); }
+    }
+    saveBannedIPsJson();
+}
+
+// 模块加载时先按 JSON 兜底载入；若随后 MySQL 连接成功，initDatabase 会再从库覆盖载入一次
+loadBannedIPs().catch(e => console.error('[IP封禁] 载入失败:', e.message));
+
+// 解析封禁时长请求体 -> expiresAt（null 表示永久）
+// 支持：{ permanent:true } | { durationDays:5 } | { durationHours:12 } | { durationMinutes:30 } | { expiresAt:'ISO' }
+// 三者可叠加（如 1天+12小时）。未指定任何时长时默认永久，与旧版行为保持一致。
+function parseBanExpiry(body) {
+    const b = body || {};
+    if (b.permanent === true) return null;
+    if (b.expiresAt) {
+        const t = Date.parse(b.expiresAt);
+        if (!isNaN(t) && t > Date.now()) return new Date(t).toISOString();
+    }
+    const days = Number(b.durationDays) || 0;
+    const hours = Number(b.durationHours) || 0;
+    const minutes = Number(b.durationMinutes) || 0;
+    const ms = days * 86400000 + hours * 3600000 + minutes * 60000;
+    if (ms > 0) return new Date(Date.now() + ms).toISOString();
+    return null; // 未指定 -> 永久
+}
+
+// 统一封禁入口：写持久层 + 封禁该 IP 下所有在线玩家的全部玩法 + 实时推送全屏弹窗
+// expiresAt 为 null 表示永久封禁
+async function applyIPBan(ipKey, reason, expiresAt, actor) {
+    const rec = {
+        ip: String(ipKey),
+        reason: (reason && String(reason).trim()) || '',
+        bannedAt: new Date().toISOString(),
+        expiresAt: expiresAt || null,
+        bannedBy: actor || 'admin'
+    };
+    await dbSaveBannedIP(rec);
+
+    const term = describeIPBan(rec);
+    const msg = 'IP 封禁：' + (rec.reason || '管理员封禁此 IP') + `（${term}）`;
+    for (const [uid, pl] of onlinePlayers.entries()) {
+        if (pl && pl.ip === rec.ip) {
+            const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+            if (!ban.reasons) ban.reasons = {};
+            ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
+            ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
+            userBans.set(uid, ban);
+            const sockId = onlineSockets.get(uid);
+            if (sockId && sockId !== 'rest') {
+                const sock = io.sockets.sockets.get(sockId);
+                if (sock) sock.emit('ip-banned', {
+                    reason: rec.reason,
+                    permanent: !rec.expiresAt,
+                    expiresAt: rec.expiresAt,
+                    term: term
+                });
+            }
+        }
+    }
+    return rec;
+}
+
+// 统一解封入口：删持久层 + 解除该 IP 下在线玩家封禁 + 通知客户端关闭弹窗
+async function removeIPBan(ipKey) {
+    const ip = String(ipKey);
+    await dbDeleteBannedIP(ip);
+    for (const [uid, pl] of onlinePlayers.entries()) {
+        if (pl && pl.ip === ip) {
+            const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+            if (!ban.reasons) ban.reasons = {};
+            ban.multiplayer = ban.single = ban.puzzle = ban.chat = false;
+            ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = '';
+            userBans.set(uid, ban);
+            const sockId = onlineSockets.get(uid);
+            if (sockId && sockId !== 'rest') {
+                const sock = io.sockets.sockets.get(sockId);
+                if (sock) sock.emit('ip-unbanned', {});
+            }
+        }
+    }
+}
+
+// 到期自动解封：每分钟扫描一次限时封禁记录，到点即恢复并通知在线客户端
+setInterval(() => {
+    try {
+        for (const [ip, rec] of Array.from(bannedIPs.entries())) {
+            if (ipBanExpired(rec)) {
+                removeIPBan(ip)
+                    .then(() => console.log(`[IP封禁] ${ip} 封禁到期，已自动解封`))
+                    .catch(e => console.error('[IP封禁] 自动解封失败:', e.message));
+            }
+        }
+    } catch (e) { console.error('[IP封禁] 到期扫描异常:', e.message); }
+}, 60 * 1000);
 // 玩家角色（游戏内权限）：userId -> { role:'user'|'admin'|'superadmin', setBy, setAt }
 let userRoles = new Map();
 const cheatReports = [];           // 反作弊上报记录：{ id, clientId, type, detail, time }
+// 作弊类型 -> 中文名（用于封禁提示与审计日志）
+const CHEAT_TYPE_NAMES = {
+    coin_tamper: '金币存档篡改',
+    coin_injection: '金币异常变动',
+    impossible_speed: '异常通关速度',
+    forged_complete: '伪造通关',
+    anti_debug_tamper: '篡改/移除反调试警告遮罩',
+    devtools_open: '打开开发者工具'
+};
+// 触发「直接按 IP 封禁」的严重作弊类型 -> 封禁天数
+// 这类行为是主动对抗反作弊系统本身，故按 IP 封禁而不仅仅封单个账号
+const IP_BAN_CHEAT_TYPES = {
+    anti_debug_tamper: 5,
+    devtools_open: 5
+};
 const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, message, image, isAdmin, time}]，房间聊天记录（客户端镜像上报，供管理员监管），每房间上限 200 条
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
@@ -2042,14 +2273,16 @@ app.post('/api/player-online', (req, res) => {
             username: (name && String(name).trim()) || existing.name || '玩家'
         });
         // 若客户端 IP 已被封禁，则对该用户启用全部功能封禁，并通知客户端弹全屏封禁框
-        let ipBanned = false, ipBanReason = '';
+        let ipBanned = false, ipBanReason = '', ipBanExpiresAt = null, ipBanTerm = '';
         if (isIPBanned(ip)) {
             const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
             if (!ban.reasons) ban.reasons = {};
             const rec = bannedIPs.get(String(ip)) || {};
             ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
             const reason = (rec.reason && String(rec.reason).trim()) || '';
-            const msg = 'IP 封禁：' + (reason || '管理员封禁此 IP');
+            ipBanExpiresAt = rec.expiresAt || null;
+            ipBanTerm = describeIPBan(rec);
+            const msg = 'IP 封禁：' + (reason || '管理员封禁此 IP') + `（${ipBanTerm}）`;
             ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
             userBans.set(id, ban);
             ipBanned = true; ipBanReason = msg;
@@ -2061,6 +2294,9 @@ app.post('/api/player-online', (req, res) => {
             success: true,
             ipBanned: ipBanned,
             ipBanReason: ipBanReason,
+            ipBanExpiresAt: ipBanExpiresAt,      // null = 永久封禁
+            ipBanPermanent: ipBanned && !ipBanExpiresAt,
+            ipBanTerm: ipBanTerm,
             role: role,
             uiSettings: getEffectiveUISettings(id),
             adminOverridden: !!(userSettings.get(id) || {}).admin,
@@ -2162,6 +2398,9 @@ app.get('/api/admin/users/:userId/info', requireAdminAuth, (req, res) => {
             ip: ipNow,
             ipBanned: isIPBanned(ipNow),
             ipBanReason: ipRec ? (ipRec.reason || '') : '',
+            ipBanExpiresAt: ipRec ? (ipRec.expiresAt || null) : null,   // null = 永久
+            ipBanPermanent: ipRec ? !ipRec.expiresAt : false,
+            ipBanTerm: ipRec ? describeIPBan(ipRec) : '',
             coins: (typeof prof.coins === 'number') ? prof.coins : (reportedCoins.get(userId) || 0),
             totalPlayTime: (typeof prof.totalPlayTime === 'number') ? prof.totalPlayTime : 0,
             gameStats: prof.gameStats || null,
@@ -2399,68 +2638,53 @@ app.post('/api/admin/users/kick-all', requireAdminAuth, (req, res) => {
 });
 
 // API: 管理员按 IP 封禁（该 IP 下所有玩家全部功能禁用，并强制弹出全屏封禁框）
-app.post('/api/admin/ban-ip', requireAdminAuth, (req, res) => {
+// 支持永久封禁与限时封禁：body 传 { permanent:true } 或 { durationDays/durationHours/durationMinutes }
+app.post('/api/admin/ban-ip', requireAdminAuth, async (req, res) => {
     try {
         const { ip, reason } = req.body || {};
         if (!ip || !String(ip).trim()) return res.status(400).json({ success: false, message: '缺少 ip' });
         const ipKey = String(ip).trim();
-        bannedIPs.set(ipKey, { reason: (reason && String(reason).trim()) || '', bannedAt: new Date().toISOString() });
-        // 对当前在线的同 IP 玩家：全部功能封禁 + 推送全屏封禁框
-        const msg = 'IP 封禁：' + ((reason && String(reason).trim()) || '管理员封禁此 IP');
-        for (const [uid, pl] of onlinePlayers.entries()) {
-            if (pl && pl.ip === ipKey) {
-                const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
-                if (!ban.reasons) ban.reasons = {};
-                ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
-                ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
-                userBans.set(uid, ban);
-                const sockId = onlineSockets.get(uid);
-                if (sockId && sockId !== 'rest') {
-                    const sock = io.sockets.sockets.get(sockId);
-                    if (sock) sock.emit('ip-banned', { reason: msg, permanent: true });
-                }
-            }
-        }
-        appendAudit('admin', 'ban-ip', `封禁 IP ${ipKey}${reason ? '，理由: ' + reason : ''}`);
-        res.json({ success: true, ip: ipKey, bannedIPs: Array.from(bannedIPs.keys()) });
+        const expiresAt = parseBanExpiry(req.body);
+        const rec = await applyIPBan(ipKey, reason, expiresAt, 'admin');
+        const term = describeIPBan(rec);
+        appendAudit('admin', 'ban-ip', `封禁 IP ${ipKey}（${expiresAt ? '限时至 ' + expiresAt : '永久'}）${reason ? '，理由: ' + reason : ''}`, req);
+        res.json({ success: true, ip: ipKey, expiresAt: rec.expiresAt, permanent: !rec.expiresAt, term, bannedIPs: Array.from(bannedIPs.keys()) });
     } catch (e) {
         res.status(500).json({ success: false, message: '封禁失败' });
     }
 });
 
 // API: 管理员解除 IP 封禁
-app.post('/api/admin/unban-ip', requireAdminAuth, (req, res) => {
+app.post('/api/admin/unban-ip', requireAdminAuth, async (req, res) => {
     try {
         const { ip } = req.body || {};
         if (!ip || !String(ip).trim()) return res.status(400).json({ success: false, message: '缺少 ip' });
         const ipKey = String(ip).trim();
-        bannedIPs.delete(ipKey);
-        // 对当前在线的同 IP 玩家：解除全部封禁 + 通知客户端关闭全屏框
-        for (const [uid, pl] of onlinePlayers.entries()) {
-            if (pl && pl.ip === ipKey) {
-                const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
-                if (!ban.reasons) ban.reasons = {};
-                ban.multiplayer = ban.single = ban.puzzle = ban.chat = false;
-                ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = '';
-                userBans.set(uid, ban);
-                const sockId = onlineSockets.get(uid);
-                if (sockId && sockId !== 'rest') {
-                    const sock = io.sockets.sockets.get(sockId);
-                    if (sock) sock.emit('ip-unbanned', {});
-                }
-            }
-        }
-        appendAudit('admin', 'unban-ip', `解封 IP ${ipKey}`);
+        await removeIPBan(ipKey);
+        appendAudit('admin', 'unban-ip', `解封 IP ${ipKey}`, req);
         res.json({ success: true, ip: ipKey, bannedIPs: Array.from(bannedIPs.keys()) });
     } catch (e) {
         res.status(500).json({ success: false, message: '解封失败' });
     }
 });
 
-// API: 管理员查看已封禁 IP 列表
+// API: 管理员查看已封禁 IP 列表（含到期时间与剩余时长，已过期的不返回）
 app.get('/api/admin/banned-ips', requireAdminAuth, (req, res) => {
     try {
-        const list = Array.from(bannedIPs.entries()).map(([ip, v]) => ({ ip, reason: v.reason || '', bannedAt: v.bannedAt || '' }));
+        const list = [];
+        for (const [ip, v] of bannedIPs.entries()) {
+            if (ipBanExpired(v)) continue;
+            list.push({
+                ip,
+                reason: v.reason || '',
+                bannedAt: v.bannedAt || '',
+                expiresAt: v.expiresAt || null,
+                permanent: !v.expiresAt,
+                term: describeIPBan(v),
+                bannedBy: v.bannedBy || 'admin'
+            });
+        }
+        list.sort((a, b) => String(b.bannedAt).localeCompare(String(a.bannedAt)));
         res.json({ success: true, bannedIPs: list });
     } catch (e) {
         res.status(500).json({ success: false, message: '查询失败' });
@@ -2601,9 +2825,30 @@ app.post('/api/report-cheat', (req, res) => {
         };
         cheatReports.push(report);
         if (cheatReports.length > 2000) cheatReports.shift(); // 防止无限增长
+
+        // ===== 严重违规：直接按 IP 封禁 =====
+        // 篡改/移除反调试遮罩属于主动对抗反作弊系统的行为，比普通作弊更严重，
+        // 因此不只封玩法，而是连同 IP 一起封禁（时长见 IP_BAN_CHEAT_TYPES）。
+        const ipBanDays = IP_BAN_CHEAT_TYPES[report.type];
+        if (ipBanDays) {
+            const cheatIp = getClientIp(req);
+            if (cheatIp) {
+                const banReason = `反作弊系统自动封禁：检测到${CHEAT_TYPE_NAMES[report.type] || report.type}`;
+                const expiresAt = new Date(Date.now() + ipBanDays * 86400000).toISOString();
+                applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat')
+                    .then(() => {
+                        console.log(`[反作弊] IP ${cheatIp} 因 ${report.type} 被自动封禁 ${ipBanDays} 天（至 ${expiresAt}）`);
+                        appendAudit('anti-cheat', 'ban-ip', `反作弊自动封禁 IP ${cheatIp} ${ipBanDays} 天（${report.type}，clientId=${report.clientId}）`, req);
+                    })
+                    .catch(e => console.error('[反作弊] 自动封禁 IP 失败:', e.message));
+            } else {
+                console.warn(`[反作弊] ${report.type} 触发，但无法获取客户端 IP，已跳过 IP 封禁`);
+            }
+        }
+
         // ===== 反作弊自动封禁：立即封禁其上报时所玩的玩法（管理员可在后台解封） =====
         const mode = (req.body && ['multiplayer', 'single', 'puzzle'].indexOf(req.body.mode) !== -1) ? req.body.mode : 'single';
-        const cheatTypeNames = { coin_tamper: '金币存档篡改', coin_injection: '金币异常变动', impossible_speed: '异常通关速度', forged_complete: '伪造通关' };
+        const cheatTypeNames = CHEAT_TYPE_NAMES;
         const autoBan = userBans.get(report.clientId) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
         if (!autoBan.reasons) autoBan.reasons = {};
         autoBan[mode] = true;
@@ -3408,10 +3653,11 @@ io.on('connection', (socket) => {
                 const rec = bannedIPs.get(String(ip)) || {};
                 ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
                 const reason = (rec.reason && String(rec.reason).trim()) || '';
-                const msg = 'IP 封禁：' + (reason || '管理员封禁此 IP');
+                const term = describeIPBan(rec);
+                const msg = 'IP 封禁：' + (reason || '管理员封禁此 IP') + `（${term}）`;
                 ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
                 userBans.set(id, ban);
-                socket.emit('ip-banned', { reason: msg, permanent: true });
+                socket.emit('ip-banned', { reason: reason, permanent: !rec.expiresAt, expiresAt: rec.expiresAt || null, term: term });
             }
             console.log(`[Online] 玩家 ${name} (${id}) 上线，IP ${ip}，当前在线 ${onlinePlayers.size} 人`);
         } catch (e) {
@@ -3612,7 +3858,7 @@ io.on('connection', (socket) => {
                     }
                 }
             }
-            appendAudit('superadmin', 'kick-player', `（游戏内SA）踢出玩家 ${nm} (${targetId})`);
+            appendAudit('superadmin', 'kick-player', `（游戏内SA ${requesterId}）踢出玩家 ${nm} (${targetId})`);
             socket.emit('admin-action-result', { success: true, message: `已踢出「${nm}」` });
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
@@ -3637,7 +3883,7 @@ io.on('connection', (socket) => {
                 puzzleReason: ban.reasons.puzzle || '', chatReason: ban.reasons.chat || ''
             });
             const label = { multiplayer: '多人游戏', single: '单人游戏', puzzle: '解密游戏', chat: '多人聊天' }[type];
-            appendAudit('superadmin', 'ban', `（游戏内SA）用户 ${userId} 的${label}${banned ? '封禁' : '解封'}`);
+            appendAudit('superadmin', 'ban', `（游戏内SA ${requesterId}）用户 ${userId} 的${label}${banned ? '封禁' : '解封'}`);
             socket.emit('admin-action-result', { success: true, message: `已${banned ? '封禁' : '解封'} ${userId} 的${label}` });
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
@@ -3659,7 +3905,7 @@ io.on('connection', (socket) => {
             if (revoked) { revoked.delete('allLevelsCompleted'); revoked.delete('puzzleMaster'); if (revoked.size === 0) revokedAchievements.delete(targetId); else revokedAchievements.set(targetId, revoked); }
             io.emit('achievement-update', { clientId: targetId, achievements: cur });
             io.emit('progress-update', { clientId: targetId, unlockedLevel: MAX_SINGLE_LEVEL, completedLevels, puzzleCompletedLevels, customCompletedLevels });
-            appendAudit('superadmin', 'complete-all', `（游戏内SA）将 ${targetId} 单人/解密/自定义全部通关`);
+            appendAudit('superadmin', 'complete-all', `（游戏内SA ${requesterId}）将 ${targetId} 单人/解密/自定义全部通关`);
             socket.emit('admin-action-result', { success: true, message: `已将 ${targetId} 单人、解密、自定义全部通关` });
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
@@ -3685,7 +3931,7 @@ io.on('connection', (socket) => {
             const eff = getEffectiveUISettings(targetId);
             const s = saLiveSocket(targetId);
             if (s) try { s.emit('settings-update', { uiSettings: eff, adminOverridden: true }); } catch (_) {}
-            appendAudit('superadmin', 'user-settings', `（游戏内SA）修改 ${targetId} 的 UI 设置`);
+            appendAudit('superadmin', 'user-settings', `（游戏内SA ${requesterId}）修改 ${targetId} 的 UI 设置`);
             socket.emit('admin-action-result', { success: true, message: `已保存 ${targetId} 的设置` });
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
@@ -3700,21 +3946,13 @@ io.on('connection', (socket) => {
             const ip = (p && p.ip) || (data && data.ip);
             if (!ip) return socket.emit('admin-action-result', { success: false, message: '无法获取该玩家 IP（可能已离线）' });
             const ipKey = String(ip).trim();
-            bannedIPs.set(ipKey, { reason: (reason && String(reason).trim()) || '', bannedAt: new Date().toISOString() });
-            const msg = 'IP 封禁：' + ((reason && String(reason).trim()) || '管理员封禁此 IP');
-            for (const [uid, pl] of onlinePlayers.entries()) {
-                if (pl && pl.ip === ipKey) {
-                    const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
-                    if (!ban.reasons) ban.reasons = {};
-                    ban.multiplayer = ban.single = ban.puzzle = ban.chat = true;
-                    ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = msg;
-                    userBans.set(uid, ban);
-                    const s = saLiveSocket(uid);
-                    if (s) s.emit('ip-banned', { reason: msg, permanent: true });
-                }
-            }
-            appendAudit('superadmin', 'ban-ip', `（游戏内SA）封禁 IP ${ipKey}`);
-            socket.emit('admin-action-result', { success: true, message: `已封禁 IP ${ipKey}` });
+            // 支持限时封禁：data 可带 permanent / durationDays / durationHours / durationMinutes
+            const expiresAt = parseBanExpiry(data);
+            applyIPBan(ipKey, reason, expiresAt, 'superadmin').then(rec => {
+                const term = describeIPBan(rec);
+                appendAudit('superadmin', 'ban-ip', `（游戏内SA ${requesterId}）封禁 IP ${ipKey}（${expiresAt ? '限时至 ' + expiresAt : '永久'}）`);
+                socket.emit('admin-action-result', { success: true, message: `已封禁 IP ${ipKey}（${term}）` });
+            }).catch(e => socket.emit('admin-action-result', { success: false, message: e.message }));
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
 
@@ -3728,20 +3966,10 @@ io.on('connection', (socket) => {
             const ip = (p && p.ip) || (data && data.ip);
             if (!ip) return socket.emit('admin-action-result', { success: false, message: '无法获取该玩家 IP' });
             const ipKey = String(ip).trim();
-            bannedIPs.delete(ipKey);
-            for (const [uid, pl] of onlinePlayers.entries()) {
-                if (pl && pl.ip === ipKey) {
-                    const ban = userBans.get(uid) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
-                    if (!ban.reasons) ban.reasons = {};
-                    ban.multiplayer = ban.single = ban.puzzle = ban.chat = false;
-                    ban.reasons.multiplayer = ban.reasons.single = ban.reasons.puzzle = ban.reasons.chat = '';
-                    userBans.set(uid, ban);
-                    const s = saLiveSocket(uid);
-                    if (s) s.emit('ip-unbanned', {});
-                }
-            }
-            appendAudit('superadmin', 'unban-ip', `（游戏内SA）解封 IP ${ipKey}`);
-            socket.emit('admin-action-result', { success: true, message: `已解封 IP ${ipKey}` });
+            removeIPBan(ipKey).then(() => {
+                appendAudit('superadmin', 'unban-ip', `（游戏内SA ${requesterId}）解封 IP ${ipKey}`);
+                socket.emit('admin-action-result', { success: true, message: `已解封 IP ${ipKey}` });
+            }).catch(e => socket.emit('admin-action-result', { success: false, message: e.message }));
         } catch (e) { socket.emit('admin-action-result', { success: false, message: e.message }); }
     });
 
@@ -3767,6 +3995,9 @@ io.on('connection', (socket) => {
                 ip: ipNow,
                 ipBanned: isIPBanned(ipNow),
                 ipBanReason: ipRec ? (ipRec.reason || '') : '',
+                ipBanExpiresAt: ipRec ? (ipRec.expiresAt || null) : null,
+                ipBanPermanent: ipRec ? !ipRec.expiresAt : false,
+                ipBanTerm: ipRec ? describeIPBan(ipRec) : '',
                 coins: (typeof prof.coins === 'number') ? prof.coins : (reportedCoins.get(userId) || 0),
                 totalPlayTime: (typeof prof.totalPlayTime === 'number') ? prof.totalPlayTime : 0,
                 gameStats: prof.gameStats || null,
@@ -4311,6 +4542,29 @@ function cloudAccountBanExpired(acc) {
     if (acc.banned_until == null || acc.banned_until === '') return false; // 永久封禁不过期
     try { return new Date(acc.banned_until).getTime() <= Date.now(); } catch (e) { return false; }
 }
+// 人类可读的封禁提示（登录/鉴权被拒时返回给客户端展示，如「你的账号被管理员封禁 5 天」）
+function cloudAccountBanMessage(acc) {
+    if (!acc || !acc.disabled) return '';
+    const bu = (acc.banned_until != null && acc.banned_until !== '') ? String(acc.banned_until) : null;
+    if (!bu) return '你的账号被管理员永久封禁';
+    const ms = new Date(bu).getTime() - Date.now();
+    if (isNaN(ms) || ms <= 0) return '你的账号被管理员封禁（已到期，请重新登录）';
+    const d = Math.floor(ms / 86400000);
+    const h = Math.floor((ms % 86400000) / 3600000);
+    const m = Math.max(1, Math.floor((ms % 3600000) / 60000));
+    if (d >= 1) return '你的账号被管理员封禁 ' + d + ' 天';
+    if (h >= 1) return '你的账号被管理员封禁 ' + h + ' 小时';
+    return '你的账号被管理员封禁 ' + m + ' 分钟';
+}
+// 限时封禁剩余天数（向上取整；永久封禁返回 null），供客户端展示
+function cloudAccountBanDays(acc) {
+    if (!acc || !acc.disabled) return null;
+    const bu = (acc.banned_until != null && acc.banned_until !== '') ? String(acc.banned_until) : null;
+    if (!bu) return null;
+    const ms = new Date(bu).getTime() - Date.now();
+    if (isNaN(ms) || ms <= 0) return 0;
+    return Math.max(1, Math.ceil(ms / 86400000));
+}
 async function dbDeleteCloudMaze(mazeId) {
     if (DB_AVAILABLE && pool) {
         try { await pool.query('DELETE FROM cloud_storage_mazes WHERE id=?', [mazeId]); } catch (e) { console.error('[云储存] DB 删图失败:', e.message); }
@@ -4618,6 +4872,17 @@ async function requireCloudAuth(req, res, next) {
     try {
         const decoded = jwt.verify(h.substring(7), JWT_SECRET);
         if (decoded.type !== 'cloud' || !decoded.username) return res.status(401).json({ success: false, message: '无效的登录令牌' });
+        req.cloudUser = decoded.username;
+        // 封禁账号拦截（优先于会话校验：封禁会退登全部设备，确保被封号看到封禁提示而非「已退出登录」）；限时封禁过期自动解封
+        const acc = await dbGetCloudAccount(decoded.username);
+        if (acc && acc.disabled) {
+            if (cloudAccountBanExpired(acc)) {
+                acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString();
+                await dbSaveCloudAccount(acc);
+            } else {
+                return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) });
+            }
+        }
         const sid = decoded.sid;
         if (sid) {
             // 新令牌带会话 id：校验会话未被远端退登
@@ -4628,17 +4893,6 @@ async function requireCloudAuth(req, res, next) {
         } else {
             // 旧版令牌（无会话，升级前登录）：向后兼容，不校验设备
             req.cloudSessionId = null;
-        }
-        req.cloudUser = decoded.username;
-        // 封禁账号拦截：已封禁的账号持有的令牌在后续请求中一律拒绝；限时封禁过期自动解封
-        const acc = await dbGetCloudAccount(decoded.username);
-        if (acc && acc.disabled) {
-            if (cloudAccountBanExpired(acc)) {
-                acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString();
-                await dbSaveCloudAccount(acc);
-            } else {
-                return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: '云空间功能被管理员禁用', bannedUntil: acc.banned_until || null });
-            }
         }
         next();
     } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
@@ -4691,7 +4945,7 @@ app.post('/api/cloud-storage/login', async (req, res) => {
                 acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString();
                 await dbSaveCloudAccount(acc);
             } else {
-                return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: '云空间功能被管理员禁用', bannedUntil: acc.banned_until || null });
+                return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) });
             }
         }
         // 登录时绑定/更新游戏 clientId（使管理端能用游戏用户定位云账号）
@@ -5669,6 +5923,70 @@ app.get('/api/my-ban', (req, res) => {
         res.json({ success: true, multiplayer: false, single: false, puzzle: false, chat: false, multiplayerReason: '', singleReason: '', puzzleReason: '', chatReason: '' });
     }
 });
+
+// 公开接口：最近 10 天内被封禁的账户（IP 封禁 + 云账号封禁），供游戏客户端「反作弊」标签页展示
+app.get('/api/public/recent-bans', async (req, res) => {
+    try {
+        const TEN_DAYS = 10 * 24 * 3600 * 1000;
+        const cutoff = Date.now() - TEN_DAYS;
+        const bans = [];
+        // IP 封禁：bannedAt 在最近 10 天内且尚未过期
+        for (const [ip, rec] of bannedIPs.entries()) {
+            if (ipBanExpired(rec)) continue;
+            const t = rec.bannedAt ? new Date(rec.bannedAt).getTime() : 0;
+            if (t >= cutoff) {
+                bans.push({
+                    type: 'ip',
+                    target: maskIP(ip),
+                    reason: rec.reason || '',
+                    bannedAt: rec.bannedAt || '',
+                    expiresAt: rec.expiresAt || null,
+                    permanent: !rec.expiresAt,
+                    term: describeIPBan(rec)
+                });
+            }
+        }
+        // 云账号封禁：updated_at 在最近 10 天内且仍处于封禁状态
+        try {
+            const accounts = await dbGetAllCloudAccounts();
+            for (const a of accounts) {
+                if (!a.disabled) continue;
+                const t = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                if (t >= cutoff) {
+                    const isPerm = !(a.banned_until != null && a.banned_until !== '');
+                    bans.push({
+                        type: 'cloud',
+                        target: a.username,
+                        reason: isPerm ? '永久封禁' : ('限时封禁至 ' + a.banned_until),
+                        bannedAt: a.updated_at,
+                        expiresAt: isPerm ? null : a.banned_until,
+                        permanent: isPerm,
+                        term: isPerm ? '永久' : ('至 ' + a.banned_until)
+                    });
+                }
+            }
+        } catch (e) { console.error('[recent-bans] 读取云账号失败:', e.message); }
+        // 按封禁时间倒序（最新在前）
+        bans.sort((x, y) => String(y.bannedAt).localeCompare(String(x.bannedAt)));
+        res.json({ success: true, bans });
+    } catch (e) {
+        console.error('[recent-bans] 失败:', e);
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// IP 简单脱敏：IPv4 保留前两位，后两位替换为 x.x；IPv6 保留前 4 段
+function maskIP(ip) {
+    if (!ip || typeof ip !== 'string') return '';
+    if (ip.indexOf(':') !== -1) {
+        const parts = ip.split(':');
+        if (parts.length > 4) return parts.slice(0, 4).join(':') + ':xxxx:xxxx';
+        return ip;
+    }
+    const parts = ip.split('.');
+    if (parts.length === 4) return parts[0] + '.' + parts[1] + '.x.x';
+    return ip.replace(/\d+\.\d+$/, 'x.x');
+}
 
 // 玩家拉取自身关卡权限（forbidden / forced），供客户端拦截"禁止进入"的关卡
 app.get('/api/my-level-permissions', (req, res) => {
