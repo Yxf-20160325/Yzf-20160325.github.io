@@ -256,7 +256,22 @@ const DB_TABLES_SQL = [
         banned_at VARCHAR(32),
         expires_at VARCHAR(32) DEFAULT NULL,
         banned_by VARCHAR(64),
+        username VARCHAR(128),
+        client_id VARCHAR(64),
         INDEX idx_banned_expires (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS ban_appeals (
+        id VARCHAR(64) PRIMARY KEY,
+        client_id VARCHAR(64),
+        username VARCHAR(128),
+        ban_type VARCHAR(16) NOT NULL,
+        target VARCHAR(128) NOT NULL,
+        message TEXT,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        created_at VARCHAR(32),
+        handled_by VARCHAR(64),
+        handled_at VARCHAR(32),
+        INDEX idx_appeal_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS popular_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -353,6 +368,23 @@ async function initDatabase() {
                     await pool.query('ALTER TABLE cloud_sessions ADD COLUMN ip VARCHAR(64)');
                     console.log('🗄️ 已为 cloud_sessions 表补充 ip 列（记录登录 IP）');
                 }
+                // 补充 banned_ips 表的 username / client_id 列：用于反作弊标签页展示被封玩家身份 + 客户端申诉定位
+                const [biUserCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='banned_ips' AND COLUMN_NAME='username'",
+                    [dbName]
+                );
+                if (!biUserCols || biUserCols.length === 0) {
+                    await pool.query('ALTER TABLE banned_ips ADD COLUMN username VARCHAR(128)');
+                    console.log('🗄️ 已为 banned_ips 表补充 username 列（封禁展示用）');
+                }
+                const [biCidCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='banned_ips' AND COLUMN_NAME='client_id'",
+                    [dbName]
+                );
+                if (!biCidCols || biCidCols.length === 0) {
+                    await pool.query('ALTER TABLE banned_ips ADD COLUMN client_id VARCHAR(64)');
+                    console.log('🗄️ 已为 banned_ips 表补充 client_id 列（封禁展示/申诉用）');
+                }
             } catch (e) { console.error('[迁移] 检查/补充 max_mazes 列失败:', e.message); }
             DB_AVAILABLE = true;
             loadCloudSessions().catch(e => console.error('[云储存] 会话载入失败:', e.message)); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
@@ -398,6 +430,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     ctrlShiftCD: true,
     cloudStorage: true,
     antiDevtools: false,
+    showAntiCheatTab: true,
     newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
@@ -1131,7 +1164,9 @@ function normalizeBanRecord(r) {
         reason: r.reason || '',
         bannedAt: r.bannedAt || r.banned_at || '',
         expiresAt: r.expiresAt || r.expires_at || null,   // null = 永久
-        bannedBy: r.bannedBy || r.banned_by || 'admin'
+        bannedBy: r.bannedBy || r.banned_by || 'admin',
+        username: r.username || null,
+        clientId: r.clientId || r.client_id || null
     };
 }
 
@@ -1165,9 +1200,9 @@ async function dbSaveBannedIP(rec) {
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO banned_ips (ip, reason, banned_at, expires_at, banned_by) VALUES (?,?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE reason=VALUES(reason), banned_at=VALUES(banned_at), expires_at=VALUES(expires_at), banned_by=VALUES(banned_by)',
-                [rec.ip, rec.reason || '', rec.bannedAt || '', rec.expiresAt || null, rec.bannedBy || 'admin']);
+                'INSERT INTO banned_ips (ip, reason, banned_at, expires_at, banned_by, username, client_id) VALUES (?,?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE reason=VALUES(reason), banned_at=VALUES(banned_at), expires_at=VALUES(expires_at), banned_by=VALUES(banned_by), username=VALUES(username), client_id=VALUES(client_id)',
+                [rec.ip, rec.reason || '', rec.bannedAt || '', rec.expiresAt || null, rec.bannedBy || 'admin', rec.username || null, rec.clientId || null]);
             return;
         } catch (e) { console.error('[IP封禁] DB 写入失败:', e.message); }
     }
@@ -1207,13 +1242,16 @@ function parseBanExpiry(body) {
 
 // 统一封禁入口：写持久层 + 封禁该 IP 下所有在线玩家的全部玩法 + 实时推送全屏弹窗
 // expiresAt 为 null 表示永久封禁
-async function applyIPBan(ipKey, reason, expiresAt, actor) {
+// meta: { username, clientId } 可选，用于反作弊标签页展示被封玩家身份 + 客户端申诉定位
+async function applyIPBan(ipKey, reason, expiresAt, actor, meta) {
     const rec = {
         ip: String(ipKey),
         reason: (reason && String(reason).trim()) || '',
         bannedAt: new Date().toISOString(),
         expiresAt: expiresAt || null,
-        bannedBy: actor || 'admin'
+        bannedBy: actor || 'admin',
+        username: (meta && meta.username) ? String(meta.username).slice(0, 128) : null,
+        clientId: (meta && meta.clientId) ? String(meta.clientId).slice(0, 64) : null
     };
     await dbSaveBannedIP(rec);
 
@@ -2641,11 +2679,11 @@ app.post('/api/admin/users/kick-all', requireAdminAuth, (req, res) => {
 // 支持永久封禁与限时封禁：body 传 { permanent:true } 或 { durationDays/durationHours/durationMinutes }
 app.post('/api/admin/ban-ip', requireAdminAuth, async (req, res) => {
     try {
-        const { ip, reason } = req.body || {};
+        const { ip, reason, clientId, username } = req.body || {};
         if (!ip || !String(ip).trim()) return res.status(400).json({ success: false, message: '缺少 ip' });
         const ipKey = String(ip).trim();
         const expiresAt = parseBanExpiry(req.body);
-        const rec = await applyIPBan(ipKey, reason, expiresAt, 'admin');
+        const rec = await applyIPBan(ipKey, reason, expiresAt, 'admin', { clientId: clientId || null, username: username || null });
         const term = describeIPBan(rec);
         appendAudit('admin', 'ban-ip', `封禁 IP ${ipKey}（${expiresAt ? '限时至 ' + expiresAt : '永久'}）${reason ? '，理由: ' + reason : ''}`, req);
         res.json({ success: true, ip: ipKey, expiresAt: rec.expiresAt, permanent: !rec.expiresAt, term, bannedIPs: Array.from(bannedIPs.keys()) });
@@ -2835,7 +2873,13 @@ app.post('/api/report-cheat', (req, res) => {
             if (cheatIp) {
                 const banReason = `反作弊系统自动封禁：检测到${CHEAT_TYPE_NAMES[report.type] || report.type}`;
                 const expiresAt = new Date(Date.now() + ipBanDays * 86400000).toISOString();
-                applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat')
+                // 反查云账号用户名（若有），便于反作弊标签页展示被封玩家身份；失败不影响封禁
+                Promise.resolve()
+                    .then(async () => {
+                        try { const acc = await dbGetCloudAccountByClient(report.clientId); return acc ? acc.username : null; }
+                        catch (e) { return null; }
+                    })
+                    .then(banUsername => applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat', { username: banUsername, clientId: report.clientId }))
                     .then(() => {
                         console.log(`[反作弊] IP ${cheatIp} 因 ${report.type} 被自动封禁 ${ipBanDays} 天（至 ${expiresAt}）`);
                         appendAudit('anti-cheat', 'ban-ip', `反作弊自动封禁 IP ${cheatIp} ${ipBanDays} 天（${report.type}，clientId=${report.clientId}）`, req);
@@ -3948,7 +3992,7 @@ io.on('connection', (socket) => {
             const ipKey = String(ip).trim();
             // 支持限时封禁：data 可带 permanent / durationDays / durationHours / durationMinutes
             const expiresAt = parseBanExpiry(data);
-            applyIPBan(ipKey, reason, expiresAt, 'superadmin').then(rec => {
+            applyIPBan(ipKey, reason, expiresAt, 'superadmin', { clientId: targetId, username: (p && p.name) || null }).then(rec => {
                 const term = describeIPBan(rec);
                 appendAudit('superadmin', 'ban-ip', `（游戏内SA ${requesterId}）封禁 IP ${ipKey}（${expiresAt ? '限时至 ' + expiresAt : '永久'}）`);
                 socket.emit('admin-action-result', { success: true, message: `已封禁 IP ${ipKey}（${term}）` });
@@ -5924,46 +5968,47 @@ app.get('/api/my-ban', (req, res) => {
     }
 });
 
-// 公开接口：最近 10 天内被封禁的账户（IP 封禁 + 云账号封禁），供游戏客户端「反作弊」标签页展示
+// 公开接口：被封禁的账户列表（IP 封禁 + 云账号封禁），供游戏客户端「反作弊」标签页展示
+// 注意：IP 封禁包含已到期的记录（status='expired'），便于玩家查看历史封禁并提起申诉
 app.get('/api/public/recent-bans', async (req, res) => {
     try {
-        const TEN_DAYS = 10 * 24 * 3600 * 1000;
-        const cutoff = Date.now() - TEN_DAYS;
         const bans = [];
-        // IP 封禁：bannedAt 在最近 10 天内且尚未过期
+        // IP 封禁：全部返回（含已到期），并附用户名 / client_id / 状态
         for (const [ip, rec] of bannedIPs.entries()) {
-            if (ipBanExpired(rec)) continue;
-            const t = rec.bannedAt ? new Date(rec.bannedAt).getTime() : 0;
-            if (t >= cutoff) {
-                bans.push({
-                    type: 'ip',
-                    target: maskIP(ip),
-                    reason: rec.reason || '',
-                    bannedAt: rec.bannedAt || '',
-                    expiresAt: rec.expiresAt || null,
-                    permanent: !rec.expiresAt,
-                    term: describeIPBan(rec)
-                });
-            }
+            const expired = ipBanExpired(rec);
+            bans.push({
+                type: 'ip',
+                target: maskIP(ip),
+                rawIp: ip,
+                username: rec.username || null,
+                clientId: rec.clientId || null,
+                reason: rec.reason || '',
+                bannedAt: rec.bannedAt || '',
+                expiresAt: rec.expiresAt || null,
+                permanent: !rec.expiresAt,
+                status: expired ? 'expired' : 'active',
+                term: expired ? '已到期' : describeIPBan(rec)
+            });
         }
-        // 云账号封禁：updated_at 在最近 10 天内且仍处于封禁状态
+        // 云账号封禁：处于封禁状态（disabled）的账号
         try {
             const accounts = await dbGetAllCloudAccounts();
             for (const a of accounts) {
                 if (!a.disabled) continue;
-                const t = a.updated_at ? new Date(a.updated_at).getTime() : 0;
-                if (t >= cutoff) {
-                    const isPerm = !(a.banned_until != null && a.banned_until !== '');
-                    bans.push({
-                        type: 'cloud',
-                        target: a.username,
-                        reason: isPerm ? '永久封禁' : ('限时封禁至 ' + a.banned_until),
-                        bannedAt: a.updated_at,
-                        expiresAt: isPerm ? null : a.banned_until,
-                        permanent: isPerm,
-                        term: isPerm ? '永久' : ('至 ' + a.banned_until)
-                    });
-                }
+                const isPerm = !(a.banned_until != null && a.banned_until !== '');
+                bans.push({
+                    type: 'cloud',
+                    target: a.username,
+                    rawIp: null,
+                    username: a.username,
+                    clientId: a.client_id || null,
+                    reason: isPerm ? '永久封禁' : ('限时封禁至 ' + a.banned_until),
+                    bannedAt: a.updated_at,
+                    expiresAt: isPerm ? null : a.banned_until,
+                    permanent: isPerm,
+                    status: 'active',
+                    term: isPerm ? '永久' : ('至 ' + a.banned_until)
+                });
             }
         } catch (e) { console.error('[recent-bans] 读取云账号失败:', e.message); }
         // 按封禁时间倒序（最新在前）
@@ -5974,6 +6019,142 @@ app.get('/api/public/recent-bans', async (req, res) => {
         res.status(500).json({ success: false, message: '查询失败' });
     }
 });
+
+// ===== 封禁申诉（玩家从客户端反作弊标签页提交，管理员在后台查看并一键解封）=====
+const BAN_APPEALS_FILE = path.join(DATA_DIR, 'ban-appeals.json');
+const banAppeals = new Map(); // id -> { id, clientId, username, banType, target, message, status, createdAt, handledBy, handledAt }
+
+function loadBanAppeals() {
+    try {
+        if (fs.existsSync(BAN_APPEALS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(BAN_APPEALS_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(a => { if (a && a.id) banAppeals.set(a.id, a); });
+        }
+    } catch (e) { console.error('[申诉] 载入失败:', e.message); }
+}
+function saveBanAppealsJson() {
+    try { fs.writeFileSync(BAN_APPEALS_FILE, JSON.stringify(Array.from(banAppeals.values()), null, 2)); }
+    catch (e) { console.error('[申诉] 写入失败:', e.message); }
+}
+async function dbSaveAppeal(rec) {
+    if (!rec || !rec.id) return;
+    banAppeals.set(rec.id, rec);
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO ban_appeals (id, client_id, username, ban_type, target, message, status, created_at) VALUES (?,?,?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE status=VALUES(status), message=VALUES(message)',
+                [rec.id, rec.clientId || null, rec.username || null, rec.banType, rec.target, rec.message || '', rec.status || 'pending', rec.createdAt || '']
+            );
+            return;
+        } catch (e) { console.error('[申诉] DB 写入失败:', e.message); }
+    }
+    saveBanAppealsJson();
+}
+async function dbGetAppeals() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query(
+                "SELECT * FROM ban_appeals ORDER BY (status='pending') DESC, created_at DESC"
+            );
+            if (rows && rows.length) return rows.map(r => ({
+                id: r.id, clientId: r.client_id || null, username: r.username || null,
+                banType: r.ban_type, target: r.target, message: r.message || '', status: r.status || 'pending',
+                createdAt: r.created_at, handledBy: r.handled_by || null, handledAt: r.handled_at || null
+            }));
+        } catch (e) { console.error('[申诉] DB 读取失败:', e.message); }
+    }
+    return Array.from(banAppeals.values())
+        .sort((a, b) => {
+            if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+            return String(b.createdAt).localeCompare(String(a.createdAt));
+        });
+}
+async function dbResolveAppeal(id, handledBy) {
+    const rec = banAppeals.get(String(id));
+    if (rec) { rec.status = 'resolved'; rec.handledBy = handledBy || 'admin'; rec.handledAt = new Date().toISOString(); }
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                "UPDATE ban_appeals SET status='resolved', handled_by=?, handled_at=? WHERE id=?",
+                [handledBy || 'admin', new Date().toISOString(), String(id)]
+            );
+        } catch (e) { console.error('[申诉] DB 更新失败:', e.message); }
+    }
+    saveBanAppealsJson();
+    return rec;
+}
+
+// 公开接口：玩家提交封禁申诉（无需鉴权）。banType: 'ip' | 'cloud'；target: IP 或云账号用户名
+app.post('/api/public/ban-appeal', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const banType = String(b.banType || '').slice(0, 16);
+        const target = String(b.target || '').slice(0, 128);
+        const message = String(b.message || '').trim().slice(0, 1000);
+        const clientId = String(b.clientId || '').slice(0, 64);
+        const username = String(b.username || '').slice(0, 128) || null;
+        if (banType !== 'ip' && banType !== 'cloud') return res.status(400).json({ success: false, message: '申诉类型无效' });
+        if (!target) return res.status(400).json({ success: false, message: '缺少封禁对象' });
+        if (message.length < 3) return res.status(400).json({ success: false, message: '申诉说明至少 3 个字' });
+        const id = 'ap_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        await dbSaveAppeal({
+            id, clientId, username, banType, target, message,
+            status: 'pending', createdAt: new Date().toISOString()
+        });
+        console.log(`[申诉] 收到 ${banType} 申诉：target=${target}，clientId=${clientId || '未知'}`);
+        res.json({ success: true, message: '申诉已提交，管理员审核通过后可解封' });
+    } catch (e) {
+        console.error('[申诉] 提交失败:', e);
+        res.status(500).json({ success: false, message: '提交失败' });
+    }
+});
+
+// 管理端接口：查看全部申诉（待处理在前）
+app.get('/api/admin/ban-appeals', requireAdminAuth, async (req, res) => {
+    try {
+        const list = await dbGetAppeals();
+        res.json({ success: true, appeals: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 管理端接口：处理申诉并一键解封（解封对应封禁，写入 SQL，标记申诉为已处理）
+app.post('/api/admin/ban-appeals/:id/resolve', requireAdminAuth, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const rec = await dbGetAppeals().then(list => list.find(a => a.id === String(id)));
+        if (!rec) return res.status(404).json({ success: false, message: '申诉记录不存在' });
+        if (rec.status === 'resolved') return res.json({ success: true, alreadyResolved: true, message: '该申诉已处理' });
+        // 一键解封：依据类型解除对应封禁
+        let unbanMsg = '';
+        if (rec.banType === 'ip') {
+            await removeIPBan(rec.target);
+            unbanMsg = `已解封 IP ${rec.target}`;
+        } else if (rec.banType === 'cloud') {
+            const acc = await dbGetCloudAccount(rec.target);
+            if (acc) {
+                acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString();
+                await dbSaveCloudAccount(acc);
+                // 退登其全部已登录设备
+                try { await dbDeleteCloudSessionsByUser(rec.target); } catch (e) {}
+                unbanMsg = `已解封云储存账号 ${rec.target}`;
+            } else {
+                unbanMsg = '云账号不存在（可能已删除）';
+            }
+        }
+        const handler = (req.admin && req.admin.name) ? req.admin.name : 'admin';
+        await dbResolveAppeal(id, handler);
+        appendAudit('admin', 'appeal-resolve', `处理封禁申诉（${rec.banType}：${rec.target}）${unbanMsg}，${handler}`, req);
+        res.json({ success: true, message: unbanMsg + '，申诉已标记为已处理' });
+    } catch (e) {
+        console.error('[申诉] 处理失败:', e);
+        res.status(500).json({ success: false, message: '处理失败' });
+    }
+});
+
+loadBanAppeals();
 
 // IP 简单脱敏：IPv4 保留前两位，后两位替换为 x.x；IPv6 保留前 4 段
 function maskIP(ip) {
