@@ -4344,13 +4344,150 @@ window.globalFunctionControl = {
     multiplayer: true,
     debugInfo: true,
     f12DevConsole: true,
-    ctrlShiftCD: true
+    ctrlShiftCD: true,
+    antiDevtools: false   // 唯一「默认关闭」的开关：开启才启用反调试
 };
+
+// ==================== 反调试模块（受全局开关 antiDevtools 控制）====================
+// 行为：开启后持续触发 debugger 无限断点；检测到浏览器开发者工具打开时弹出全屏警告；
+//       当检测到开发者工具被关闭后，自动刷新页面。开关关闭时完全不执行任何 debugger。
+const ANTI_DEBUG = {
+    enabled: false,
+    detectTimer: null,   // devtools 状态轮询
+    trapTimer: null,     // 无限断点循环
+    keyHandler: null,    // F12 / Ctrl+Shift+I 等快捷键拦截
+    isOpen: false,       // 当前是否判定为「devtools 已打开」
+    wasOpen: false,      // 是否曾经被判定为打开（用于「关闭后刷新」）
+    reloading: false,
+    hits: 0              // 连续命中次数，需连续 2 次才判定打开（滤掉偶发卡顿误判）
+};
+
+// 检测开发者工具是否打开：两种独立信号，任一命中即判定为打开
+function antiDebugDetect() {
+    // 信号 1：窗口内外尺寸差。devtools 以停靠方式打开时会挤压 innerWidth/innerHeight。
+    // 阈值 160px 可避开浏览器自身工具栏/滚动条造成的误差。
+    try {
+        const wDiff = (window.outerWidth || 0) - (window.innerWidth || 0);
+        const hDiff = (window.outerHeight || 0) - (window.innerHeight || 0);
+        if (window.outerWidth && window.outerHeight && (wDiff > 180 || hDiff > 180)) return true;
+    } catch (e) {}
+
+    // 信号 2：debugger 耗时。devtools 打开时 debugger 会真正暂停执行，
+    // 恢复后的耗时远大于关闭状态下的近似 0ms（独立窗口 devtools 也能命中）。
+    try {
+        const t0 = performance.now();
+        // eslint-disable-next-line no-debugger
+        debugger;
+        if (performance.now() - t0 > 120) return true;
+    } catch (e) {}
+
+    return false;
+}
+
+// 全屏警告弹窗（不可关闭，只能通过关闭 devtools 让页面自动刷新来消除）
+function antiDebugShowWarning() {
+    if (document.getElementById('antiDebugMask')) return;
+    const mask = document.createElement('div');
+    mask.id = 'antiDebugMask';
+    mask.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;background:rgba(10,0,0,0.96);' +
+        'z-index:2147483647;display:flex;flex-direction:column;justify-content:center;align-items:center;' +
+        'text-align:center;padding:24px;box-sizing:border-box;font-family:inherit;';
+    mask.innerHTML =
+        '<div style="font-size:64px;line-height:1;margin-bottom:18px;">🚫</div>' +
+        '<div style="color:#ff5252;font-size:26px;font-weight:bold;margin-bottom:14px;">检测到开发者工具</div>' +
+        '<div style="color:#ffd0d0;font-size:15px;line-height:1.9;max-width:460px;">' +
+        '为保障游戏公平性，本游戏禁止使用浏览器开发者工具。<br>' +
+        '请<b style="color:#fff;">关闭开发者工具</b>后继续游戏。<br>' +
+        '<span style="color:#ff9b9b;font-size:13px;">关闭后页面将自动刷新恢复。</span></div>';
+    (document.body || document.documentElement).appendChild(mask);
+    // 弹窗期间禁止页面滚动
+    try { document.body.style.overflow = 'hidden'; } catch (e) {}
+}
+
+function antiDebugHideWarning() {
+    const mask = document.getElementById('antiDebugMask');
+    if (mask) mask.remove();
+    try { document.body.style.overflow = ''; } catch (e) {}
+}
+
+// 单次状态检查：打开→弹窗+启动无限断点；由开转关→刷新页面
+function antiDebugTick() {
+    if (!ANTI_DEBUG.enabled || ANTI_DEBUG.reloading) return;
+    const raw = antiDebugDetect();
+
+    // 去抖：连续 2 次命中才算真的打开；一旦已判定打开则单次未命中即视为已关闭（关闭要灵敏）
+    if (raw) ANTI_DEBUG.hits++; else ANTI_DEBUG.hits = 0;
+    const open = ANTI_DEBUG.isOpen ? raw : (ANTI_DEBUG.hits >= 2);
+
+    if (open) {
+        ANTI_DEBUG.isOpen = true;
+        ANTI_DEBUG.wasOpen = true;
+        antiDebugShowWarning();
+        // 启动高频无限断点，持续打断调试
+        if (!ANTI_DEBUG.trapTimer) {
+            ANTI_DEBUG.trapTimer = setInterval(function () {
+                if (!ANTI_DEBUG.enabled) return;
+                // eslint-disable-next-line no-debugger
+                debugger;
+            }, 50);
+        }
+    } else if (ANTI_DEBUG.wasOpen) {
+        // 曾打开、现已关闭 —— 刷新页面
+        ANTI_DEBUG.isOpen = false;
+        ANTI_DEBUG.reloading = true;
+        antiDebugStop();
+        antiDebugHideWarning();
+        try { location.reload(); } catch (e) { location.href = location.href; }
+    }
+}
+
+function antiDebugStart() {
+    if (ANTI_DEBUG.enabled) return;   // 幂等：重复调用不叠加定时器
+    ANTI_DEBUG.enabled = true;
+    ANTI_DEBUG.wasOpen = false;
+    ANTI_DEBUG.isOpen = false;
+    ANTI_DEBUG.reloading = false;
+    ANTI_DEBUG.hits = 0;
+
+    // 拦截打开 devtools 的常用快捷键（capture 阶段，早于游戏自身按键逻辑）
+    ANTI_DEBUG.keyHandler = function (e) {
+        const k = (e.key || '').toUpperCase();
+        const blocked =
+            k === 'F12' ||
+            (e.ctrlKey && e.shiftKey && (k === 'I' || k === 'J' || k === 'C')) ||
+            (e.metaKey && e.altKey && (k === 'I' || k === 'J' || k === 'C')) ||  // macOS
+            (e.ctrlKey && k === 'U');                                            // 查看源代码
+        if (blocked) { e.preventDefault(); e.stopPropagation(); return false; }
+    };
+    document.addEventListener('keydown', ANTI_DEBUG.keyHandler, true);
+
+    // 轮询检测（500ms 一次，devtools 未打开时 debugger 开销可忽略）
+    ANTI_DEBUG.detectTimer = setInterval(antiDebugTick, 500);
+    antiDebugTick();
+    console.log('[反调试] 已由管理员开启');
+}
+
+function antiDebugStop() {
+    ANTI_DEBUG.enabled = false;
+    if (ANTI_DEBUG.detectTimer) { clearInterval(ANTI_DEBUG.detectTimer); ANTI_DEBUG.detectTimer = null; }
+    if (ANTI_DEBUG.trapTimer) { clearInterval(ANTI_DEBUG.trapTimer); ANTI_DEBUG.trapTimer = null; }
+    if (ANTI_DEBUG.keyHandler) { document.removeEventListener('keydown', ANTI_DEBUG.keyHandler, true); ANTI_DEBUG.keyHandler = null; }
+    ANTI_DEBUG.isOpen = false;
+    ANTI_DEBUG.wasOpen = false;
+    ANTI_DEBUG.hits = 0;
+    antiDebugHideWarning();
+}
+
+// 按全局开关启停（管理员实时改开关时会再次调用，需保证幂等）
+function applyAntiDevtools(on) {
+    if (on) antiDebugStart();
+    else if (ANTI_DEBUG.enabled) { antiDebugStop(); console.log('[反调试] 已由管理员关闭'); }
+}
 
 // 应用全局功能设定：更新内存开关，并同步隐藏/显示对应 UI 按钮
 function applyGlobalFunctions(settings) {
     if (!settings || typeof settings !== 'object') return;
-    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true };
+    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false };
     window.globalFunctionControl = Object.assign({}, def, settings);
     // 记录全局「使用新UI」策略，供主菜单旧/新 UI 决策使用
     window.__globalUiMode = (settings && settings.newUi && typeof settings.newUi === 'object') ? settings.newUi : { mode: 'always', prob: 100 };
@@ -4372,6 +4509,8 @@ function applyGlobalFunctions(settings) {
     if (typeof applyMainMenuUiMode === 'function') applyMainMenuUiMode();
     // 云储存开关变化：若当前在"我的迷宫"页，刷新云区域可见性
     if (typeof refreshCloudStorageVisibility === 'function') refreshCloudStorageVisibility();
+    // 反调试开关：仅在显式为 true 时启用（默认关闭，避免影响正常调试）
+    if (typeof applyAntiDevtools === 'function') applyAntiDevtools(g.antiDevtools === true);
     console.log('[功能设定] 已应用全局功能开关:', window.globalFunctionControl);
 }
 
@@ -8406,11 +8545,11 @@ function generatePuzzleLevel(level, selection) {
     }
 
     // 验证解密关卡可解性
-    validatePuzzleLevelGeneration();
+    validatePuzzleLevelGeneration(selection);
 }
 
 // 验证解密关卡：确保按钮可达、出口可达
-function validatePuzzleLevelGeneration() {
+function validatePuzzleLevelGeneration(selection) {
     const maze = singlePlayerGame.maze;
     const rows = maze.length, cols = maze[0].length;
     const start = singlePlayerGame.player;
