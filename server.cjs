@@ -347,7 +347,7 @@ async function initDatabase() {
                 }
             } catch (e) { console.error('[迁移] 检查/补充 max_mazes 列失败:', e.message); }
             DB_AVAILABLE = true;
-            loadCloudSessions(); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
+            loadCloudSessions().catch(e => console.error('[云储存] 会话载入失败:', e.message)); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
             console.log('🗄️ 已连接 MySQL 数据库，数据将持久化到数据库。');
             return;
         } catch (e) {
@@ -375,6 +375,10 @@ const GLOBAL_FUNCTIONS_FILE = path.join(DATA_DIR, 'global-functions.json');
 //   debugInfo       —— 调试信息按钮是否显示
 //   f12DevConsole   —— F12 打开的开发者控制台是否显示
 //   ctrlShiftCD     —— CTRL+SHIFT+C/D 是否可以打开控制台/开发者模式
+//   antiDevtools    —— 反调试：开启后客户端强制无限 debugger 断点 + 全屏警告弹窗，
+//                      检测到浏览器开发者工具关闭后自动刷新页面。
+//                      注意：这是唯一「默认关闭」的开关（默认 false），开启才生效，
+//                      避免影响正常开发调试。
 const GLOBAL_FUNCTIONS_DEFAULT = {
     export: true,
     importClear: true,
@@ -384,6 +388,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     f12DevConsole: true,
     ctrlShiftCD: true,
     cloudStorage: true,
+    antiDevtools: false,
     newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
@@ -4443,13 +4448,11 @@ loadCloudStorage();
 // ===== 云储存会话（设备）管理：记录每个账号在哪些设备/浏览器登录，支持远端退登 =====
 const CLOUD_SESSIONS_FILE = path.join(DATA_DIR, 'cloud-sessions.json');
 let cloudSessions = new Map(); // id -> { id, username, device, created_at, last_active_at, _lastTouch? }
-function loadCloudSessions() {
+async function loadCloudSessions() {
     try {
         if (DB_AVAILABLE && pool) {
-            pool.query('SELECT * FROM cloud_sessions', (err, rows) => {
-                if (!err && rows) rows.forEach(s => cloudSessions.set(s.id, s));
-                else if (err) console.error('[云储存] 会话 DB 载入失败:', err.message);
-            });
+            const [rows] = await pool.query('SELECT * FROM cloud_sessions');
+            if (rows) rows.forEach(s => cloudSessions.set(s.id, s));
             return;
         }
         if (fs.existsSync(CLOUD_SESSIONS_FILE)) {
@@ -4525,7 +4528,7 @@ function touchCloudSession(sess) {
         dbUpsertCloudSession(sess).catch(() => {});
     }
 }
-loadCloudSessions();
+loadCloudSessions().catch(e => console.error('[云储存] 会话载入失败:', e.message));
 
 // =============== 云空间扩容码 ===============
 // 管理员生成、客户端兑换：可自定义使用次数 / 允许 IP / 扩容到的容量。
