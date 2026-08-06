@@ -36,7 +36,7 @@ let DB_AVAILABLE = false;
 // 默认数据库连接（已写入 server；部署到 onrender 等平台时，若设置了同名环境变量则覆盖此处默认值）。
 // 你已配好的 DB_HOST / DB_PORT 通过环境变量传入即可覆盖下面两个默认值。
 const DEFAULT_DB = {
-    host: process.env.DB_HOST,
+    host: process.env.DB_HOST || 'nu3uys.h.filess.io',
     port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3307,
     user: process.env.DB_USER || 'maze_graysetsor',
     password: process.env.DB_PASSWORD || '4c613aeb828b9923c8b12b63b11373f2a31a3357',
@@ -287,6 +287,19 @@ const DB_TABLES_SQL = [
         banned_by VARCHAR(64),
         INDEX idx_banhist_banned_at (banned_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cheat_log (
+        id VARCHAR(64) PRIMARY KEY,
+        client_id VARCHAR(64),
+        username VARCHAR(128),
+        ip VARCHAR(64),
+        cheat_type VARCHAR(40),
+        reason VARCHAR(500),
+        banned_at VARCHAR(32),
+        expires_at VARCHAR(32) DEFAULT NULL,
+        created_at VARCHAR(32),
+        INDEX idx_cheatlog_client (client_id),
+        INDEX idx_cheatlog_banned_at (banned_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS popular_mazes (
         id VARCHAR(64) PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
@@ -403,6 +416,7 @@ async function initDatabase() {
             DB_AVAILABLE = true;
             loadCloudSessions().catch(e => console.error('[云储存] 会话载入失败:', e.message)); // DB 模式下启动后从库载入已有会话到内存，供鉴权校验
             loadBannedIPs().catch(e => console.error('[IP封禁] 载入失败:', e.message));        // 从库恢复 IP 封禁（含限时封禁的剩余时长）
+            loadCheatLog().catch(e => console.error('[作弊日志] 载入失败:', e.message));       // 从库恢复作弊封禁日志
             console.log('🗄️ 已连接 MySQL 数据库，数据将持久化到数据库。');
             return;
         } catch (e) {
@@ -1291,6 +1305,60 @@ async function dbSaveBanHistory(rec) {
     saveBanHistoryJson();
 }
 
+// ===== 作弊封禁日志（cheat_log 表）：记录所有因作弊被封禁的玩家（client_id / 用户名 / ip / 封禁时间）=====
+const CHEAT_LOG_FILE = path.join(DATA_DIR, 'cheat-log.json');
+const cheatLog = new Map(); // id -> { id, clientId, username, ip, cheatType, reason, bannedAt, expiresAt, createdAt }
+
+function normalizeCheatLog(r) {
+    if (!r) return null;
+    return {
+        id: String(r.id || ''),
+        clientId: r.client_id || r.clientId || null,
+        username: r.username || null,
+        ip: r.ip || null,
+        cheatType: r.cheat_type || r.cheatType || null,
+        reason: r.reason || null,
+        bannedAt: r.banned_at || r.bannedAt || null,
+        expiresAt: (r.expires_at !== undefined ? r.expires_at : r.expiresAt) || null,
+        createdAt: r.created_at || r.createdAt || null
+    };
+}
+
+async function loadCheatLog() {
+    try {
+        if (DB_AVAILABLE && pool) {
+            const [rows] = await pool.query('SELECT * FROM cheat_log');
+            if (rows) rows.forEach(r => { const rec = normalizeCheatLog(r); if (rec && rec.id) cheatLog.set(rec.id, rec); });
+        } else if (fs.existsSync(CHEAT_LOG_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(CHEAT_LOG_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(r => { const rec = normalizeCheatLog(r); if (rec && rec.id) cheatLog.set(rec.id, rec); });
+        }
+        console.log(`[作弊日志] 已载入 ${cheatLog.size} 条记录`);
+    } catch (e) { console.error('[作弊日志] 载入失败:', e.message); }
+}
+
+function saveCheatLogJson() {
+    try { fs.writeFileSync(CHEAT_LOG_FILE, JSON.stringify(Array.from(cheatLog.values()), null, 2)); }
+    catch (e) { console.error('[作弊日志] 写入失败:', e.message); }
+}
+
+async function dbSaveCheatLog(rec) {
+    if (!rec || !rec.id) return;
+    const norm = normalizeCheatLog(rec);
+    cheatLog.set(norm.id, norm);
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cheat_log (id, client_id, username, ip, cheat_type, reason, banned_at, expires_at, created_at) VALUES (?,?,?,?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE client_id=VALUES(client_id), username=VALUES(username), ip=VALUES(ip), cheat_type=VALUES(cheat_type), reason=VALUES(reason), banned_at=VALUES(banned_at), expires_at=VALUES(expires_at), created_at=VALUES(created_at)',
+                [norm.id, norm.clientId || null, norm.username || null, norm.ip || null, norm.cheatType || null, norm.reason || '', norm.bannedAt || null, norm.expiresAt || null, norm.createdAt || null]
+            );
+            return;
+        } catch (e) { console.error('[作弊日志] DB 写入失败:', e.message); }
+    }
+    saveCheatLogJson();
+}
+
 // 标记历史为「已解封」：同一 type+target 可能有多条独立记录（每次封禁一条），
 // 取 bannedAt 最新的一条未解封记录标记（代表当前生效的那次封禁）
 async function dbUpdateBanHistoryUnban(type, target, by) {
@@ -1328,6 +1396,7 @@ async function dbGetBanHistory() {
 // 模块加载时先按 JSON 兜底载入；若随后 MySQL 连接成功，initDatabase 会再从库覆盖载入一次
 loadBannedIPs().catch(e => console.error('[IP封禁] 载入失败:', e.message));
 loadBanHistory().catch(e => console.error('[封禁历史] 载入失败:', e.message));
+loadCheatLog().catch(e => console.error('[作弊日志] 载入失败:', e.message));
 
 // 解析封禁时长请求体 -> expiresAt（null 表示永久）
 // 支持：{ permanent:true } | { durationDays:5 } | { durationHours:12 } | { durationMinutes:30 } | { expiresAt:'ISO' }
@@ -3052,8 +3121,24 @@ app.post('/api/report-cheat', (req, res) => {
                         report._devExpiresAt = expiresAt;
                         return { banUsername, expiresAt, durationText };
                     })
-                    .then(({ banUsername, expiresAt, durationText }) =>
-                        applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat', { username: banUsername, clientId: report.clientId }))
+                    .then(async ({ banUsername, expiresAt, durationText }) => {
+                        // 先独立写入作弊封禁日志（不依赖 applyIPBan 成败，避免封禁异常吞掉日志）
+                        try {
+                            await dbSaveCheatLog({
+                                id: 'cheat_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                                clientId: report.clientId,
+                                username: banUsername,
+                                ip: cheatIp,
+                                cheatType: report.type,
+                                reason: banReason,
+                                bannedAt: new Date().toISOString(),
+                                expiresAt: expiresAt || null,
+                                createdAt: new Date().toISOString()
+                            });
+                        } catch (e) { console.error('[作弊日志] 写入失败:', e.message); }
+                        // 再执行真实 IP 封禁
+                        return applyIPBan(cheatIp, banReason, expiresAt, 'anti-cheat', { username: banUsername, clientId: report.clientId });
+                    })
                     .then(() => {
                         const dt = report._devDurationText || (ipBanDays + ' 天');
                         const times = report._devCount ? `（第 ${report._devCount} 次）` : '';
