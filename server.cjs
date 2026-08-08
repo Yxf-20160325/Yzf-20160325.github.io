@@ -6706,19 +6706,95 @@ app.post('/api/admin/rooms/:roomId/disable-chat', requireAdminAuth, (req, res) =
 });
 
 // 3) 更改地图：通知房主客户端重新生成迷宫并同步给所有玩家（复用客户端 generateMultiplayerMaze，最稳妥）
+// 服务端迷宫生成（递归回溯，生成完美迷宫；编码：0通路 1墙 2起点 3终点）
+function generateServerMaze(size) {
+    size = parseInt(size);
+    if (isNaN(size)) size = 15;
+    size = Math.max(7, Math.min(41, size));
+    if (size % 2 === 0) size += 1; // 必须为奇数，保证网格对齐
+    const grid = Array.from({ length: size }, () => Array(size).fill(1)); // 初始全为墙
+    const stack = [[1, 1]];
+    grid[1][1] = 0;
+    const dirs = [[0, -2], [0, 2], [-2, 0], [2, 0]];
+    while (stack.length) {
+        const [y, x] = stack[stack.length - 1];
+        const nbrs = [];
+        for (const [dy, dx] of dirs) {
+            const ny = y + dy, nx = x + dx;
+            if (ny > 0 && ny < size - 1 && nx > 0 && nx < size - 1 && grid[ny][nx] === 1) nbrs.push([ny, nx, dy, dx]);
+        }
+        if (nbrs.length === 0) { stack.pop(); continue; }
+        const [ny, nx, dy, dx] = nbrs[Math.floor(Math.random() * nbrs.length)];
+        grid[y + dy / 2][x + dx / 2] = 0; // 打通中间墙
+        grid[ny][nx] = 0;
+        stack.push([ny, nx]);
+    }
+    grid[1][1] = 2;                 // 起点
+    grid[size - 2][size - 2] = 3;   // 终点
+    return grid;
+}
+
+// 校验 admin 传入的自定义迷宫 JSON（2D 数字数组，编码同 multiplayer 迷宫）
+function validateCustomMaze(maze) {
+    if (!Array.isArray(maze) || maze.length < 3) return '迷宫必须是至少 3 行的二维数组';
+    const h = maze.length;
+    const w = Array.isArray(maze[0]) ? maze[0].length : 0;
+    if (!w || w < 3) return '迷宫每一行必须是至少 3 列的数字数组';
+    let hasStart = false, hasEnd = false;
+    for (let y = 0; y < h; y++) {
+        if (!Array.isArray(maze[y]) || maze[y].length !== w) return `第 ${y + 1} 行长度不一致（应为 ${w} 列）`;
+        for (let x = 0; x < w; x++) {
+            const v = maze[y][x];
+            if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 15) return `位置 (${y},${x}) 的值 ${v} 非法（需为 0~15 的整数）`;
+            if (v === 2) hasStart = true;
+            if (v === 3) hasEnd = true;
+        }
+    }
+    if (!hasStart) return '迷宫缺少起点（编码 2）';
+    if (!hasEnd) return '迷宫缺少终点（编码 3）';
+    return null; // 校验通过
+}
+
 app.post('/api/admin/rooms/:roomId/change-map', requireAdminAuth, (req, res) => {
     try {
         const room = rooms.get(req.params.roomId);
         if (!room) return res.status(404).json({ success: false, message: '房间不存在' });
-        io.emit('admin-regenerate-map', { roomId: room.id });
-        console.log(`[Admin] 已请求房主重新生成房间 ${room.id} 的地图`);
-        appendAudit('admin', 'change-map', `房间 ${room.id} 请求重新生成地图`);
-        res.json({ success: true, message: '已发送重新生成地图指令（需房主在线以执行）' });
+        const mode = (req.body && req.body.mode) || 'random';
+        let newMaze;
+        if (mode === 'json') {
+            const raw = req.body.maze;
+            const maze = Array.isArray(raw) ? raw : (raw && typeof raw === 'string' ? safeParseMaze(raw) : null);
+            if (!maze) return res.status(400).json({ success: false, message: '缺少或无法解析 maze 字段（需为二维数字数组）' });
+            const err = validateCustomMaze(maze);
+            if (err) return res.status(400).json({ success: false, message: err });
+            newMaze = maze;
+        } else {
+            // random：服务端直接生成完美迷宫，无需房主在线
+            const size = req.body && req.body.size ? req.body.size : 15;
+            newMaze = generateServerMaze(size);
+        }
+        room.maze = newMaze;
+        room.lastActivity = Date.now();
+        // 直接广播给房间内所有玩家（与房主 maze-generated 后广播的通道一致）
+        io.to(room.id).emit('maze-updated', { maze: newMaze });
+        console.log(`[Admin] 已为房间 ${room.id} 应用新地图（mode=${mode}，尺寸 ${newMaze.length}x${newMaze[0].length}）`);
+        appendAudit('admin', 'change-map', `房间 ${room.id} 更换地图（mode=${mode}）`);
+        res.json({ success: true, message: '已应用新地图并下发至房间内所有玩家', size: { w: newMaze[0].length, h: newMaze.length } });
     } catch (error) {
         console.error('[API] 更改地图失败:', error);
         res.status(500).json({ success: false, message: '操作失败' });
     }
 });
+
+// 安全解析迷宫 JSON 字符串（容错：提取数组）
+function safeParseMaze(str) {
+    try {
+        const obj = JSON.parse(str);
+        if (Array.isArray(obj)) return obj;
+        if (obj && Array.isArray(obj.maze)) return obj.maze;
+        return null;
+    } catch (e) { return null; }
+}
 
 // 4) 传送玩家到任意位置
 app.post('/api/admin/rooms/:roomId/teleport', requireAdminAuth, (req, res) => {
