@@ -7788,6 +7788,8 @@ function startTeleportSelectionMode(targetPlayerId = null) {
 }
 // 添加金币
 function addCoins(amount) {
+    // 云链接分享迷宫是独立游玩场景，不计入账号金币经济，避免污染玩家钱包
+    if (window.CLOUD_LINK_PLAY) return;
     gameState.coins += amount;
     // 同时也更新 playerData 中的，以便于保存
     gameState.playerData.coins = gameState.coins;
@@ -15978,7 +15980,7 @@ function resizeSinglePlayerCanvas() {
     }
     
     const clinkMode = !!window.CLOUD_LINK_PLAY;
-    const maxWidth = window.innerWidth - (clinkMode ? 16 : 40);
+    const maxWidth = window.innerWidth - 40;
     // 预留顶部信息栏(~120px) + 底部控制按钮栏(~70px) + iOS安全区(~44px) + 画布margin(~40px) + 富余
     // 读取 iOS 底部安全区
     const tempDiv = document.createElement('div');
@@ -15986,7 +15988,7 @@ function resizeSinglePlayerCanvas() {
     document.body.appendChild(tempDiv);
     const safeAreaBottom = tempDiv.offsetHeight || 0;
     document.body.removeChild(tempDiv);
-    const maxHeight = window.innerHeight - (clinkMode ? safeAreaBottom + 16 : 280 + safeAreaBottom);
+    const maxHeight = window.innerHeight - 280 - safeAreaBottom;
     
     const mazeWidth = singlePlayerGame.maze[0].length;
     const mazeHeight = singlePlayerGame.maze.length;
@@ -18613,11 +18615,13 @@ function initTeleporters(teleportersData) {
     }
     
     teleportersData.forEach((teleporter, index) => {
-        // 为每个传送门生成一个ID
+        // 保留原始配对 id（配对传送门靠相同 id 找到另一扇门）；
+        // 仅当数据未携带 id 时才用索引兜底，避免覆盖已有配对导致传送门失效
+        const tid = (teleporter.id !== undefined && teleporter.id !== null) ? teleporter.id : index;
         singlePlayerGame.teleporters.push({
             x: teleporter.x,
             y: teleporter.y,
-            id: index,
+            id: tid,
             target: teleporter.target
         });
     });
@@ -25225,10 +25229,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             st.id = 'clinkPlayStyle';
             st.textContent = [
                 'body.clink-play #mainMenu{display:none!important;}',
-                'body.clink-play .settings-button{display:none!important;}',
-                'body.clink-play #gameInfo,body.clink-play .game-info{display:none!important;}',
-                'body.clink-play #enemyInfo,body.clink-play #pathEnemyInfo,body.clink-play #keyInfo,body.clink-play #unlockTimer{display:none!important;}',
-                'body.clink-play .level-controls{display:none!important;}',
+                'body.clink-play .level-controls .exit{display:none!important;}',
                 'body.clink-play #singlePlayerComplete #completeNextButton{display:none!important;}',
                 'body.clink-play #singlePlayerComplete .complete-buttons>button:last-child{display:none!important;}'
             ].join('\n');
@@ -25264,8 +25265,10 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             alert('打开云链接失败：' + e.message);
         }
     };
-    // 页面带 ?mazeLink= / #mazeLink= 参数时，提前进入纯净模式（避免主菜单闪烁），待初始化完成后自动开玩
-    window.addEventListener('load', function() {
+    // 页面带 ?mazeLink= / #mazeLink= 参数时，立即进入纯净模式并自动开玩
+    // 关键修复：不再等待 window.load（图片/字体全加载完才触发，导致主菜单停留很久），
+    // 也不再 setTimeout 800ms 死等；脚本执行时即隐藏主菜单、进入单机关屏，下一帧立即加载。
+    (function() {
         let code = '';
         try {
             code = new URLSearchParams(location.search).get('mazeLink') || '';
@@ -25275,12 +25278,20 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             }
         } catch (e) { code = ''; }
         if (!code) return;
-        // 提前隐藏主菜单与其它外壳，仅留空白画布区，迷宫载入即自动开玩
+        // 立即隐藏主菜单外壳，避免"先闪主菜单再消失"的卡顿
         enterClinkPlayMode();
         const mm = document.getElementById('mainMenu');
-        if (mm) mm.classList.add('hidden');
-        setTimeout(() => loadMazeFromLink(code), 800);
-    });
+        if (mm) mm.style.display = 'none';
+        // 立即进入单机关屏（显示加载态），无需等待 window.load
+        const sp = document.getElementById('singlePlayerGame');
+        if (sp) sp.classList.remove('hidden');
+        // 等 DOMContentLoaded（远早于 window.load，且保证游戏 init 已完成）后下一帧立即加载迷宫开玩
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => loadMazeFromLink(code)));
+        } else {
+            requestAnimationFrame(() => loadMazeFromLink(code));
+        }
+    })();
     </script>
 
     <!-- 传送确认弹窗（顶层，避免被屏幕容器隐藏） -->
