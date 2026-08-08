@@ -207,7 +207,8 @@ const DB_TABLES_SQL = [
         updated_at VARCHAR(32),
         max_mazes INT NOT NULL DEFAULT 5,
         client_id VARCHAR(64),
-        disabled TINYINT(1) NOT NULL DEFAULT 0
+        disabled TINYINT(1) NOT NULL DEFAULT 0,
+        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -256,7 +257,8 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         updated_at VARCHAR(32),
         client_id VARCHAR(64),
-        disabled TINYINT(1) NOT NULL DEFAULT 0
+        disabled TINYINT(1) NOT NULL DEFAULT 0,
+        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_links (
         code VARCHAR(32) PRIMARY KEY,
@@ -414,6 +416,24 @@ async function initDatabase() {
                     await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN banned_until VARCHAR(32)');
                     console.log('🗄️ 已为 cloud_storage_accounts 表补充 banned_until 列（限时封禁）');
                 }
+                // 补充 two_factor_enabled 列：云储存账号二次认证（2FA）开关
+                const [tfaCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_accounts' AND COLUMN_NAME='two_factor_enabled'",
+                    [dbName]
+                );
+                if (!tfaCols || tfaCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0');
+                    console.log('🗄️ 已为 cloud_storage_accounts 表补充 two_factor_enabled 列（二次认证）');
+                }
+                // 补充 cloud_link_accounts 表的 two_factor_enabled 列
+                const [ltfaCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_link_accounts' AND COLUMN_NAME='two_factor_enabled'",
+                    [dbName]
+                );
+                if (!ltfaCols || ltfaCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_link_accounts ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0');
+                    console.log('🗄️ 已为 cloud_link_accounts 表补充 two_factor_enabled 列（二次认证）');
+                }
                 // 补充 ip 列：记录会话登录 IP，供"管理设备"展示
                 const [sessIpCols] = await pool.query(
                     "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_sessions' AND COLUMN_NAME='ip'",
@@ -487,6 +507,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     ctrlShiftCD: true,
     cloudStorage: true,
     mazeJsonShare: true,
+    cloudLinkEnabled: true,
     antiDevtools: false,
     showAntiCheatTab: true,
     newUi: { mode: 'probability', prob: 100 }
@@ -4838,7 +4859,8 @@ const CLOUD_ACCOUNT_COLUMNS = {
     max_mazes: 'INT NOT NULL DEFAULT 5',
     client_id: 'VARCHAR(64)',
     disabled: 'TINYINT(1) NOT NULL DEFAULT 0',
-    banned_until: 'VARCHAR(32)'
+    banned_until: 'VARCHAR(32)',
+    two_factor_enabled: 'TINYINT(1) NOT NULL DEFAULT 0'
 };
 const _healedAccountCols = {};
 async function _healAccountColumn(col) {
@@ -4858,9 +4880,10 @@ async function dbSaveCloudAccount(acc) {
     const clientId = (acc.client_id != null) ? acc.client_id : null;
     const disabled = (acc.disabled != null) ? (acc.disabled ? 1 : 0) : 0;
     const bannedUntil = (acc.banned_until != null && acc.banned_until !== '') ? String(acc.banned_until) : null;
-    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until) VALUES (?,?,?,?,?,?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil];
+    const twoFactor = (acc.two_factor_enabled != null) ? (acc.two_factor_enabled ? 1 : 0) : 0;
+    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled) VALUES (?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled)';
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor];
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(SQL, PARAMS);
@@ -4876,7 +4899,7 @@ async function dbSaveCloudAccount(acc) {
             console.error('[云储存] DB 写账号失败:', e.message);
         }
     }
-    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled, banned_until: bannedUntil }));
+    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor }));
     saveCloudStorage();
 }
 // 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
@@ -5272,16 +5295,17 @@ async function dbGetLinkAccount(username) {
 async function dbSaveLinkAccount(acc) {
     const clientId = (acc.client_id != null) ? acc.client_id : null;
     const disabled = acc.disabled ? 1 : 0;
+    const twoFactor = acc.two_factor_enabled ? 1 : 0;
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled) VALUES (?,?,?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled]);
+                'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled) VALUES (?,?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), two_factor_enabled=VALUES(two_factor_enabled)',
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor]);
             return;
         } catch (e) { console.error('[云链接] DB 写账号失败:', e.message); }
     }
-    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled }));
+    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled, two_factor_enabled: twoFactor }));
     saveCloudLinksFile();
 }
 async function dbAllLinkAccounts() {
@@ -5446,6 +5470,9 @@ loadCloudLinkSessions().catch(e => console.error('[云链接] 会话载入失败
 // 「查看/分享迷宫（JSON）」总开关：同时管辖云链接的创建
 function mazeJsonShareEnabled() { return globalFunctions.mazeJsonShare !== false; }
 
+// 云链接功能总开关（master switch）：控制整套云链接账号/分享/游玩是否可用
+function cloudLinkEnabled() { return globalFunctions.cloudLinkEnabled !== false; }
+
 // 云链接鉴权：Authorization: Bearer <jwt>（type=clink）
 async function requireLinkAuth(req, res, next) {
     const h = req.headers.authorization || '';
@@ -5488,13 +5515,14 @@ function normalizeLinkMaze(b) {
     };
 }
 
-// 公开：云链接功能是否可用（跟随 mazeJsonShare 开关）
+// 公开：云链接功能是否可用（跟随 cloudLinkEnabled 总开关）
 app.get('/api/cloud-links/enabled', (req, res) => {
-    res.json({ success: true, enabled: mazeJsonShareEnabled() });
+    res.json({ success: true, enabled: cloudLinkEnabled(), jsonShare: mazeJsonShareEnabled() });
 });
 
 // 注册云链接账号
 app.post('/api/cloud-links/register', async (req, res) => {
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
     try {
         const username = (req.body.username || '').toString().trim();
         const password = (req.body.password || '').toString();
@@ -5523,6 +5551,7 @@ app.post('/api/cloud-links/register', async (req, res) => {
 
 // 云链接账号登录
 app.post('/api/cloud-links/login', async (req, res) => {
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
     try {
         const username = (req.body.username || '').toString().trim();
         const password = (req.body.password || '').toString();
@@ -5550,7 +5579,7 @@ app.post('/api/cloud-links/login', async (req, res) => {
 // ===== 云链接账号自助管理（需登录态）=====
 // 自助修改密码：需验证原密码
 app.put('/api/cloud-links/password', requireLinkAuth, async (req, res) => {
-    if (!mazeJsonShareEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
     try {
         const oldPassword = ((req.body && req.body.oldPassword) || '').toString();
         const newPassword = ((req.body && req.body.newPassword) || '').toString();
@@ -5571,7 +5600,7 @@ app.put('/api/cloud-links/password', requireLinkAuth, async (req, res) => {
 
 // 自助注销账号：需验证密码（级联删除全部云链接、会话与登录态）
 app.delete('/api/cloud-links/account', requireLinkAuth, async (req, res) => {
-    if (!mazeJsonShareEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
     try {
         const password = ((req.body && req.body.password) || '').toString();
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
@@ -5584,6 +5613,44 @@ app.delete('/api/cloud-links/account', requireLinkAuth, async (req, res) => {
         appendAudit(req.linkUser || 'clink', 'cloud-link-account-delete', `云链接账号「${req.linkUser}」自行注销`, req);
         res.json({ success: true, message: '账号已注销' });
     } catch (e) { res.status(500).json({ success: false, message: '注销失败' }); }
+});
+
+// ===== 云链接账号「二次认证（2FA）」开关查询与设置 =====
+app.get('/api/cloud-links/2fa', requireLinkAuth, async (req, res) => {
+    try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        res.json({ success: true, enabled: !!(acc && acc.two_factor_enabled) });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+app.put('/api/cloud-links/2fa', requireLinkAuth, async (req, res) => {
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString();
+        const enabled = !!((req.body && req.body.enabled));
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认操作' });
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        acc.two_factor_enabled = enabled ? 1 : 0;
+        acc.updated_at = new Date().toISOString();
+        await dbSaveLinkAccount(acc);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-change', `云链接账号「${req.linkUser}」二次认证${enabled ? '开启' : '关闭'}`, req);
+        res.json({ success: true, enabled, message: enabled ? '已开启二次认证' : '已关闭二次认证' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+// 二次认证「升级验证」：敏感操作前校验账号密码
+app.post('/api/cloud-links/verify', requireLinkAuth, async (req, res) => {
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString();
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: '验证失败' }); }
 });
 
 // 查看本账号登录过的设备/会话
@@ -5645,7 +5712,7 @@ app.get('/api/cloud-links/mine', requireLinkAuth, async (req, res) => {
 // 创建云链接（把一张迷宫发布为可游玩的公开链接）
 app.post('/api/cloud-links', requireLinkAuth, async (req, res) => {
     try {
-        if (!mazeJsonShareEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭「查看/分享迷宫」功能' });
+        if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭云链接功能' });
         const data = normalizeLinkMaze(req.body || {});
         if (!data) return res.status(400).json({ success: false, message: '迷宫数据无效' });
         const list = await dbGetLinksOf(req.linkUser);
@@ -5680,6 +5747,7 @@ app.delete('/api/cloud-links/:code', requireLinkAuth, async (req, res) => {
 // 公开：按短链码读取迷宫数据（游戏客户端凭 ?mazeLink=code 拉取后直接开玩）
 app.get('/api/maze-link/:code', async (req, res) => {
     try {
+        if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
         const l = await dbGetLink(req.params.code);
         if (!l) return res.status(404).json({ success: false, message: '链接不存在或已被删除' });
         if (l.disabled) return res.status(403).json({ success: false, message: '该链接已被管理员停用' });
@@ -5971,6 +6039,47 @@ app.delete('/api/cloud-storage/account', requireCloudAuth, async (req, res) => {
         appendAudit(req.cloudUser || 'cloud', 'cloud-account-delete', `云储存账号「${req.cloudUser}」自行注销`, req);
         res.json({ success: true, message: '账号已注销' });
     } catch (e) { res.status(500).json({ success: false, message: '注销失败' }); }
+});
+
+// ===== 云储存账号「二次认证（2FA）」开关查询与设置 =====
+// 查询当前账号是否开启二次认证
+app.get('/api/cloud-storage/2fa', requireCloudAuth, async (req, res) => {
+    try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        res.json({ success: true, enabled: !!(acc && acc.two_factor_enabled) });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+// 开启/关闭二次认证：需验证账号密码（敏感操作，防止他人趁账号登录态篡改）
+app.put('/api/cloud-storage/2fa', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString();
+        const enabled = !!((req.body && req.body.enabled));
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认操作' });
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        acc.two_factor_enabled = enabled ? 1 : 0;
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-change', `云储存账号「${req.cloudUser}」二次认证${enabled ? '开启' : '关闭'}`, req);
+        res.json({ success: true, enabled, message: enabled ? '已开启二次认证' : '已关闭二次认证' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+// 二次认证「升级验证」：敏感操作（打开账号设置/管理设备/踢出设备）前校验账号密码，
+// 由注册账号本人输入密码授权后方放行。仅校验，不改任何状态。
+app.post('/api/cloud-storage/verify', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString();
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: '验证失败' }); }
 });
 
 // 获取当前账号的云地图列表（含网格，用于下载）
