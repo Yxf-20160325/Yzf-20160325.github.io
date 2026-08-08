@@ -20004,6 +20004,7 @@ function openCloudSpaceModal() {
                     <span>
                         <button onclick="cloudRedeemCode()" style="padding:4px 10px; background:#AB47BC; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">🎁 使用扩容码</button>
                         <button onclick="showCloudDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
+                        <button onclick="showCloudAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
                         <button onclick="cloudLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
                     </span>
                 </div>
@@ -20213,6 +20214,92 @@ async function showCloudDevices() {
 function closeCloudDevices() {
     const m = document.getElementById('cloudDevicesModal');
     if (m) m.remove();
+}
+// ===== 云储存「账号设置」：查看账号名 / 改密（验原密码）/ 注销（需密码）=====
+function showCloudAccountSettings() {
+    let modal = document.getElementById('cloudAccountSettingsModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'cloudAccountSettingsModal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:34000;';
+        document.body.appendChild(modal);
+    }
+    const uname = localStorage.getItem(CLOUD_USER_KEY) || '未知账号';
+    modal.innerHTML = `
+      <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <h3 style="margin:0;">⚙️ 账号设置</h3>
+          <button onclick="closeCloudAccountSettings()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
+        </div>
+        <div style="padding:12px;background:rgba(33,150,243,0.12);border:1px solid rgba(33,150,243,0.4);border-radius:10px;margin-bottom:18px;">
+          <div style="color:#90caf9;font-size:13px;">当前账号</div>
+          <div style="font-weight:bold;font-size:18px;">${escapeHtmlLocal(uname)}</div>
+        </div>
+        <div style="margin-bottom:18px;">
+          <div style="font-weight:bold;margin-bottom:8px;color:#90caf9;">🔑 更改密码</div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <input id="cloudSetOldPass" type="password" placeholder="原密码" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+            <input id="cloudSetNewPass" type="password" placeholder="新密码（至少 4 位）" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+            <input id="cloudSetNewPass2" type="password" placeholder="确认新密码" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+            <button onclick="cloudChangePassword()" style="padding:8px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;">保存修改</button>
+          </div>
+        </div>
+        <div style="padding:14px;background:rgba(244,67,54,0.1);border:1px solid rgba(244,67,54,0.4);border-radius:10px;">
+          <div style="font-weight:bold;margin-bottom:8px;color:#ff8a80;">⚠️ 注销账号</div>
+          <div style="font-size:12px;color:#ffb74d;margin-bottom:10px;">注销后将永久删除你的全部云端地图、通关数据与设备登录，不可恢复。</div>
+          <input id="cloudSetDelPass" type="password" placeholder="输入密码以确认注销" style="width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:8px;">
+          <button onclick="cloudDeleteAccount()" style="width:100%;padding:8px;background:#F44336;color:#fff;border:none;border-radius:8px;cursor:pointer;">永久注销账号</button>
+        </div>
+        <div id="cloudSetMsg" style="font-size:13px;margin-top:12px;min-height:16px;"></div>
+      </div>`;
+    modal.onclick = (e) => { if (e.target === modal) closeCloudAccountSettings(); };
+}
+function closeCloudAccountSettings() {
+    const m = document.getElementById('cloudAccountSettingsModal');
+    if (m) m.remove();
+}
+async function cloudChangePassword() {
+    const oldP = document.getElementById('cloudSetOldPass').value || '';
+    const newP = document.getElementById('cloudSetNewPass').value || '';
+    const newP2 = document.getElementById('cloudSetNewPass2').value || '';
+    const msg = document.getElementById('cloudSetMsg');
+    msg.textContent = '';
+    if (!oldP || !newP) { msg.textContent = '请输入原密码和新密码'; msg.style.color = '#ff8a80'; return; }
+    if (newP.length < 4) { msg.textContent = '新密码至少 4 位'; msg.style.color = '#ff8a80'; return; }
+    if (newP !== newP2) { msg.textContent = '两次输入的新密码不一致'; msg.style.color = '#ff8a80'; return; }
+    try {
+        const r = await cloudApi('/password', { method: 'PUT', body: JSON.stringify({ oldPassword: oldP, newPassword: newP }) });
+        if (r.status === 401) { cloudForceLogout(); return; }
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '修改失败');
+        msg.textContent = '✅ 密码已修改，下次登录请使用新密码';
+        msg.style.color = '#aed581';
+        document.getElementById('cloudSetOldPass').value = '';
+        document.getElementById('cloudSetNewPass').value = '';
+        document.getElementById('cloudSetNewPass2').value = '';
+    } catch (e) {
+        msg.textContent = '❌ ' + e.message;
+        msg.style.color = '#ff8a80';
+    }
+}
+async function cloudDeleteAccount() {
+    const p = document.getElementById('cloudSetDelPass').value || '';
+    const msg = document.getElementById('cloudSetMsg');
+    msg.textContent = '';
+    if (!p) { msg.textContent = '请输入密码以确认注销'; msg.style.color = '#ff8a80'; return; }
+    if (!confirm('确定要注销该云储存账号吗？\n全部云端地图、通关数据与设备登录将被永久删除，且不可恢复！')) return;
+    try {
+        const r = await cloudApi('/account', { method: 'DELETE', body: JSON.stringify({ password: p }) });
+        if (r.status === 401) { cloudForceLogout(); return; }
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message || '注销失败');
+        closeCloudAccountSettings();
+        cloudForceLogout();
+        showNotification('☁️ 云储存账号已注销');
+    } catch (e) {
+        msg.textContent = '❌ ' + e.message;
+        msg.style.color = '#ff8a80';
+    }
 }
 // 客户端使用扩容码：兑换后提升云空间容量
 async function cloudRedeemCode() {
@@ -25063,6 +25150,8 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             <span style="color:#b39ddb;">🔗 已登录：<b>${escapeHtmlSafe(user)}</b>（<span id="clinkCount">0</span>/<span id="clinkMax">50</span> 条链接）</span>
             <span style="display:flex; gap:6px;">
               <button onclick="clinkLoadList()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">🔄 刷新</button>
+              <button onclick="showClinkDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
+              <button onclick="showClinkAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
               <button onclick="clinkLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
             </span>
           </div>
@@ -25106,6 +25195,173 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         localStorage.removeItem(CLINK_USER_KEY);
         clinkRender();
         showNotification('已退出云链接账号');
+    };
+    // ===== 云链接「账号设置」：查看账号名 / 改密（验原密码）/ 注销（需密码）=====
+    window.showClinkAccountSettings = function() {
+        let modal = document.getElementById('clinkAccountSettingsModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'clinkAccountSettingsModal';
+            modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:34000;';
+            document.body.appendChild(modal);
+        }
+        const uname = localStorage.getItem(CLINK_USER_KEY) || '未知账号';
+        modal.innerHTML = `
+          <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+              <h3 style="margin:0;">⚙️ 账号设置</h3>
+              <button onclick="closeClinkAccountSettings()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:12px;background:rgba(126,87,194,0.14);border:1px solid rgba(126,87,194,0.5);border-radius:10px;margin-bottom:18px;">
+              <div style="color:#b39ddb;font-size:13px;">当前账号</div>
+              <div style="font-weight:bold;font-size:18px;">${escapeHtmlLocal(uname)}</div>
+            </div>
+            <div style="margin-bottom:18px;">
+              <div style="font-weight:bold;margin-bottom:8px;color:#b39ddb;">🔑 更改密码</div>
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <input id="clinkSetOldPass" type="password" placeholder="原密码" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+                <input id="clinkSetNewPass" type="password" placeholder="新密码（至少 4 位）" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+                <input id="clinkSetNewPass2" type="password" placeholder="确认新密码" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+                <button onclick="clinkChangePassword()" style="padding:8px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;">保存修改</button>
+              </div>
+            </div>
+            <div style="padding:14px;background:rgba(244,67,54,0.1);border:1px solid rgba(244,67,54,0.4);border-radius:10px;">
+              <div style="font-weight:bold;margin-bottom:8px;color:#ff8a80;">⚠️ 注销账号</div>
+              <div style="font-size:12px;color:#ffb74d;margin-bottom:10px;">注销后将永久删除你的全部云链接与设备登录，不可恢复。</div>
+              <input id="clinkSetDelPass" type="password" placeholder="输入密码以确认注销" style="width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:8px;">
+              <button onclick="clinkDeleteAccount()" style="width:100%;padding:8px;background:#F44336;color:#fff;border:none;border-radius:8px;cursor:pointer;">永久注销账号</button>
+            </div>
+            <div id="clinkSetMsg" style="font-size:13px;margin-top:12px;min-height:16px;"></div>
+          </div>`;
+        modal.onclick = (e) => { if (e.target === modal) closeClinkAccountSettings(); };
+    };
+    window.closeClinkAccountSettings = function() {
+        const m = document.getElementById('clinkAccountSettingsModal');
+        if (m) m.remove();
+    };
+    window.clinkChangePassword = async function() {
+        const oldP = document.getElementById('clinkSetOldPass').value || '';
+        const newP = document.getElementById('clinkSetNewPass').value || '';
+        const newP2 = document.getElementById('clinkSetNewPass2').value || '';
+        const msg = document.getElementById('clinkSetMsg');
+        msg.textContent = '';
+        if (!oldP || !newP) { msg.textContent = '请输入原密码和新密码'; msg.style.color = '#ff8a80'; return; }
+        if (newP.length < 4) { msg.textContent = '新密码至少 4 位'; msg.style.color = '#ff8a80'; return; }
+        if (newP !== newP2) { msg.textContent = '两次输入的新密码不一致'; msg.style.color = '#ff8a80'; return; }
+        try {
+            const r = await clinkApi('/password', { method: 'PUT', body: JSON.stringify({ oldPassword: oldP, newPassword: newP }) });
+            if (r.status === 401) { clinkForceLogout(); return; }
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '修改失败');
+            msg.textContent = '✅ 密码已修改，下次登录请使用新密码';
+            msg.style.color = '#aed581';
+            document.getElementById('clinkSetOldPass').value = '';
+            document.getElementById('clinkSetNewPass').value = '';
+            document.getElementById('clinkSetNewPass2').value = '';
+        } catch (e) {
+            msg.textContent = '❌ ' + e.message;
+            msg.style.color = '#ff8a80';
+        }
+    };
+    window.clinkDeleteAccount = async function() {
+        const p = document.getElementById('clinkSetDelPass').value || '';
+        const msg = document.getElementById('clinkSetMsg');
+        msg.textContent = '';
+        if (!p) { msg.textContent = '请输入密码以确认注销'; msg.style.color = '#ff8a80'; return; }
+        if (!confirm('确定要注销该云链接账号吗？\n全部云链接将被永久删除，且不可恢复！')) return;
+        try {
+            const r = await clinkApi('/account', { method: 'DELETE', body: JSON.stringify({ password: p }) });
+            if (r.status === 401) { clinkForceLogout(); return; }
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '注销失败');
+            closeClinkAccountSettings();
+            clinkForceLogout();
+            showNotification('🔗 云链接账号已注销');
+        } catch (e) {
+            msg.textContent = '❌ ' + e.message;
+            msg.style.color = '#ff8a80';
+        }
+    };
+    function clinkForceLogout() {
+        localStorage.removeItem(CLINK_TOKEN_KEY);
+        localStorage.removeItem(CLINK_USER_KEY);
+        clinkRender();
+    }
+    // ===== 云链接「管理设备」：查看 / 退登本账号所有设备 =====
+    window.showClinkDevices = function() {
+        let modal = document.getElementById('clinkDevicesModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'clinkDevicesModal';
+            modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:33000;';
+            document.body.appendChild(modal);
+        }
+        modal.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(480px,92vw);max-height:84vh;overflow:auto;padding:20px;border-radius:12px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+            '<h3 style="margin:0;">📱 管理设备</h3>' +
+            '<button onclick="closeClinkDevices()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;">✕</button></div>' +
+            '<div id="clinkDevicesList" style="font-size:13px;">加载中...</div>' +
+            '<div style="margin-top:14px;display:flex;gap:8px;">' +
+            '<button onclick="clinkRevokeOtherSessions()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
+            '</div></div>';
+        modal.onclick = (e) => { if (e.target === modal) closeClinkDevices(); };
+        renderClinkDevices();
+    };
+    window.closeClinkDevices = function() {
+        const m = document.getElementById('clinkDevicesModal');
+        if (m) m.remove();
+    };
+    async function renderClinkDevices() {
+        const box = document.getElementById('clinkDevicesList');
+        if (!box) return;
+        try {
+            const r = await clinkApi('/sessions');
+            if (r.status === 401) { clinkForceLogout(); return; }
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
+            const list = d.sessions || [];
+            if (list.length === 0) { box.innerHTML = '<p style="color:#aaa;">暂无设备信息</p>'; return; }
+            box.innerHTML = list.map(s => `
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.06);border-radius:8px;margin-bottom:8px;">
+                    <div style="overflow:hidden;">
+                        <div style="font-weight:bold;">${escapeHtmlLocal(parseUserAgent(s.device))}${s.current ? ' <span style="color:#4caf50;font-size:11px;">（当前设备）</span>' : ''}</div>
+                        <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)} ｜ IP:${escapeHtmlLocal(s.ip || '—')}</div>
+                    </div>
+                    <button onclick="clinkRevokeSession('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
+                </div>
+            `).join('');
+        } catch (e) { box.innerHTML = '<p style="color:#ff8a80;">加载失败：' + escapeHtmlLocal(e.message) + '</p>'; }
+    }
+    window.clinkRevokeSession = async function(id, isCurrent) {
+        try {
+            const r = await clinkApi('/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
+            if (r.status === 401) { clinkForceLogout(); closeClinkDevices(); return; }
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
+            if (d.current) {
+                // 退登当前设备 = 退出登录
+                closeClinkDevices();
+                clinkForceLogout();
+                showNotification('🔗 已退出当前设备');
+                return;
+            }
+            showNotification('✅ ' + (d.message || '已退登该设备'));
+            renderClinkDevices();
+        } catch (e) {
+            alert('退登失败：' + e.message);
+        }
+    };
+    window.clinkRevokeOtherSessions = async function() {
+        try {
+            const r = await clinkApi('/sessions', { method: 'DELETE' });
+            if (r.status === 401) { clinkForceLogout(); closeClinkDevices(); return; }
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
+            showNotification('✅ ' + (d.message || '已退出其他所有设备'));
+            renderClinkDevices();
+        } catch (e) {
+            alert('操作失败：' + e.message);
+        }
     };
     window.clinkLoadList = async function() {
         const box = document.getElementById('clinkList');
