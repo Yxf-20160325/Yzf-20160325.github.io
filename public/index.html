@@ -20288,8 +20288,8 @@ async function cloudFetch2fa() {
     } catch (e) {}
     return window.__cloud2fa;
 }
-// 二次认证「授权」弹窗：由创建该账号的人点击「授权」按钮放行敏感操作（不再要求输密码）。
-// onAuthorized() 在点击授权后调用。
+// 二次认证「授权」弹窗：由创建该账号的人点击「授权」按钮放行敏感操作。
+// 点击授权后，先向后端 /authorize 校验身份（client_id 必须匹配账号创建者），通过才回调 onAuthorized()。
 function cloudStepUpAuth(titleText, onAuthorized) {
     let m = document.getElementById('cloudStepUpModal');
     if (!m) {
@@ -20301,13 +20301,29 @@ function cloudStepUpAuth(titleText, onAuthorized) {
     const uname = localStorage.getItem(CLOUD_USER_KEY) || '未知账号';
     m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
         '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 ' + (titleText || '需要授权') + '</div>' +
-        '<div style="font-size:13px;color:#ffb74d;margin-bottom:16px;line-height:1.6;">此操作需要<b>创建该账号的人（' + escapeHtmlLocal(uname) + '）</b>亲自点击「授权」按钮确认后才能继续。<br>仅该账号的创建者可以完成授权。</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:14px;line-height:1.6;">此操作需要<b>创建该账号的人（' + escapeHtmlLocal(uname) + '）</b>亲自点击「授权」按钮确认后才能继续。<br><b style="color:#ff8a80;">仅该账号的创建者（client_id 匹配）可以完成授权，其他人点击会被拒绝。</b></div>' +
+        '<div id="cloudStepUpMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
         '<div style="display:flex;gap:8px;">' +
         '<button onclick="closeCloudStepUp()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
         '<button id="cloudStepUpOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 授权并继续</button>' +
         '</div></div>';
     m.onclick = (e) => { if (e.target === m) closeCloudStepUp(); };
-    document.getElementById('cloudStepUpOk').onclick = () => { closeCloudStepUp(); onAuthorized(); };
+    const okBtn = document.getElementById('cloudStepUpOk');
+    const clientId = (typeof gameState !== 'undefined' && gameState.clientId) ? gameState.clientId : '';
+    okBtn.onclick = async () => {
+        okBtn.disabled = true; okBtn.textContent = '校验中...';
+        try {
+            const r = await cloudApi('/authorize', { method: 'POST', body: JSON.stringify({ clientId }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '授权失败');
+            closeCloudStepUp();
+            onAuthorized();
+        } catch (e) {
+            const msg = document.getElementById('cloudStepUpMsg');
+            if (msg) msg.textContent = '❌ ' + e.message;
+            okBtn.disabled = false; okBtn.textContent = '✅ 授权并继续';
+        }
+    };
 }
 function closeCloudStepUp() { const m = document.getElementById('cloudStepUpModal'); if (m) m.remove(); }
 // 通用密码弹窗：用于开启/关闭二次认证等需验证密码的操作（与上面的「授权」按钮区分）。
@@ -20440,7 +20456,7 @@ async function renderCloudDevices() {
     const box = document.getElementById('cloudDevicesList');
     if (!box) return;
     try {
-        const r = await cloudApi('/sessions');
+        const r = await cloudApi('/sessions?clientId=' + encodeURIComponent((typeof gameState !== 'undefined' && gameState.clientId) || ''));
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
         const list = d.sessions || [];
@@ -20459,7 +20475,7 @@ async function renderCloudDevices() {
 async function cloudRevokeSession(id, isCurrent) {
     if (!confirm(isCurrent ? '确定退出当前设备？退出后需重新登录。' : '确定退登该设备？')) return;
     try {
-        const r = await cloudApi('/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
+        const r = await cloudApi('/sessions/' + encodeURIComponent(id), { method: 'DELETE', body: JSON.stringify({ clientId: (typeof gameState !== 'undefined' && gameState.clientId) || '' }) });
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
         if (isCurrent) { cloudForceLogout(); return; } // 退出自己 → 立即失效
@@ -20470,7 +20486,7 @@ async function cloudRevokeSession(id, isCurrent) {
 async function cloudRevokeOtherSessions() {
     if (!confirm('确定退出其他所有设备？当前设备保持不变。')) return;
     try {
-        const r = await cloudApi('/sessions', { method: 'DELETE' });
+        const r = await cloudApi('/sessions', { method: 'DELETE', body: JSON.stringify({ clientId: (typeof gameState !== 'undefined' && gameState.clientId) || '' }) });
         const d = await r.json();
         if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
         showNotification('已退出其他所有设备');
@@ -25397,13 +25413,29 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         const uname = localStorage.getItem(CLINK_USER_KEY) || '未知账号';
         m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
             '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 ' + (titleText || '需要授权') + '</div>' +
-            '<div style="font-size:13px;color:#ffb74d;margin-bottom:16px;line-height:1.6;">此操作需要<b>创建该账号的人（' + escapeHtmlLocal(uname) + '）</b>亲自点击「授权」按钮确认后才能继续。<br>仅该账号的创建者可以完成授权。</div>' +
+            '<div style="font-size:13px;color:#ffb74d;margin-bottom:14px;line-height:1.6;">此操作需要<b>创建该账号的人（' + escapeHtmlLocal(uname) + '）</b>亲自点击「授权」按钮确认后才能继续。<br><b style="color:#ff8a80;">仅该账号的创建者（client_id 匹配）可以完成授权，其他人点击会被拒绝。</b></div>' +
+            '<div id="clinkStepUpMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
             '<div style="display:flex;gap:8px;">' +
             '<button onclick="closeClinkStepUp()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
             '<button id="clinkStepUpOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 授权并继续</button>' +
             '</div></div>';
         m.onclick = (e) => { if (e.target === m) closeClinkStepUp(); };
-        document.getElementById('clinkStepUpOk').onclick = () => { closeClinkStepUp(); onAuthorized(); };
+        const okBtn = document.getElementById('clinkStepUpOk');
+        const clientId = (typeof gameState !== 'undefined' && gameState.clientId) ? gameState.clientId : '';
+        okBtn.onclick = async () => {
+            okBtn.disabled = true; okBtn.textContent = '校验中...';
+            try {
+                const r = await clinkApi('/authorize', { method: 'POST', body: JSON.stringify({ clientId }) });
+                const d = await r.json();
+                if (!r.ok || !d.success) throw new Error(d.message || '授权失败');
+                closeClinkStepUp();
+                onAuthorized();
+            } catch (e) {
+                const msg = document.getElementById('clinkStepUpMsg');
+                if (msg) msg.textContent = '❌ ' + e.message;
+                okBtn.disabled = false; okBtn.textContent = '✅ 授权并继续';
+            }
+        };
     }
     window.closeClinkStepUp = function() { const m = document.getElementById('clinkStepUpModal'); if (m) m.remove(); };
     // 通用密码弹窗：用于开启/关闭二次认证等需验证密码的操作（与上面的「授权」按钮区分）。
@@ -25549,7 +25581,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         const box = document.getElementById('clinkDevicesList');
         if (!box) return;
         try {
-            const r = await clinkApi('/sessions');
+            const r = await clinkApi('/sessions?clientId=' + encodeURIComponent((typeof gameState !== 'undefined' && gameState.clientId) || ''));
             if (r.status === 401) { clinkForceLogout(); return; }
             const d = await r.json();
             if (!r.ok || !d.success) throw new Error(d.message || '获取失败');
@@ -25568,7 +25600,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     }
     window.clinkRevokeSession = async function(id, isCurrent) {
         try {
-            const r = await clinkApi('/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
+            const r = await clinkApi('/sessions/' + encodeURIComponent(id), { method: 'DELETE', body: JSON.stringify({ clientId: (typeof gameState !== 'undefined' && gameState.clientId) || '' }) });
             if (r.status === 401) { clinkForceLogout(); closeClinkDevices(); return; }
             const d = await r.json();
             if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
@@ -25587,7 +25619,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     };
     window.clinkRevokeOtherSessions = async function() {
         try {
-            const r = await clinkApi('/sessions', { method: 'DELETE' });
+            const r = await clinkApi('/sessions', { method: 'DELETE', body: JSON.stringify({ clientId: (typeof gameState !== 'undefined' && gameState.clientId) || '' }) });
             if (r.status === 401) { clinkForceLogout(); closeClinkDevices(); return; }
             const d = await r.json();
             if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
