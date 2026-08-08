@@ -6965,7 +6965,8 @@ let editorState = {
     enemySpeed: 5,      // 移动敌人速度倍率，默认5（普通）
     enemySpeedPrompted: false,  // 是否已提示过速度设置
     hoverCell: null,    // 当前鼠标悬停的单元格，用于高亮
-    serverMazeId: null  // 已上报到服务器的地图ID（同一次编辑会话内复用，避免重复）
+    serverMazeId: null,  // 已上报到服务器的地图ID（同一次编辑会话内复用，避免重复）
+    mech: null          // 迷宫机关配置（压力板/联动门/限时门等），随迷宫保存/加载
 };
 
 // 撤销/重做栈
@@ -18682,6 +18683,7 @@ function generateEditorMaze() {
     maze[size-2][size-2] = 3;       // 出口
     editorState.maze = maze;
     editorState.teleporters = [];
+    editorState.mech = null;
     editorState.editingIndex = -1;
     const canvas = document.getElementById('editorCanvas');
     if (canvas) drawMazeGrid(canvas.getContext('2d'));
@@ -18746,6 +18748,7 @@ function newMaze() {
     
     editorState.maze = maze;
     editorState.teleporters = [];
+    editorState.mech = null;
     editorState.editingIndex = -1; // 重置为新建模式
     // 重置敌人速度状态（新建迷宫时）
     editorState.enemySpeed = 5;
@@ -18843,6 +18846,7 @@ function saveMaze() {
         teleporters: editorState.teleporters || [],
         enemySpeed: editorState.enemySpeed || 1,
         showShop: editorState.showShop !== false,
+        mech: (editorState.mech && typeof editorState.mech === 'object') ? editorState.mech : null,
         createdAt: now,
         updatedAt: now
     };
@@ -19677,7 +19681,24 @@ function playMaze(mazeData, isPreview = false) {
     
     // 普通关卡不启用视野迷雾（迷雾仅限解密关卡）
     gameState.fogOfWar = null;
-    singlePlayerGame.mech = null;
+    // 机关状态：优先使用迷宫自带的 mech 配置（压力板/联动门/限时门/连锁开关/密码锁），
+    // 没有则给空结构（保证机关按钮13/机关门14 等仍正常工作；15-20 类机关在有数据时可用）
+    const mData = (mazeData && mazeData.mech && typeof mazeData.mech === 'object') ? mazeData.mech : null;
+    singlePlayerGame.mech = (mData && typeof mData === 'object') ? mData : {
+        pressurePlates: [], linkedDoors: [], timedDoors: [],
+        chainSwitches: [], codeFragments: [], codeDoor: null,
+        codeSolution: '', codeEntered: false, openDoors: {}, chainTotal: 0
+    };
+    if (!singlePlayerGame.mech.openDoors || typeof singlePlayerGame.mech.openDoors !== 'object') singlePlayerGame.mech.openDoors = {};
+    if (!Array.isArray(singlePlayerGame.mech.pressurePlates)) singlePlayerGame.mech.pressurePlates = [];
+    if (!Array.isArray(singlePlayerGame.mech.linkedDoors)) singlePlayerGame.mech.linkedDoors = [];
+    if (!Array.isArray(singlePlayerGame.mech.timedDoors)) singlePlayerGame.mech.timedDoors = [];
+    if (!Array.isArray(singlePlayerGame.mech.chainSwitches)) singlePlayerGame.mech.chainSwitches = [];
+    if (!Array.isArray(singlePlayerGame.mech.codeFragments)) singlePlayerGame.mech.codeFragments = [];
+    if (singlePlayerGame.mechInterval) { clearInterval(singlePlayerGame.mechInterval); singlePlayerGame.mechInterval = null; }
+    if (singlePlayerGame.mech.timedDoors.length > 0 && typeof updatePuzzleMechanisms === 'function') {
+        singlePlayerGame.mechInterval = setInterval(updatePuzzleMechanisms, 300);
+    }
 
     // 显示/隐藏控制面板
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
@@ -21053,6 +21074,8 @@ function loadMazeForEditing(index) {
         editorState.enemySpeedPrompted = true;
         // 加载是否允许显示商店按钮（默认允许）
         editorState.showShop = (mazeData.showShop !== false);
+        // 加载机关配置（若有）
+        editorState.mech = (mazeData.mech && typeof mazeData.mech === 'object') ? mazeData.mech : null;
         
         // 更新属性面板
         document.getElementById('mazeName').value = mazeData.name;
@@ -25541,7 +25564,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         }
         
         const maze = savedMazes[index];
-        // 构造导出数据（包含分享所需的所有字段）
+        // 构造导出数据（包含分享所需的所有字段，含机关 mech 配置）
         const exportData = {
             name: maze.name,
             description: maze.description || '',
@@ -25549,7 +25572,8 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             size: maze.size,
             maze: maze.maze,
             teleporters: maze.teleporters || [],
-            enemySpeed: maze.enemySpeed || 5
+            enemySpeed: maze.enemySpeed || 5,
+            mech: (maze.mech && typeof maze.mech === 'object') ? maze.mech : undefined
         };
         document.getElementById('jsonPreviewArea').value = JSON.stringify(exportData, null, 2);
     };
@@ -26539,7 +26563,8 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                 teleporters: m.teleporters || [],
                 size: size,
                 enemySpeed: m.enemySpeed || 5,
-                showShop: m.showShop !== false
+                showShop: m.showShop !== false,
+                mech: (m.mech && typeof m.mech === 'object') ? m.mech : null
             }, false);
             // playMaze 内部会重设部分 UI，游玩后再次确认纯净模式并重算画布尺寸占满屏幕
             enterClinkPlayMode();
