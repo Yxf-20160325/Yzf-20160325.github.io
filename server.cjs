@@ -5612,6 +5612,13 @@ app.post('/api/cloud-links/login', async (req, res) => {
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
         if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
+        // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码
+        if (acc.two_factor_enabled) {
+            const code = read2faCode(req);
+            if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
+            const deny = assert2faCode(acc, code);
+            if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+        }
         const clientId = (req.body.clientId || '').toString().trim() || null;
         if (clientId && acc.client_id !== clientId) {
             acc.client_id = clientId; acc.updated_at = new Date().toISOString();
@@ -6163,6 +6170,13 @@ app.post('/api/cloud-storage/login', async (req, res) => {
             } else {
                 return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) });
             }
+        }
+        // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码
+        if (acc.two_factor_enabled) {
+            const code = read2faCode(req);
+            if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
+            const deny = assert2faCode(acc, code);
+            if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
         }
         // 登录时绑定/更新游戏 clientId（使管理端能用游戏用户定位云账号）
         const clientId = (req.body.clientId || '').toString().trim() || null;
