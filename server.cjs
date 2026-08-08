@@ -2445,29 +2445,24 @@ function getAllUsersList() {
             platform: player.platform || 'web'
         });
     }
-    // 2. 兜底：room.players 中未在在线表出现的，按「名字」合并进已有在线条目（避免 peerId 产生重复条目）
+    // 2. 兜底：room.players 中未在在线表出现的，按「clientId」唯一加入（不再按名字合并，
+    //    统一以 clientId 为键，与第 1 步在线表去重，避免 peerId/名字重复计数）
     for (const room of rooms.values()) {
         if (!room.players) continue;
         for (const player of room.players.values()) {
-            if (!player || !player.id) continue;
-            if (userMap.has(player.id)) continue;
-            // 尝试按名字找到已有的在线条目，把房间号合并进去
-            let merged = false;
-            for (const u of userMap.values()) {
-                if (u.username === (player.name || '未知用户') && !u.roomId) {
-                    u.roomId = room.id;
-                    u.roomName = room.name;
-                    merged = true;
-                    break;
-                }
+            if (!player) continue;
+            const cid = player.clientId || player.id;
+            if (!cid) continue;
+            if (userMap.has(cid)) {
+                const u = userMap.get(cid);
+                if (!u.roomId && room.id) { u.roomId = room.id; u.roomName = room.name; }
+                continue;
             }
-            if (merged) continue;
-            // 实在找不到对应在线条目才新增（极少见）
-            userMap.set(player.id, {
-                id: player.id,
+            userMap.set(cid, {
+                id: cid,
                 username: player.name || '未知用户',
-                coins: getDisplayCoins(player.id),
-                level: userLevels.get(player.id) || 1,
+                coins: getDisplayCoins(cid),
+                level: userLevels.get(cid) || 1,
                 roomId: room.id,
                 roomName: room.name,
                 online: true,
