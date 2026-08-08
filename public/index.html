@@ -20739,7 +20739,7 @@ async function cloudOpen2faSetup() {
             '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 2 步 / 共 2 步 · 确认验证</div>' +
             '<div style="background:#3a2a1a;border:1px solid #ff9800;border-radius:8px;padding:10px;font-size:12.5px;color:#ffcc80;line-height:1.7;margin-bottom:12px;">' +
             '⚠️ <b>最后一次验证</b>：请等待插件刷新出<b>新的</b>验证码（最多 30 秒），再输入一次。<br>' +
-            '<b style="color:#ff8a80;">若本次验证失败，二次认证将被自动关闭，需要从头重新开启。</b>' +
+            '<b style="color:#ff8a80;">动态码输错可重新输入重试（绑定时的那个码不能重复使用）；若等待过久导致绑定超时，则需从头重新开启。</b>' +
             '</div>' +
             '<div id="cloud2faTick" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
             '<input id="cloud2faConfirmCode" inputmode="numeric" maxlength="6" placeholder="插件刷新后的新验证码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:8px;">' +
@@ -20777,12 +20777,18 @@ async function cloudOpen2faSetup() {
                     return;
                 }
                 if (d.sameCode) { setMsg('⏳ ' + (d.message || '请等待插件刷新出新的验证码')); okBtn.disabled = false; okBtn.textContent = '完成确认并开启'; return; }
-                // 确认失败 / 绑定超时 → 本次绑定作废，账号保持原状
-                window.__cloud2fa = false;
-                window.__cloud2faPending = false;
-                closeCloud2faSetup();
-                showCloudAccountSettings();
-                showNotification('❌ ' + (d.message || '确认失败，请重新开启二次认证'));
+                if (d.expired) {
+                    // 绑定已超时 → 本次绑定作废，需重新开启
+                    window.__cloud2fa = false;
+                    window.__cloud2faPending = false;
+                    closeCloud2faSetup();
+                    showCloudAccountSettings();
+                    showNotification('❌ ' + (d.message || '绑定已超时，请重新开启二次认证'));
+                    return;
+                }
+                // 动态码错误 → 密钥保留，留在本页提示后重试（不关闭弹窗）
+                setMsg('❌ ' + (d.message || '动态码错误，请重试'));
+                okBtn.disabled = false; okBtn.textContent = '完成确认并开启';
             } catch (e) {
                 setMsg('❌ ' + e.message);
                 okBtn.disabled = false; okBtn.textContent = '完成确认并开启';
@@ -26259,7 +26265,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                 '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 2 步 / 共 2 步 · 确认验证</div>' +
                 '<div style="background:#3a2a1a;border:1px solid #ff9800;border-radius:8px;padding:10px;font-size:12.5px;color:#ffcc80;line-height:1.7;margin-bottom:12px;">' +
                 '⚠️ <b>最后一次验证</b>：请等待插件刷新出<b>新的</b>验证码（最多 30 秒），再输入一次。<br>' +
-                '<b style="color:#ff8a80;">若本次验证失败，二次认证将被自动关闭，需要从头重新开启。</b>' +
+                '<b style="color:#ff8a80;">动态码输错可重新输入重试（绑定时的那个码不能重复使用）；若等待过久导致绑定超时，则需从头重新开启。</b>' +
                 '</div>' +
                 '<div id="clink2faTick" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
                 '<input id="clink2faConfirmCode" inputmode="numeric" maxlength="6" placeholder="插件刷新后的新验证码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:8px;">' +
@@ -26296,12 +26302,18 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                         return;
                     }
                     if (d.sameCode) { setMsg('⏳ ' + (d.message || '请等待插件刷新出新的验证码')); okBtn.disabled = false; okBtn.textContent = '完成确认并开启'; return; }
-                    // 确认失败 / 绑定超时 → 本次绑定作废，账号保持原状
-                    window.__clink2fa = false;
-                    window.__clink2faPending = false;
-                    closeClink2faSetup();
-                    window.showClinkAccountSettings();
-                    showNotification('❌ ' + (d.message || '确认失败，请重新开启二次认证'));
+                    if (d.expired) {
+                        // 绑定已超时 → 本次绑定作废，需重新开启
+                        window.__clink2fa = false;
+                        window.__clink2faPending = false;
+                        closeClink2faSetup();
+                        window.showClinkAccountSettings();
+                        showNotification('❌ ' + (d.message || '绑定已超时，请重新开启二次认证'));
+                        return;
+                    }
+                    // 动态码错误 → 密钥保留，留在本页提示后重试（不关闭弹窗）
+                    setMsg('❌ ' + (d.message || '动态码错误，请重试'));
+                    okBtn.disabled = false; okBtn.textContent = '完成确认并开启';
                 } catch (e) {
                     setMsg('❌ ' + e.message);
                     okBtn.disabled = false; okBtn.textContent = '完成确认并开启';
@@ -26942,18 +26954,28 @@ function backupSpotCheckModal() {
     const uname = localStorage.getItem(BACKUP_USER_KEY)||'';
     m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
         '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
-        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">账号 <b>' + escapeHtmlLocal(uname) + '</b> 正在接受二次认证随机抽查，请输入你的 2FA 插件当前显示的 <b>6 位动态验证码</b> 完成验证（取消或超时将退出登录）。</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。<br><span style="color:#ff8a80;">超时未完成将自动退出登录。</span></div>' +
+        '<div id="backupSpotCountdown" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
         '<input id="backupSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
         '<div id="backupSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
         '<div style="display:flex;gap:8px;">' +
-        '<button onclick="closeBackupSpotCheckModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
-        '<button id="backupSpotOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">验证</button>' +
+        '<button onclick="backupSpotCheckCancel()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消（退出登录）</button>' +
+        '<button id="backupSpotOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 提交验证</button>' +
         '</div></div>';
-    m.onclick = (e)=>{ if(e.target===m) closeBackupSpotCheckModal(); };
+    m.onclick = (e)=>{ if(e.target===m) backupSpotCheckCancel(); };
     document.body.appendChild(m);
     const okBtn = document.getElementById('backupSpotOk');
     const codeEl = document.getElementById('backupSpotCode');
     const setMsg = (t)=>{ const el=document.getElementById('backupSpotMsg'); if(el) el.textContent=t; };
+    // 超时兜底：与服务端抽查任务 TTL（2.5 分钟）一致，超时未完成 → 退出登录
+    const deadline = Date.now() + 150000;
+    window.__backupSpotTimer = setTimeout(() => { backupSpotCheckCancel(); }, 150000);
+    const cntEl = document.getElementById('backupSpotCountdown');
+    window.__backupSpotCountdown = setInterval(() => {
+        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        if (cntEl) cntEl.textContent = '⏱️ 剩余 ' + left + ' 秒完成验证，超时将退出登录';
+        if (left <= 0) { if (window.__backupSpotCountdown) clearInterval(window.__backupSpotCountdown); }
+    }, 500);
     const submit = async () => {
         const code = (codeEl.value||'').trim();
         if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码'); return; }
@@ -26962,15 +26984,26 @@ function backupSpotCheckModal() {
             const r = await backupApi('/2fa/challenge', { method:'POST', body: JSON.stringify({ code }) });
             const d = await r.json();
             if (r.ok && d.success) { closeBackupSpotCheckModal(); showNotification('✅ 安全抽查通过'); return; }
-            if (d && d.expired) { closeBackupSpotCheckModal(); backupLogout(); return; }
-            setMsg('❌ '+(d.message||'验证失败')); okBtn.disabled=false; okBtn.textContent='验证';
-        } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='验证'; }
+            if (d && d.expired) { closeBackupSpotCheckModal(); showNotification('⚠️ 抽查已超时未完成，已退出云备份账号'); backupLogout(); return; }
+            setMsg('❌ '+(d.message||'验证失败')); okBtn.disabled=false; okBtn.textContent='✅ 提交验证';
+        } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='✅ 提交验证'; }
     };
     okBtn.onclick = submit;
     codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') submit(); });
     setTimeout(()=>{ try{ codeEl.focus(); }catch(e){} },80);
 }
-function closeBackupSpotCheckModal(){ const m=document.getElementById('backupSpotCheckModal'); if(m) m.remove(); }
+function closeBackupSpotCheckModal() {
+    if (window.__backupSpotTimer) { clearTimeout(window.__backupSpotTimer); window.__backupSpotTimer = null; }
+    if (window.__backupSpotCountdown) { clearInterval(window.__backupSpotCountdown); window.__backupSpotCountdown = null; }
+    const m = document.getElementById('backupSpotCheckModal');
+    if (m) m.remove();
+}
+// 取消抽查 = 不配合安全验证 → 强制退出登录（安全兜底，防止账号被他人持续持有会话）
+function backupSpotCheckCancel() {
+    closeBackupSpotCheckModal();
+    showNotification('⚠️ 未完成安全抽查，已退出云备份账号');
+    backupLogout();
+}
 // ===== 云备份 2FA 辅助 =====
 window.__backup2fa = false;
 window.__backupScopes = { authorize:true, sessions:true, password:true, account:true };
@@ -27137,7 +27170,7 @@ async function backupOpen2faSetup() {
             '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 2 步 / 共 2 步 · 确认验证</div>' +
             '<div style="background:#3a2a1a;border:1px solid #ff9800;border-radius:8px;padding:10px;font-size:12.5px;color:#ffcc80;line-height:1.7;margin-bottom:12px;">' +
             '⚠️ <b>最后一次验证</b>：请等待插件刷新出<b>新的</b>验证码（最多 30 秒），再输入一次。<br>' +
-            '<b style="color:#ff8a80;">若本次验证失败，二次认证将被自动关闭，需要从头重新开启。</b></div>' +
+            '<b style="color:#ff8a80;">动态码输错可重新输入重试（绑定时的那个码不能重复使用）；若等待过久导致绑定超时，则需从头重新开启。</b></div>' +
             '<div id="backup2faTick" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
             '<input id="backup2faConfirmCode" inputmode="numeric" maxlength="6" placeholder="插件刷新后的新验证码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:8px;">' +
             '<div id="backup2faConfirmMsg" style="font-size:12px;color:#ff8a80;min-height:14px;margin-bottom:8px;"></div>' +
@@ -27160,7 +27193,12 @@ async function backupOpen2faSetup() {
                 const d = await r.json();
                 if (r.ok && d.success) { window.__backup2fa=true; window.__backup2faCode=code; window.__backup2faPending=false; closeBackup2faSetup(); showBackupAccountSettings(); showNotification(d.message||'二次认证已开启'); return; }
                 if (d.sameCode) { setMsg('⏳ '+(d.message||'请等待插件刷新出新的验证码')); okBtn.disabled=false; okBtn.textContent='完成确认并开启'; return; }
-                window.__backup2fa=false; window.__backup2faPending=false; closeBackup2faSetup(); showBackupAccountSettings(); showNotification('❌ '+(d.message||'确认失败，请重新开启二次认证'));
+                if (d.expired) {
+                    // 绑定已超时 → 本次绑定作废，需重新开启
+                    window.__backup2fa=false; window.__backup2faPending=false; closeBackup2faSetup(); showBackupAccountSettings(); showNotification('❌ '+(d.message||'绑定已超时，请重新开启二次认证')); return;
+                }
+                // 动态码错误 → 密钥保留，留在本页提示后重试（不关闭弹窗）
+                setMsg('❌ '+(d.message||'动态码错误，请重试')); okBtn.disabled=false; okBtn.textContent='完成确认并开启';
             } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='完成确认并开启'; }
         };
         codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') okBtn.click(); });
