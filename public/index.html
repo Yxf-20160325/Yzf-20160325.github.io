@@ -4652,7 +4652,7 @@ function applyAntiDevtools(on) {
 // 应用全局功能设定：更新内存开关，并同步隐藏/显示对应 UI 按钮
 function applyGlobalFunctions(settings) {
     if (!settings || typeof settings !== 'object') return;
-    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false, showAntiCheatTab: true, mazeJsonShare: true, cloudLinkEnabled: true };
+    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false, showAntiCheatTab: true, mazeJsonShare: true, cloudLinkEnabled: true, cloud2fa: true, cloudLink2fa: true };
     window.globalFunctionControl = Object.assign({}, def, settings);
     // 记录全局「使用新UI」策略，供主菜单旧/新 UI 决策使用
     window.__globalUiMode = (settings && settings.newUi && typeof settings.newUi === 'object') ? settings.newUi : { mode: 'always', prob: 100 };
@@ -19829,6 +19829,10 @@ function cloudApi(path, opts) {
 function cloudIsEnabled() {
     return !window.globalFunctionControl || window.globalFunctionControl.cloudStorage !== false;
 }
+// admin「功能设定」关闭云储存 2FA：返回 true 表示该模块 2FA 已被管理员禁用
+function cloud2faDisabled() {
+    return !!(window.globalFunctionControl && window.globalFunctionControl.cloud2fa === false);
+}
 // 管理员在后台关闭「云储存功能」时展示的横幅（与账号封禁横幅「云空间功能被管理员禁用」区分）
 function cloudShowFeatureOff() {
     const area = document.getElementById('cloudStorageArea');
@@ -19949,24 +19953,81 @@ async function cloudRegister() {
         showNotification('☁️ 注册并登录成功');
     } catch (e) { cloudSetMsg(e.message, true); }
 }
+async function cloudDoLogin(username, password, code) {
+    cloudSetMsg('');
+    const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({
+        username, password, code: code || '',
+        device: navigator.userAgent,
+        clientId: (typeof gameState !== 'undefined' && gameState.clientId) ? gameState.clientId : ''
+    }) });
+    const d = await r.json();
+    if (cloudDetectDisabled(r, d)) return { disabled: true }; // 账号被禁用
+    if (d && d.twoFactorRequired) return { twoFactorRequired: true, message: d.message || '该账号已开启二次认证，请输入动态验证码' };
+    if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
+    const otpEl = document.getElementById('cloudOtp');
+    if (otpEl) { otpEl.value = ''; otpEl.style.display = 'none'; }
+    localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
+    localStorage.setItem(CLOUD_USER_KEY, d.username);
+    if (d.sid) localStorage.setItem(CLOUD_SID_KEY, d.sid);
+    initCloudStorageUI();
+    showNotification('☁️ 登录成功');
+    return { ok: true };
+}
 async function cloudLogin() {
     const username = (document.getElementById('cloudUser').value || '').trim();
     const password = document.getElementById('cloudPass').value || '';
-    cloudSetMsg('');
     if (!username || !password) { cloudSetMsg('请输入用户名和密码', true); return; }
     try {
-        const r = await cloudApi('/login', { method: 'POST', body: JSON.stringify({ username, password, device: navigator.userAgent, clientId: gameState.clientId }) });
-        const d = await r.json();
-        if (cloudDetectDisabled(r, d)) return; // 账号被禁用
-        if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
-        localStorage.setItem(CLOUD_TOKEN_KEY, d.token);
-        localStorage.setItem(CLOUD_USER_KEY, d.username);
-        if (d.sid) localStorage.setItem(CLOUD_SID_KEY, d.sid);
-        initCloudStorageUI();
-        showNotification('☁️ 登录成功');
+        const res = await cloudDoLogin(username, password, '');
+        if (res && res.twoFactorRequired) {
+            // 已开启 2FA：弹出独立动态码输入框（手机端/桌面端都清晰可见）
+            cloudLogin2faPrompt(username, password, res.message);
+            return;
+        }
     } catch (e) { cloudSetMsg(e.message, true); }
 }
+// 2FA 登录动态码弹窗：输入 6 位码提交；码错留在弹窗内提示重试；成功/取消关闭
+function cloudLogin2faPrompt(username, password, hint) {
+    let m = document.getElementById('cloud2faLoginModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'cloud2faLoginModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:37000;';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(400px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 二次认证</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">账号 <b>' + escapeHtmlLocal(username) + '</b> 已开启二次认证，请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 完成登录。</div>' +
+        '<input id="cloud2faLoginCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:12px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:20px;letter-spacing:5px;text-align:center;margin-bottom:10px;">' +
+        '<div id="cloud2faLoginMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;">' + escapeHtmlLocal(hint || '') + '</div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeCloud2faLoginModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="cloud2faLoginOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">登录</button>' +
+        '</div></div>';
+    m.onclick = (e) => { if (e.target === m) closeCloud2faLoginModal(); };
+    document.body.appendChild(m);
+    const okBtn = document.getElementById('cloud2faLoginOk');
+    const codeEl = document.getElementById('cloud2faLoginCode');
+    const setMsg = (t, isErr) => { const el = document.getElementById('cloud2faLoginMsg'); if (el) { el.textContent = t; el.style.color = isErr ? '#ff8a80' : '#aed581'; } };
+    const submit = async () => {
+        const code = (codeEl.value || '').trim();
+        if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码', true); return; }
+        okBtn.disabled = true; okBtn.textContent = '验证中...';
+        try {
+            const res = await cloudDoLogin(username, password, code);
+            if (res && res.twoFactorRequired) { setMsg(res.message || '动态码错误，请重新输入', true); okBtn.disabled = false; okBtn.textContent = '登录'; return; }
+            if (res && res.disabled) { closeCloud2faLoginModal(); return; }
+            closeCloud2faLoginModal();
+        } catch (e) {
+            setMsg('❌ ' + e.message, true);
+            okBtn.disabled = false; okBtn.textContent = '登录';
+        }
+    };
+    okBtn.onclick = submit;
+    codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    setTimeout(() => { try { codeEl.focus(); } catch (e) {} }, 80);
+}
+function closeCloud2faLoginModal() { const m = document.getElementById('cloud2faLoginModal'); if (m) m.remove(); }
 function cloudLogout() {
+    cloudStopSpotCheck();
     stopCloudAutoRefresh();
     localStorage.removeItem(CLOUD_TOKEN_KEY);
     localStorage.removeItem(CLOUD_USER_KEY);
@@ -19976,6 +20037,7 @@ function cloudLogout() {
 // 被其他设备退登 / 会话失效时强制退出（幂等：无 token 直接返回）
 function cloudForceLogout() {
     if (!localStorage.getItem(CLOUD_TOKEN_KEY)) return;
+    cloudStopSpotCheck();
     stopCloudAutoRefresh();
     localStorage.removeItem(CLOUD_TOKEN_KEY);
     localStorage.removeItem(CLOUD_USER_KEY);
@@ -19983,6 +20045,88 @@ function cloudForceLogout() {
     initCloudStorageUI();
     showNotification('⚠️ 你的云账号已在其他设备被退出登录，请重新登录');
 }
+// ===== 云储存 2FA 随机抽查（管理页面内参与）=====
+// 服务端每分钟有概率从「在管理页面」的已开 2FA 用户中抽一个下发抽查任务；
+// 客户端在管理面板内定期上报心跳 + 轮询任务，命中则弹窗要求输入一次当前动态码。
+let __cloudSpotTimers = null;
+function cloudStartSpotCheck() {
+    cloudStopSpotCheck();
+    if (!localStorage.getItem(CLOUD_TOKEN_KEY)) return; // 未登录不参与
+    if (cloud2faDisabled()) return; // 管理员关闭 2FA 不参与
+    const beat = () => { try { cloudApi('/2fa/checkin', { method: 'POST', body: JSON.stringify({ active: true }) }).catch(() => {}); } catch (e) {} };
+    const poll = async () => {
+        if (document.getElementById('cloudSpotCheckModal')) return; // 弹窗已开，不重复
+        try {
+            const r = await cloudApi('/2fa/challenge');
+            const d = await r.json();
+            if (r.ok && d && d.challenge) cloudSpotCheckModal();
+        } catch (e) {}
+    };
+    beat();
+    __cloudSpotTimers = {
+        beat: setInterval(beat, 25000),
+        poll: setInterval(poll, 12000)
+    };
+}
+function cloudStopSpotCheck() {
+    if (__cloudSpotTimers) {
+        clearInterval(__cloudSpotTimers.beat);
+        clearInterval(__cloudSpotTimers.poll);
+        __cloudSpotTimers = null;
+    }
+    // 离开管理页面：通知服务端移出候选
+    if (localStorage.getItem(CLOUD_TOKEN_KEY)) {
+        try { cloudApi('/2fa/checkin', { method: 'POST', body: JSON.stringify({ active: false }) }).catch(() => {}); } catch (e) {}
+    }
+}
+// 抽查弹窗：输入当前动态码提交；错误可重试；取消即关闭（任务保留，超时自动作废）
+function cloudSpotCheckModal() {
+    let m = document.getElementById('cloudSpotCheckModal');
+    if (m) return;
+    m = document.createElement('div');
+    m.id = 'cloudSpotCheckModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36500;';
+    const uname = localStorage.getItem(CLOUD_USER_KEY) || '';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
+        '<input id="cloudSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
+        '<div id="cloudSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeCloudSpotCheckModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="cloudSpotOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 提交验证</button>' +
+        '</div></div>';
+    m.onclick = (e) => { if (e.target === m) closeCloudSpotCheckModal(); };
+    document.body.appendChild(m);
+    const okBtn = document.getElementById('cloudSpotOk');
+    const codeEl = document.getElementById('cloudSpotCode');
+    const submit = async () => {
+        const code = (codeEl.value || '').trim();
+        if (!/^\d{4,8}$/.test(code)) { document.getElementById('cloudSpotMsg').textContent = '请输入 6 位动态码'; return; }
+        okBtn.disabled = true; okBtn.textContent = '验证中...';
+        try {
+            const r = await cloudApi('/2fa/challenge', { method: 'POST', body: JSON.stringify({ code }) });
+            const d = await r.json();
+            if (r.ok && d.success) {
+                closeCloudSpotCheckModal();
+                showNotification('🛡️ 抽查验证通过');
+                return;
+            }
+            if (d && d.expired) { closeCloudSpotCheckModal(); showNotification('抽查已过期，无需验证'); return; }
+            const msg = document.getElementById('cloudSpotMsg');
+            if (msg) msg.textContent = '❌ ' + (d.message || '验证失败');
+            okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
+        } catch (e) {
+            const msg = document.getElementById('cloudSpotMsg');
+            if (msg) msg.textContent = '❌ ' + e.message;
+            okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
+        }
+    };
+    okBtn.onclick = submit;
+    codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    setTimeout(() => { try { codeEl.focus(); } catch (e) {} }, 50);
+}
+function closeCloudSpotCheckModal() { const m = document.getElementById('cloudSpotCheckModal'); if (m) m.remove(); }
 // ===== 全屏「云空间」管理页（从「我的」标签页打开）=====
 // 云储存 UI 标记复用同一套 id（#cloudStorageArea 等），模态内唯一存在，故无 id 冲突
 function openCloudSpaceModal() {
@@ -20002,6 +20146,7 @@ function openCloudSpaceModal() {
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <input id="cloudUser" type="text" placeholder="用户名" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
                     <input id="cloudPass" type="password" placeholder="密码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <input id="cloudOtp" type="text" placeholder="动态码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:90px; display:none;">
                     <button onclick="cloudLogin()" style="padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">登录</button>
                     <button onclick="cloudRegister()" style="padding:6px 14px; background:#4CAF50; color:#fff; border:none; border-radius:6px; cursor:pointer;">注册</button>
                 </div>
@@ -20039,8 +20184,10 @@ function openCloudSpaceModal() {
     document.body.appendChild(overlay);
     initCloudStorageUI();     // 渲染登录/面板（找到模态内的 #cloudStorageArea）
     startCloudAutoRefresh();  // 已登录则开启自动刷新（跨设备上传自动显现）
+    cloudStartSpotCheck();    // 在管理页面内参与 2FA 随机抽查（已登录才生效）
 }
 function closeCloudSpaceModal() {
+    cloudStopSpotCheck();
     stopCloudAutoRefresh();
     const m = document.getElementById('cloudSpaceModal');
     if (m) m.remove();
@@ -20234,9 +20381,22 @@ async function showCloudAccountSettings() {
         document.body.appendChild(modal);
     }
     const uname = localStorage.getItem(CLOUD_USER_KEY) || '未知账号';
-    let twoFa = false;
-    try { const r = await cloudApi('/2fa'); const d = await r.json(); if (r.ok && d.success) twoFa = !!d.enabled; } catch (e) {}
+    // 拉取真实状态；失败/旧后端（无 /2fa/scopes 端点）时降级：先查 /2fa，再不行用本地缓存，避免把已开启误显示为未开启
+    let twoFa = window.__cloud2fa || false;
+    let scopes = Object.assign({ authorize: true, sessions: true, password: true, account: true }, window.__cloudScopes || {});
+    try {
+        const r = await cloudApi('/2fa/scopes');
+        const d = await r.json();
+        if (r.ok && d.success) { twoFa = !!d.enabled; if (d.scopes) scopes = Object.assign(scopes, d.scopes); }
+        else {
+            const r2 = await cloudApi('/2fa');
+            const d2 = await r2.json();
+            if (r2.ok && d2.success) twoFa = !!d2.enabled;
+        }
+    } catch (e) { twoFa = window.__cloud2fa || false; }
     window.__cloud2fa = twoFa;
+    window.__cloudScopes = scopes;
+    const twofaOff = cloud2faDisabled();
     modal.innerHTML = `
       <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
@@ -20249,11 +20409,24 @@ async function showCloudAccountSettings() {
         </div>
         <div style="padding:14px;background:rgba(0,188,212,0.1);border:1px solid rgba(0,188,212,0.4);border-radius:10px;margin-bottom:18px;">
           <div style="font-weight:bold;margin-bottom:6px;color:#80deea;">🔐 二次认证（2FA）</div>
-          <div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，打开账号设置、管理设备、踢出设备等敏感操作需重新输入密码，由注册账号本人授权。</div>
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-            <span style="font-size:13px;">当前状态：<b id="cloud2faState" style="color:${twoFa ? '#aed581' : '#ff8a80'};">${twoFa ? '已开启' : '未开启'}</b></span>
-            <button id="cloud2faBtn" onclick="cloudToggle2fa()" style="padding:6px 14px;background:${twoFa ? '#F44336' : '#26A69A'};color:#fff;border:none;border-radius:8px;cursor:pointer;">${twoFa ? '关闭二次认证' : '开启二次认证'}</button>
-          </div>
+          ${twofaOff
+            ? '<div style="font-size:13px;color:#ffb74d;line-height:1.6;">管理员已关闭二次认证功能，当前无法开启或配置。已开启的二次认证暂停生效（登录与敏感操作不再要求动态码）。</div>'
+            : '<div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，登录账号始终需要输入动态码；以下操作可按需选择是否也要动态码。</div>' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
+              '<span style="font-size:13px;">当前状态：<b id="cloud2faState" style="color:' + (twoFa ? '#aed581' : '#ff8a80') + ';">' + (twoFa ? '已开启' : '未开启') + '</b></span>' +
+              '<button id="cloud2faBtn" onclick="cloudToggle2fa()" style="padding:6px 14px;background:' + (twoFa ? '#F44336' : '#26A69A') + ';color:#fff;border:none;border-radius:8px;cursor:pointer;">' + (twoFa ? '关闭二次认证' : '开启二次认证') + '</button>' +
+              '</div>' +
+              '<div id="cloud2faScopesBox" style="display:' + (twoFa ? 'block' : 'none') + ';margin-top:12px;border-top:1px dashed rgba(255,255,255,0.25);padding-top:10px;">' +
+              '<div style="font-size:12px;color:#80deea;margin-bottom:8px;">哪些操作需要动态码？<span style="color:#78909c;">（登录始终需要，不可关闭）</span></div>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;color:#78909c;"><input type="checkbox" checked disabled style="accent-color:#26A69A;"> 登录账号（强制）</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="cloudScopeAuthorize" ' + (scopes.authorize ? 'checked' : '') + ' style="accent-color:#26A69A;"> 打开账号设置</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="cloudScopeSessions" ' + (scopes.sessions ? 'checked' : '') + ' style="accent-color:#26A69A;"> 查看 / 踢出设备</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="cloudScopePassword" ' + (scopes.password ? 'checked' : '') + ' style="accent-color:#26A69A;"> 修改密码</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="cloudScopeAccount" ' + (scopes.account ? 'checked' : '') + ' style="accent-color:#26A69A;"> 注销账号</label>' +
+              '<div style="display:flex;align-items:center;gap:10px;margin-top:8px;">' +
+              '<button onclick="cloudSave2faScopes()" style="padding:6px 14px;background:#26A69A;color:#fff;border:none;border-radius:8px;cursor:pointer;">保存设置</button>' +
+              '<span id="cloudScopesMsg" style="font-size:12px;color:#ffb74d;"></span>' +
+              '</div></div>'}
         </div>
         <div style="margin-bottom:18px;">
           <div style="font-weight:bold;margin-bottom:8px;color:#90caf9;">🔑 更改密码</div>
@@ -20280,17 +20453,33 @@ function closeCloudAccountSettings() {
 }
 // ===== 云储存「二次认证（2FA）」辅助 =====
 window.__cloud2fa = false;
+// 2FA 作用范围缓存：各敏感操作是否需要动态码（登录始终强制）。默认全需要（安全）。
+window.__cloudScopes = { authorize: true, sessions: true, password: true, account: true };
 async function cloudFetch2fa() {
     try {
-        const r = await cloudApi('/2fa');
+        const r = await cloudApi('/2fa/scopes');
         const d = await r.json();
-        if (r.ok && d.success) window.__cloud2fa = !!d.enabled;
+        if (r.ok && d.success) {
+            window.__cloud2fa = !!d.enabled;
+            if (d.scopes) window.__cloudScopes = Object.assign({ authorize: true, sessions: true, password: true, account: true }, d.scopes);
+            return window.__cloud2fa;
+        }
+        // 旧后端未提供 scopes 端点时降级为只查开关
+        const r2 = await cloudApi('/2fa');
+        const d2 = await r2.json();
+        if (r2.ok && d2.success) window.__cloud2fa = !!d2.enabled;
     } catch (e) {}
     return window.__cloud2fa;
 }
+// 指定敏感操作是否需要动态码（基于缓存的 scope 配置；2FA 未开启一律 false）
+function cloudNeed2fa(scope) {
+    if (!window.__cloud2fa) return false;
+    return !!(window.__cloudScopes && window.__cloudScopes[scope]);
+}
 // 二次认证「动态码」弹窗：用户输入浏览器 2FA 插件（如 Authenticator）当前显示的 6 位动态码，
 // 提交到后端 /authorize 用 TOTP 校验，通过才回调 onAuthorized(code)。
-function cloudStepUpAuth(titleText, onAuthorized) {
+// opts.direct=true 时跳过 /authorize（用于后端本身就强制校验码的端点，如保存 2FA 作用范围），仅取码即回调。
+function cloudStepUpAuth(titleText, onAuthorized, opts) {
     let m = document.getElementById('cloudStepUpModal');
     if (!m) {
         m = document.createElement('div');
@@ -20315,6 +20504,12 @@ function cloudStepUpAuth(titleText, onAuthorized) {
         const code = (codeEl.value || '').trim();
         if (!/^\d{4,8}$/.test(code)) { document.getElementById('cloudStepUpMsg').textContent = '请输入 6 位动态码'; return; }
         okBtn.disabled = true; okBtn.textContent = '校验中...';
+        if (opts && opts.direct) {
+            window.__cloud2faCode = code;
+            closeCloudStepUp();
+            onAuthorized(code);
+            return;
+        }
         try {
             const r = await cloudApi('/authorize', { method: 'POST', body: JSON.stringify({ code }) });
             const d = await r.json();
@@ -20364,28 +20559,30 @@ function cloudPromptPassword(titleText, onOk) {
     passEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') okBtn.click(); });
 }
 function closeCloudPwdModal() { const m = document.getElementById('cloudPwdModal'); if (m) m.remove(); }
-// 打开账号设置：若开启二次认证，先弹密码验证
+// 打开账号设置：若开启二次认证且「账号设置」在需码范围内，先弹动态码验证
 async function cloudOpenAccountSettings() {
-    if (await cloudFetch2fa()) cloudStepUpAuth('打开账号设置需验证身份', () => showCloudAccountSettings());
+    if (await cloudFetch2fa() && cloudNeed2fa('authorize')) cloudStepUpAuth('打开账号设置需验证身份', () => showCloudAccountSettings());
     else showCloudAccountSettings();
 }
-// 打开设备管理：若开启二次认证，先弹密码验证
+// 打开设备管理：若开启二次认证且「管理设备」在需码范围内，先弹动态码验证
 async function cloudOpenDevices() {
-    if (await cloudFetch2fa()) cloudStepUpAuth('查看/管理设备需验证身份', () => showCloudDevices());
+    if (await cloudFetch2fa() && cloudNeed2fa('sessions')) cloudStepUpAuth('查看/管理设备需验证身份', () => showCloudDevices());
     else showCloudDevices();
 }
-// 踢出单个设备：若开启二次认证，先验证动态码
+// 踢出单个设备：若开启二次认证且「管理设备」在需码范围内，先验证动态码
 async function cloudRevokeSessionGated(id, isCurrent) {
-    if (await cloudFetch2fa()) cloudStepUpAuth('踢出设备需二次认证', (code) => cloudRevokeSession(id, isCurrent, code));
+    if (await cloudFetch2fa() && cloudNeed2fa('sessions')) cloudStepUpAuth('踢出设备需二次认证', (code) => cloudRevokeSession(id, isCurrent, code));
     else cloudRevokeSession(id, isCurrent);
 }
-// 退出其他所有设备：若开启二次认证，先验证动态码
+// 退出其他所有设备：若开启二次认证且「管理设备」在需码范围内，先验证动态码
 async function cloudRevokeOtherSessionsGated() {
-    if (await cloudFetch2fa()) cloudStepUpAuth('退出其他设备需二次认证', (code) => cloudRevokeOtherSessions(code));
+    if (await cloudFetch2fa() && cloudNeed2fa('sessions')) cloudStepUpAuth('退出其他设备需二次认证', (code) => cloudRevokeOtherSessions(code));
     else cloudRevokeOtherSessions();
 }
 // 切换二次认证开关：开启走 TOTP 设置流程；关闭需验证密码
 async function cloudToggle2fa() {
+    if (cloud2faDisabled()) { showNotification('❌ 管理员已关闭二次认证功能'); return; }
+    await cloudFetch2fa(); // 先同步真实状态，避免面板显示/缓存与实际不符时走错分支
     const want = !window.__cloud2fa;
     if (want) { cloudOpen2faSetup(); return; }
     cloudPromptPassword('关闭二次认证需验证密码', async (password) => {
@@ -20401,7 +20598,31 @@ async function cloudToggle2fa() {
         }
     });
 }
-// 开启二次认证：两阶段向导，全程适配标准 TOTP 浏览器插件（Authenticator 等）
+// 保存 2FA 作用范围：修改安全配置本身必须提供动态码（防止拿到密码的人关掉全部保护）。
+// 使用 direct 模式弹窗：绕过 /authorize（authorize 可能被用户关闭），直接取码交给后端校验。
+async function cloudSave2faScopes() {
+    if (!window.__cloud2fa) { const m = document.getElementById('cloudScopesMsg'); if (m) m.textContent = '请先开启二次认证'; return; }
+    cloudStepUpAuth('保存 2FA 设置需验证身份', async (code) => {
+        const g = (id, def) => { const el = document.getElementById(id); return el ? el.checked : def; };
+        const scopes = {
+            authorize: g('cloudScopeAuthorize', true),
+            sessions: g('cloudScopeSessions', true),
+            password: g('cloudScopePassword', true),
+            account: g('cloudScopeAccount', true)
+        };
+        try {
+            const r = await cloudApi('/2fa/scopes', { method: 'PUT', body: JSON.stringify({ code, scopes }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '保存失败');
+            if (d.scopes) window.__cloudScopes = Object.assign({}, window.__cloudScopes, d.scopes);
+            const msg = document.getElementById('cloudScopesMsg');
+            if (msg) msg.textContent = '✅ 已保存';
+            showNotification('🔐 2FA 作用范围已保存');
+        } catch (e) {
+            showNotification('❌ ' + e.message);
+        }
+    }, { direct: true });
+}
 //   第 1 步「绑定」：插件扫码/手动添加密钥 → 输入账号密码 + 插件当前动态码
 //   第 2 步「确认」：等插件刷新出【新的】动态码，再验证一次才真正开启；
 //                    若确认失败，服务端会自动关闭二次认证并作废密钥，必须从头重来。
@@ -20460,6 +20681,7 @@ async function cloudOpen2faSetup() {
 
     // ---------- 第 2 步：强制确认验证 ----------
     function renderStep2() {
+        window.__cloud2faPending = true; // 已绑定未确认：中途关闭要提示未完成
         m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(440px,94vw);padding:22px;border-radius:12px;">' +
             '<div style="font-weight:bold;margin-bottom:4px;font-size:16px;">🔐 开启二次认证（TOTP）</div>' +
             '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 2 步 / 共 2 步 · 确认验证</div>' +
@@ -20496,17 +20718,19 @@ async function cloudOpen2faSetup() {
                 if (r.ok && d.success) {
                     window.__cloud2fa = true;
                     window.__cloud2faCode = code;
+                    window.__cloud2faPending = false;
                     closeCloud2faSetup();
                     showCloudAccountSettings();
                     showNotification(d.message || '二次认证已开启');
                     return;
                 }
                 if (d.sameCode) { setMsg('⏳ ' + (d.message || '请等待插件刷新出新的验证码')); okBtn.disabled = false; okBtn.textContent = '完成确认并开启'; return; }
-                // 确认失败 / 绑定超时 → 服务端已自动关闭二次认证
+                // 确认失败 / 绑定超时 → 本次绑定作废，账号保持原状
                 window.__cloud2fa = false;
+                window.__cloud2faPending = false;
                 closeCloud2faSetup();
                 showCloudAccountSettings();
-                showNotification('❌ ' + (d.message || '确认失败，二次认证已自动关闭'));
+                showNotification('❌ ' + (d.message || '确认失败，请重新开启二次认证'));
             } catch (e) {
                 setMsg('❌ ' + e.message);
                 okBtn.disabled = false; okBtn.textContent = '完成确认并开启';
@@ -20537,11 +20761,18 @@ async function cloudOpen2faSetup() {
 }
 function closeCloud2faSetup() {
     if (window.__cloud2faTick) { clearInterval(window.__cloud2faTick); window.__cloud2faTick = null; }
+    // 已绑定未完成最后确认就关掉：明确提醒，避免用户以为 2FA 已开启
+    if (window.__cloud2faPending && !window.__cloud2fa) {
+        window.__cloud2faPending = false;
+        showNotification('⚠️ 二次认证尚未开启：你已完成绑定但未完成最后确认。请重新打开「开启二次认证」，等插件刷新出【新的】动态码后输入完成确认。');
+    } else {
+        window.__cloud2faPending = false;
+    }
     const m = document.getElementById('cloud2faSetupModal');
     if (m) m.remove();
 }
 async function cloudChangePassword() {
-    if (await cloudFetch2fa()) { cloudStepUpAuth('更改密码需二次认证', (code) => cloudDoChangePassword(code)); return; }
+    if (await cloudFetch2fa() && cloudNeed2fa('password')) { cloudStepUpAuth('更改密码需二次认证', (code) => cloudDoChangePassword(code)); return; }
     cloudDoChangePassword();
 }
 async function cloudDoChangePassword(code) {
@@ -20569,7 +20800,7 @@ async function cloudDoChangePassword(code) {
     }
 }
 async function cloudDeleteAccount() {
-    if (await cloudFetch2fa()) { cloudStepUpAuth('注销账号需二次认证', (code) => cloudDoDeleteAccount(code)); return; }
+    if (await cloudFetch2fa() && cloudNeed2fa('account')) { cloudStepUpAuth('注销账号需二次认证', (code) => cloudDoDeleteAccount(code)); return; }
     cloudDoDeleteAccount();
 }
 async function cloudDoDeleteAccount(code) {
@@ -25416,8 +25647,10 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) closeCloudLinkModal(); });
         clinkRender();
+        clinkStartSpotCheck(); // 在管理页面内参与 2FA 随机抽查（已登录才生效）
     };
     window.closeCloudLinkModal = function() {
+        clinkStopSpotCheck();
         const m = document.getElementById('cloudLinkModal');
         if (m) m.remove();
     };
@@ -25434,6 +25667,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <input id="clinkUser" type="text" placeholder="用户名" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
                     <input id="clinkPass" type="password" placeholder="密码（至少 4 位）" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:140px;">
+                    <input id="clinkOtp" type="text" placeholder="动态码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:90px; display:none;">
                     <button onclick="clinkLogin()" style="padding:6px 14px; background:#2196F3; color:#fff; border:none; border-radius:6px; cursor:pointer;">登录</button>
                     <button onclick="clinkRegister()" style="padding:6px 14px; background:#4CAF50; color:#fff; border:none; border-radius:6px; cursor:pointer;">注册</button>
                 </div>
@@ -25472,26 +25706,159 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             showNotification('🔗 云链接账号注册成功');
         } catch (e) { clinkMsg(e.message, true); }
     };
+    async function clinkDoLogin(username, password, code) {
+        const r = await clinkApi('/login', { method: 'POST', body: JSON.stringify({ username, password, code: code || '', clientId: (typeof gameState !== 'undefined' && gameState.clientId) ? gameState.clientId : '' }) });
+        const d = await r.json();
+        if (d && d.twoFactorRequired) return { twoFactorRequired: true, message: d.message || '该账号已开启二次认证，请输入动态验证码' };
+        if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
+        const otpEl = document.getElementById('clinkOtp');
+        if (otpEl) { otpEl.value = ''; otpEl.style.display = 'none'; }
+        localStorage.setItem(CLINK_TOKEN_KEY, d.token);
+        localStorage.setItem(CLINK_USER_KEY, d.username);
+        clinkRender();
+        showNotification('🔗 云链接账号登录成功');
+        return { ok: true };
+    }
     window.clinkLogin = async function() {
         const username = (document.getElementById('clinkUser').value || '').trim();
         const password = document.getElementById('clinkPass').value || '';
         if (!username || !password) { clinkMsg('请输入用户名和密码', true); return; }
         try {
-            const r = await clinkApi('/login', { method: 'POST', body: JSON.stringify({ username, password, clientId: (typeof gameState !== 'undefined' && gameState.clientId) ? gameState.clientId : '' }) });
-            const d = await r.json();
-            if (!r.ok || !d.success) throw new Error(d.message || '登录失败');
-            localStorage.setItem(CLINK_TOKEN_KEY, d.token);
-            localStorage.setItem(CLINK_USER_KEY, d.username);
-            clinkRender();
-            showNotification('🔗 云链接账号登录成功');
+            const res = await clinkDoLogin(username, password, '');
+            if (res && res.twoFactorRequired) {
+                // 已开启 2FA：弹出独立动态码输入框（手机端/桌面端都清晰可见）
+                clink2faLoginPrompt(username, password, res.message);
+                return;
+            }
         } catch (e) { clinkMsg(e.message, true); }
     };
+    // 2FA 登录动态码弹窗：输入 6 位码提交；码错留在弹窗内提示重试；成功/取消关闭
+    function clink2faLoginPrompt(username, password, hint) {
+        let m = document.getElementById('clink2faLoginModal');
+        if (m) m.remove();
+        m = document.createElement('div');
+        m.id = 'clink2faLoginModal';
+        m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:37000;';
+        m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(400px,92vw);padding:22px;border-radius:12px;">' +
+            '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 二次认证</div>' +
+            '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">账号 <b>' + escapeHtmlLocal(username) + '</b> 已开启二次认证，请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 完成登录。</div>' +
+            '<input id="clink2faLoginCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:12px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:20px;letter-spacing:5px;text-align:center;margin-bottom:10px;">' +
+            '<div id="clink2faLoginMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;">' + escapeHtmlLocal(hint || '') + '</div>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button onclick="closeClink2faLoginModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+            '<button id="clink2faLoginOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">登录</button>' +
+            '</div></div>';
+        m.onclick = (e) => { if (e.target === m) closeClink2faLoginModal(); };
+        document.body.appendChild(m);
+        const okBtn = document.getElementById('clink2faLoginOk');
+        const codeEl = document.getElementById('clink2faLoginCode');
+        const setMsg = (t, isErr) => { const el = document.getElementById('clink2faLoginMsg'); if (el) { el.textContent = t; el.style.color = isErr ? '#ff8a80' : '#aed581'; } };
+        const submit = async () => {
+            const code = (codeEl.value || '').trim();
+            if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码', true); return; }
+            okBtn.disabled = true; okBtn.textContent = '验证中...';
+            try {
+                const res = await clinkDoLogin(username, password, code);
+                if (res && res.twoFactorRequired) { setMsg(res.message || '动态码错误，请重新输入', true); okBtn.disabled = false; okBtn.textContent = '登录'; return; }
+                closeClink2faLoginModal();
+            } catch (e) {
+                setMsg('❌ ' + e.message, true);
+                okBtn.disabled = false; okBtn.textContent = '登录';
+            }
+        };
+        okBtn.onclick = submit;
+        codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+        setTimeout(() => { try { codeEl.focus(); } catch (e) {} }, 80);
+    }
+    window.closeClink2faLoginModal = function() { const m = document.getElementById('clink2faLoginModal'); if (m) m.remove(); };
     window.clinkLogout = function() {
+        clinkStopSpotCheck();
         localStorage.removeItem(CLINK_TOKEN_KEY);
         localStorage.removeItem(CLINK_USER_KEY);
         clinkRender();
         showNotification('已退出云链接账号');
     };
+    // ===== 云链接 2FA 随机抽查（管理页面内参与）=====
+    // 与服务端每分钟随机抽查联动：管理面板内定期上报心跳 + 轮询任务，命中则弹窗输一次动态码。
+    let __clinkSpotTimers = null;
+    function clinkStartSpotCheck() {
+        clinkStopSpotCheck();
+        if (!localStorage.getItem(CLINK_TOKEN_KEY)) return; // 未登录不参与
+        if (clink2faDisabled()) return; // 管理员关闭 2FA 不参与
+        const beat = () => { try { clinkApi('/2fa/checkin', { method: 'POST', body: JSON.stringify({ active: true }) }).catch(() => {}); } catch (e) {} };
+        const poll = async () => {
+            if (document.getElementById('clinkSpotCheckModal')) return; // 弹窗已开，不重复
+            try {
+                const r = await clinkApi('/2fa/challenge');
+                const d = await r.json();
+                if (r.ok && d && d.challenge) clinkSpotCheckModal();
+            } catch (e) {}
+        };
+        beat();
+        __clinkSpotTimers = {
+            beat: setInterval(beat, 25000),
+            poll: setInterval(poll, 12000)
+        };
+    }
+    function clinkStopSpotCheck() {
+        if (__clinkSpotTimers) {
+            clearInterval(__clinkSpotTimers.beat);
+            clearInterval(__clinkSpotTimers.poll);
+            __clinkSpotTimers = null;
+        }
+        // 离开管理页面：通知服务端移出候选
+        if (localStorage.getItem(CLINK_TOKEN_KEY)) {
+            try { clinkApi('/2fa/checkin', { method: 'POST', body: JSON.stringify({ active: false }) }).catch(() => {}); } catch (e) {}
+        }
+    }
+    // 抽查弹窗：输入当前动态码提交；错误可重试；取消即关闭（任务保留，超时自动作废）
+    function clinkSpotCheckModal() {
+        let m = document.getElementById('clinkSpotCheckModal');
+        if (m) return;
+        m = document.createElement('div');
+        m.id = 'clinkSpotCheckModal';
+        m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36500;';
+        const uname = localStorage.getItem(CLINK_USER_KEY) || '';
+        m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+            '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
+            '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
+            '<input id="clinkSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
+            '<div id="clinkSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button onclick="closeClinkSpotCheckModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+            '<button id="clinkSpotOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 提交验证</button>' +
+            '</div></div>';
+        m.onclick = (e) => { if (e.target === m) closeClinkSpotCheckModal(); };
+        document.body.appendChild(m);
+        const okBtn = document.getElementById('clinkSpotOk');
+        const codeEl = document.getElementById('clinkSpotCode');
+        const submit = async () => {
+            const code = (codeEl.value || '').trim();
+            if (!/^\d{4,8}$/.test(code)) { document.getElementById('clinkSpotMsg').textContent = '请输入 6 位动态码'; return; }
+            okBtn.disabled = true; okBtn.textContent = '验证中...';
+            try {
+                const r = await clinkApi('/2fa/challenge', { method: 'POST', body: JSON.stringify({ code }) });
+                const d = await r.json();
+                if (r.ok && d.success) {
+                    closeClinkSpotCheckModal();
+                    showNotification('🛡️ 抽查验证通过');
+                    return;
+                }
+                if (d && d.expired) { closeClinkSpotCheckModal(); showNotification('抽查已过期，无需验证'); return; }
+                const msg = document.getElementById('clinkSpotMsg');
+                if (msg) msg.textContent = '❌ ' + (d.message || '验证失败');
+                okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
+            } catch (e) {
+                const msg = document.getElementById('clinkSpotMsg');
+                if (msg) msg.textContent = '❌ ' + e.message;
+                okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
+            }
+        };
+        okBtn.onclick = submit;
+        codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+        setTimeout(() => { try { codeEl.focus(); } catch (e) {} }, 50);
+    }
+    window.closeClinkSpotCheckModal = function() { const m = document.getElementById('clinkSpotCheckModal'); if (m) m.remove(); };
     // ===== 云链接「账号设置」：查看账号名 / 改密（验原密码）/ 注销（需密码）=====
     window.showClinkAccountSettings = async function() {
         let modal = document.getElementById('clinkAccountSettingsModal');
@@ -25502,9 +25869,22 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             document.body.appendChild(modal);
         }
         const uname = localStorage.getItem(CLINK_USER_KEY) || '未知账号';
-        let twoFa = false;
-        try { const r = await clinkApi('/2fa'); const d = await r.json(); if (r.ok && d.success) twoFa = !!d.enabled; } catch (e) {}
+        // 拉取真实状态；失败/旧后端（无 /2fa/scopes 端点）时降级：先查 /2fa，再不行用本地缓存，避免把已开启误显示为未开启
+        let twoFa = window.__clink2fa || false;
+        let scopes = Object.assign({ authorize: true, sessions: true, password: true, account: true }, window.__clinkScopes || {});
+        try {
+            const r = await clinkApi('/2fa/scopes');
+            const d = await r.json();
+            if (r.ok && d.success) { twoFa = !!d.enabled; if (d.scopes) scopes = Object.assign(scopes, d.scopes); }
+            else {
+                const r2 = await clinkApi('/2fa');
+                const d2 = await r2.json();
+                if (r2.ok && d2.success) twoFa = !!d2.enabled;
+            }
+        } catch (e) { twoFa = window.__clink2fa || false; }
         window.__clink2fa = twoFa;
+        window.__clinkScopes = scopes;
+        const twofaOff = clink2faDisabled();
         modal.innerHTML = `
           <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
@@ -25517,11 +25897,24 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             </div>
             <div style="padding:14px;background:rgba(0,188,212,0.1);border:1px solid rgba(0,188,212,0.4);border-radius:10px;margin-bottom:18px;">
               <div style="font-weight:bold;margin-bottom:6px;color:#80deea;">🔐 二次认证（2FA）</div>
-              <div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，打开账号设置、管理设备、踢出设备等敏感操作需重新输入密码，由注册账号本人授权。</div>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-                <span style="font-size:13px;">当前状态：<b id="clink2faState" style="color:${twoFa ? '#aed581' : '#ff8a80'};">${twoFa ? '已开启' : '未开启'}</b></span>
-                <button id="clink2faBtn" onclick="clinkToggle2fa()" style="padding:6px 14px;background:${twoFa ? '#F44336' : '#26A69A'};color:#fff;border:none;border-radius:8px;cursor:pointer;">${twoFa ? '关闭二次认证' : '开启二次认证'}</button>
-              </div>
+              ${twofaOff
+                ? '<div style="font-size:13px;color:#ffb74d;line-height:1.6;">管理员已关闭二次认证功能，当前无法开启或配置。已开启的二次认证暂停生效（登录与敏感操作不再要求动态码）。</div>'
+                : '<div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，登录账号始终需要输入动态码；以下操作可按需选择是否也要动态码。</div>' +
+                  '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
+                  '<span style="font-size:13px;">当前状态：<b id="clink2faState" style="color:' + (twoFa ? '#aed581' : '#ff8a80') + ';">' + (twoFa ? '已开启' : '未开启') + '</b></span>' +
+                  '<button id="clink2faBtn" onclick="clinkToggle2fa()" style="padding:6px 14px;background:' + (twoFa ? '#F44336' : '#26A69A') + ';color:#fff;border:none;border-radius:8px;cursor:pointer;">' + (twoFa ? '关闭二次认证' : '开启二次认证') + '</button>' +
+                  '</div>' +
+                  '<div id="clink2faScopesBox" style="display:' + (twoFa ? 'block' : 'none') + ';margin-top:12px;border-top:1px dashed rgba(255,255,255,0.25);padding-top:10px;">' +
+                  '<div style="font-size:12px;color:#80deea;margin-bottom:8px;">哪些操作需要动态码？<span style="color:#78909c;">（登录始终需要，不可关闭）</span></div>' +
+                  '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;color:#78909c;"><input type="checkbox" checked disabled style="accent-color:#26A69A;"> 登录账号（强制）</label>' +
+                  '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="clinkScopeAuthorize" ' + (scopes.authorize ? 'checked' : '') + ' style="accent-color:#26A69A;"> 打开账号设置</label>' +
+                  '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="clinkScopeSessions" ' + (scopes.sessions ? 'checked' : '') + ' style="accent-color:#26A69A;"> 查看 / 踢出设备</label>' +
+                  '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="clinkScopePassword" ' + (scopes.password ? 'checked' : '') + ' style="accent-color:#26A69A;"> 修改密码</label>' +
+                  '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="clinkScopeAccount" ' + (scopes.account ? 'checked' : '') + ' style="accent-color:#26A69A;"> 注销账号</label>' +
+                  '<div style="display:flex;align-items:center;gap:10px;margin-top:8px;">' +
+                  '<button onclick="clinkSave2faScopes()" style="padding:6px 14px;background:#26A69A;color:#fff;border:none;border-radius:8px;cursor:pointer;">保存设置</button>' +
+                  '<span id="clinkScopesMsg" style="font-size:12px;color:#ffb74d;"></span>' +
+                  '</div></div>'}
             </div>
             <div style="margin-bottom:18px;">
               <div style="font-weight:bold;margin-bottom:8px;color:#b39ddb;">🔑 更改密码</div>
@@ -25548,16 +25941,36 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     };
     // ===== 云链接「二次认证（2FA）」辅助 =====
     window.__clink2fa = false;
+    // 2FA 作用范围缓存：各敏感操作是否需要动态码（登录始终强制）。默认全需要（安全）。
+    window.__clinkScopes = { authorize: true, sessions: true, password: true, account: true };
     window.clinkFetch2fa = async function() {
         try {
-            const r = await clinkApi('/2fa');
+            const r = await clinkApi('/2fa/scopes');
             const d = await r.json();
-            if (r.ok && d.success) window.__clink2fa = !!d.enabled;
+            if (r.ok && d.success) {
+                window.__clink2fa = !!d.enabled;
+                if (d.scopes) window.__clinkScopes = Object.assign({ authorize: true, sessions: true, password: true, account: true }, d.scopes);
+                return window.__clink2fa;
+            }
+            // 旧后端未提供 scopes 端点时降级为只查开关
+            const r2 = await clinkApi('/2fa');
+            const d2 = await r2.json();
+            if (r2.ok && d2.success) window.__clink2fa = !!d2.enabled;
         } catch (e) {}
         return window.__clink2fa;
     };
-    // 二次认证「升级验证」弹窗：由注册账号本人输入密码授权后才放行敏感操作。
-    function clinkStepUpAuth(titleText, onAuthorized) {
+    // 指定敏感操作是否需要动态码（基于缓存的 scope 配置；2FA 未开启一律 false）
+    function clinkNeed2fa(scope) {
+        if (!window.__clink2fa) return false;
+        return !!(window.__clinkScopes && window.__clinkScopes[scope]);
+    }
+    // admin「功能设定」关闭云链接 2FA：返回 true 表示该模块 2FA 已被管理员禁用
+    function clink2faDisabled() {
+        return !!(window.globalFunctionControl && window.globalFunctionControl.cloudLink2fa === false);
+    }
+    // 二次认证「升级验证」弹窗：输入 2FA 插件动态码验证后才放行敏感操作。
+    // opts.direct=true 时跳过 /authorize（用于后端本身就强制校验码的端点，如保存 2FA 作用范围），仅取码即回调。
+    function clinkStepUpAuth(titleText, onAuthorized, opts) {
         let m = document.getElementById('clinkStepUpModal');
         if (!m) {
             m = document.createElement('div');
@@ -25582,6 +25995,12 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             const code = (codeEl.value || '').trim();
             if (!/^\d{4,8}$/.test(code)) { document.getElementById('clinkStepUpMsg').textContent = '请输入 6 位动态码'; return; }
             okBtn.disabled = true; okBtn.textContent = '校验中...';
+            if (opts && opts.direct) {
+                window.__clink2faCode = code;
+                closeClinkStepUp();
+                onAuthorized(code);
+                return;
+            }
             try {
                 const r = await clinkApi('/authorize', { method: 'POST', body: JSON.stringify({ code }) });
                 const d = await r.json();
@@ -25631,28 +26050,30 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         passEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') okBtn.click(); });
     }
     window.closeClinkPwdModal = function() { const m = document.getElementById('clinkPwdModal'); if (m) m.remove(); };
-    // 打开账号设置：若开启二次认证，先弹密码验证
+    // 打开账号设置：若开启二次认证且「账号设置」在需码范围内，先弹动态码验证
     window.clinkOpenAccountSettings = async function() {
-        if (await window.clinkFetch2fa()) clinkStepUpAuth('打开账号设置需验证身份', () => window.showClinkAccountSettings());
+        if (await window.clinkFetch2fa() && clinkNeed2fa('authorize')) clinkStepUpAuth('打开账号设置需验证身份', () => window.showClinkAccountSettings());
         else window.showClinkAccountSettings();
     };
-    // 打开设备管理：若开启二次认证，先弹密码验证
+    // 打开设备管理：若开启二次认证且「管理设备」在需码范围内，先弹动态码验证
     window.clinkOpenDevices = async function() {
-        if (await window.clinkFetch2fa()) clinkStepUpAuth('查看/管理设备需验证身份', () => window.showClinkDevices());
+        if (await window.clinkFetch2fa() && clinkNeed2fa('sessions')) clinkStepUpAuth('查看/管理设备需验证身份', () => window.showClinkDevices());
         else window.showClinkDevices();
     };
-    // 踢出单个设备：若开启二次认证，先验证动态码
+    // 踢出单个设备：若开启二次认证且「管理设备」在需码范围内，先验证动态码
     window.clinkRevokeSessionGated = async function(id, isCurrent) {
-        if (await window.clinkFetch2fa()) clinkStepUpAuth('踢出设备需二次认证', (code) => window.clinkRevokeSession(id, isCurrent, code));
+        if (await window.clinkFetch2fa() && clinkNeed2fa('sessions')) clinkStepUpAuth('踢出设备需二次认证', (code) => window.clinkRevokeSession(id, isCurrent, code));
         else window.clinkRevokeSession(id, isCurrent);
     };
-    // 退出其他所有设备：若开启二次认证，先验证动态码
+    // 退出其他所有设备：若开启二次认证且「管理设备」在需码范围内，先验证动态码
     window.clinkRevokeOtherSessionsGated = async function() {
-        if (await window.clinkFetch2fa()) clinkStepUpAuth('退出其他设备需二次认证', (code) => window.clinkRevokeOtherSessions(code));
+        if (await window.clinkFetch2fa() && clinkNeed2fa('sessions')) clinkStepUpAuth('退出其他设备需二次认证', (code) => window.clinkRevokeOtherSessions(code));
         else window.clinkRevokeOtherSessions();
     };
     // 切换二次认证开关：开启走 TOTP 设置流程；关闭需验证密码
     window.clinkToggle2fa = async function() {
+        if (clink2faDisabled()) { showNotification('❌ 管理员已关闭二次认证功能'); return; }
+        await window.clinkFetch2fa(); // 先同步真实状态，避免面板显示/缓存与实际不符时走错分支
         const want = !window.__clink2fa;
         if (want) { clinkOpen2faSetup(); return; }
         clinkPromptPassword('关闭二次认证需验证密码', async (password) => {
@@ -25667,6 +26088,31 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                 showNotification('❌ ' + e.message);
             }
         });
+    };
+    // 保存 2FA 作用范围：修改安全配置本身必须提供动态码（防止拿到密码的人关掉全部保护）。
+    // 使用 direct 模式弹窗：绕过 /authorize（authorize 可能被用户关闭），直接取码交给后端校验。
+    window.clinkSave2faScopes = async function() {
+        if (!window.__clink2fa) { const m = document.getElementById('clinkScopesMsg'); if (m) m.textContent = '请先开启二次认证'; return; }
+        clinkStepUpAuth('保存 2FA 设置需验证身份', async (code) => {
+            const g = (id, def) => { const el = document.getElementById(id); return el ? el.checked : def; };
+            const scopes = {
+                authorize: g('clinkScopeAuthorize', true),
+                sessions: g('clinkScopeSessions', true),
+                password: g('clinkScopePassword', true),
+                account: g('clinkScopeAccount', true)
+            };
+            try {
+                const r = await clinkApi('/2fa/scopes', { method: 'PUT', body: JSON.stringify({ code, scopes }) });
+                const d = await r.json();
+                if (!r.ok || !d.success) throw new Error(d.message || '保存失败');
+                if (d.scopes) window.__clinkScopes = Object.assign({}, window.__clinkScopes, d.scopes);
+                const msg = document.getElementById('clinkScopesMsg');
+                if (msg) msg.textContent = '✅ 已保存';
+                showNotification('🔐 2FA 作用范围已保存');
+            } catch (e) {
+                showNotification('❌ ' + e.message);
+            }
+        }, { direct: true });
     };
     // 开启二次认证：两阶段向导，全程适配标准 TOTP 浏览器插件
     //   第 1 步「绑定」：插件扫码/手动添加密钥 → 输入账号密码 + 插件当前动态码
@@ -25725,6 +26171,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
 
         // ---------- 第 2 步：强制确认验证 ----------
         function renderStep2() {
+            window.__clink2faPending = true; // 已绑定未确认：中途关闭要提示未完成
             m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(440px,94vw);padding:22px;border-radius:12px;">' +
                 '<div style="font-weight:bold;margin-bottom:4px;font-size:16px;">🔐 开启二次认证（TOTP）</div>' +
                 '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 2 步 / 共 2 步 · 确认验证</div>' +
@@ -25760,16 +26207,19 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                     if (r.ok && d.success) {
                         window.__clink2fa = true;
                         window.__clink2faCode = code;
+                        window.__clink2faPending = false;
                         closeClink2faSetup();
                         window.showClinkAccountSettings();
                         showNotification(d.message || '二次认证已开启');
                         return;
                     }
                     if (d.sameCode) { setMsg('⏳ ' + (d.message || '请等待插件刷新出新的验证码')); okBtn.disabled = false; okBtn.textContent = '完成确认并开启'; return; }
+                    // 确认失败 / 绑定超时 → 本次绑定作废，账号保持原状
                     window.__clink2fa = false;
+                    window.__clink2faPending = false;
                     closeClink2faSetup();
                     window.showClinkAccountSettings();
-                    showNotification('❌ ' + (d.message || '确认失败，二次认证已自动关闭'));
+                    showNotification('❌ ' + (d.message || '确认失败，请重新开启二次认证'));
                 } catch (e) {
                     setMsg('❌ ' + e.message);
                     okBtn.disabled = false; okBtn.textContent = '完成确认并开启';
@@ -25799,11 +26249,18 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     }
     function closeClink2faSetup() {
         if (window.__clink2faTick) { clearInterval(window.__clink2faTick); window.__clink2faTick = null; }
+        // 已绑定未完成最后确认就关掉：明确提醒，避免用户以为 2FA 已开启
+        if (window.__clink2faPending && !window.__clink2fa) {
+            window.__clink2faPending = false;
+            showNotification('⚠️ 二次认证尚未开启：你已完成绑定但未完成最后确认。请重新打开「开启二次认证」，等插件刷新出【新的】动态码后输入完成确认。');
+        } else {
+            window.__clink2faPending = false;
+        }
         const m = document.getElementById('clink2faSetupModal');
         if (m) m.remove();
     }
     window.clinkChangePassword = async function() {
-        if (await clinkFetch2fa()) { clinkStepUpAuth('更改密码需二次认证', (code) => clinkDoChangePassword(code)); return; }
+        if (await clinkFetch2fa() && clinkNeed2fa('password')) { clinkStepUpAuth('更改密码需二次认证', (code) => clinkDoChangePassword(code)); return; }
         clinkDoChangePassword();
     };
     async function clinkDoChangePassword(code) {
@@ -25831,7 +26288,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         }
     };
     window.clinkDeleteAccount = async function() {
-        if (await clinkFetch2fa()) { clinkStepUpAuth('注销账号需二次认证', (code) => clinkDoDeleteAccount(code)); return; }
+        if (await clinkFetch2fa() && clinkNeed2fa('account')) { clinkStepUpAuth('注销账号需二次认证', (code) => clinkDoDeleteAccount(code)); return; }
         clinkDoDeleteAccount();
     };
     async function clinkDoDeleteAccount(code) {
