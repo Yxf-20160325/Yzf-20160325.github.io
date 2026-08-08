@@ -1098,6 +1098,8 @@ const userCoins = new Map(); // 用户金币余额（按 userId 存储，管理�
 const userLevels = new Map(); // 用户等级（预留；游戏当前无升级系统，恒为 1，仅供兼容）
 // 玩家真实金币（客户端上报，供管理员查看；与 userCoins 分开，避免覆盖管理员账本语义）
 const reportedCoins = new Map();
+// 管理员是否调整过该用户金币（调整后以管理员账本为准，客户端下次上报需直接覆盖本地，否则被玩家本地值冲掉）
+const adminCoinOverride = new Map();
 // 玩家档案（客户端上报的 IP / 金币 / 时长 / 统计 / 游戏状态快照；持久保存最近一次，供管理后台离线查看）
 const playerProfiles = new Map();
 
@@ -2439,7 +2441,8 @@ function getAllUsersList() {
             level: userLevels.get(player.id) || 1,
             roomId: roomId,
             roomName: roomName,
-            online: true
+            online: true,
+            platform: player.platform || 'web'
         });
     }
     // 2. 兜底：room.players 中未在在线表出现的，按「名字」合并进已有在线条目（避免 peerId 产生重复条目）
@@ -2467,7 +2470,8 @@ function getAllUsersList() {
                 level: userLevels.get(player.id) || 1,
                 roomId: room.id,
                 roomName: room.name,
-                online: true
+                online: true,
+                platform: player.platform || 'web'
             });
         }
     }
@@ -2506,6 +2510,8 @@ app.post('/api/player-online', (req, res) => {
         if (achievements) mergeAchievements(id, achievements);
         const ip = getClientIp(req);
         const role = getUserRole(id);
+        // 平台来源：微信小程序内嵌 web-view 上报 'miniprogram'，普通浏览器上报 'web'（默认 web）
+        const platform = (req.body && req.body.platform) ? String(req.body.platform).slice(0, 20) : 'web';
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
@@ -2513,7 +2519,8 @@ app.post('/api/player-online', (req, res) => {
             roomId: existing.roomId || null,
             joinedAt: existing.joinedAt || Date.now(),
             ip: ip,
-            role: role
+            role: role,
+            platform: platform
         });
         onlineSockets.set(id, 'rest');
         // 持久化玩家档案（IP / 金币 / 时长 / 统计 / 游戏状态），供管理后台查看
@@ -2561,7 +2568,15 @@ app.post('/api/player-online', (req, res) => {
             role: role,
             uiSettings: getEffectiveUISettings(id),
             adminOverridden: !!(userSettings.get(id) || {}).admin,
+            // admin 分功能封禁状态（封禁单人/解密/多人/聊天），无 socket 的小程序靠此响应生效
+            banned: (() => {
+                const b = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
+                if (!b.reasons) b.reasons = {};
+                return { single: !!b.single, multiplayer: !!b.multiplayer, puzzle: !!b.puzzle, chat: !!b.chat, reasons: b.reasons };
+            })(),
             progress: {
+                coins: getDisplayCoins(id),                       // admin 调整金币后以此为准
+                adminCoinOverride: !!adminCoinOverride.get(id),   // true = 客户端需直接覆盖本地金币
                 unlockedLevel: prog.unlockedLevel || 1,
                 completedLevels: Array.isArray(prog.completedLevels) ? prog.completedLevels : [],
                 puzzleCompletedLevels: Array.isArray(prog.puzzleCompletedLevels) ? prog.puzzleCompletedLevels : [],
@@ -2625,6 +2640,9 @@ app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
         const current = userCoins.get(userId) || 0;
         const updated = current + delta;
         userCoins.set(userId, updated);
+        // 同步到上报账本 + 标记管理员覆盖：客户端下次 player-online 需以此值为准（直接覆盖本地）
+        reportedCoins.set(userId, Math.max(0, updated));
+        adminCoinOverride.set(userId, true);
 
         console.log(`[Admin] 用户 ${userId} 金币变更 ${delta >= 0 ? '+' : ''}${delta}，当前余额 ${updated}`);
         appendAudit('admin', 'coins', `用户 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 金币，余额 ${updated}`);
@@ -4438,6 +4456,9 @@ app.post('/api/admin/rooms/:roomId/system-message', requireAdminAuth, (req, res)
 });
 
 // API: 向所有在线客户端发送全局弹窗（管理员专用）
+// 记录最近一次发送的管理员弹窗，供无 socket 的客户端（微信小游戏 REST 拉取）启动时展示
+let lastAdminPopup = null;
+
 app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
     try {
         const { title, message } = req.body;
@@ -4447,11 +4468,9 @@ app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
         }
 
         // 向所有连接的客户端广播弹窗事件（游戏端需监听 'admin-popup' 才能显示）
-        io.emit('admin-popup', {
-            title: title,
-            message: message,
-            timestamp: Date.now()
-        });
+        const popup = { title: title, message: message, timestamp: Date.now() };
+        io.emit('admin-popup', popup);
+        lastAdminPopup = popup; // 供小程序 REST 拉取
 
         console.log(`[Admin] 已发送全局弹窗: ${title}`);
         appendAudit('admin', 'popup', `发送全局弹窗: ${String(title).slice(0, 80)}`);
@@ -4460,6 +4479,11 @@ app.post('/api/admin/popup', requireAdminAuth, (req, res) => {
         console.error('[API] 发送弹窗失败:', error);
         res.status(500).json({ success: false, message: '发送弹窗失败' });
     }
+});
+
+// 小程序/其他无 socket 客户端：启动时拉取最近一次管理员弹窗（公开，无需鉴权）
+app.get('/api/admin/popup', (req, res) => {
+    res.json({ success: true, popup: lastAdminPopup });
 });
 
 // ===== 公告功能（管理员发布，持久化到 announcements 表 / JSON 兜底）=====
