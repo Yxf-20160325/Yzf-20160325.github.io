@@ -214,7 +214,8 @@ const DB_TABLES_SQL = [
         disabled TINYINT(1) NOT NULL DEFAULT 0,
         two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
         creator_client_id VARCHAR(64),
-        totp_secret VARCHAR(64)
+        totp_secret VARCHAR(64),
+        totp_scopes VARCHAR(255)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -266,7 +267,8 @@ const DB_TABLES_SQL = [
         disabled TINYINT(1) NOT NULL DEFAULT 0,
         two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
         creator_client_id VARCHAR(64),
-        totp_secret VARCHAR(64)
+        totp_secret VARCHAR(64),
+        totp_scopes VARCHAR(255)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_links (
         code VARCHAR(32) PRIMARY KEY,
@@ -476,6 +478,23 @@ async function initDatabase() {
                     await pool.query('ALTER TABLE cloud_link_accounts ADD COLUMN totp_secret VARCHAR(64)');
                     console.log('🗄️ 已为 cloud_link_accounts 表补充 totp_secret 列（TOTP 密钥）');
                 }
+                // 补充 totp_scopes 列：2FA 作用范围（哪些敏感操作需要动态码；空 = 全部需要）
+                const [tsCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_accounts' AND COLUMN_NAME='totp_scopes'",
+                    [dbName]
+                );
+                if (!tsCols || tsCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN totp_scopes VARCHAR(255)');
+                    console.log('🗄️ 已为 cloud_storage_accounts 表补充 totp_scopes 列（2FA 作用范围）');
+                }
+                const [ltsCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_link_accounts' AND COLUMN_NAME='totp_scopes'",
+                    [dbName]
+                );
+                if (!ltsCols || ltsCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_link_accounts ADD COLUMN totp_scopes VARCHAR(255)');
+                    console.log('🗄️ 已为 cloud_link_accounts 表补充 totp_scopes 列（2FA 作用范围）');
+                }
                 // 补充 ip 列：记录会话登录 IP，供"管理设备"展示
                 const [sessIpCols] = await pool.query(
                     "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_sessions' AND COLUMN_NAME='ip'",
@@ -550,6 +569,8 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     cloudStorage: true,
     mazeJsonShare: true,
     cloudLinkEnabled: true,
+    cloud2fa: true,        // 云储存用户是否允许使用二次认证（2FA）
+    cloudLink2fa: true,    // 云链接用户是否允许使用二次认证（2FA）
     antiDevtools: false,
     showAntiCheatTab: true,
     newUi: { mode: 'probability', prob: 100 }
@@ -4904,18 +4925,22 @@ const CLOUD_ACCOUNT_COLUMNS = {
     banned_until: 'VARCHAR(32)',
     two_factor_enabled: 'TINYINT(1) NOT NULL DEFAULT 0',
     creator_client_id: 'VARCHAR(64)',
-    totp_secret: 'VARCHAR(64)'
+    totp_secret: 'VARCHAR(64)',
+    totp_scopes: 'VARCHAR(255)'
 };
 const _healedAccountCols = {};
-async function _healAccountColumn(col) {
-    if (_healedAccountCols[col] || !CLOUD_ACCOUNT_COLUMNS[col]) return false;
+// 自愈补列：默认补 cloud_storage_accounts；传入 tableName 可补 cloud_link_accounts（两表结构同款）
+async function _healAccountColumn(col, tableName) {
+    const t = tableName || 'cloud_storage_accounts';
+    const key = t + '.' + col;
+    if (_healedAccountCols[key] || !CLOUD_ACCOUNT_COLUMNS[col]) return false;
     try {
-        await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN ' + col + ' ' + CLOUD_ACCOUNT_COLUMNS[col]);
-        console.log('🗄️ 自愈：已为 cloud_storage_accounts 补充列 ' + col);
-        _healedAccountCols[col] = true;
+        await pool.query('ALTER TABLE ' + t + ' ADD COLUMN ' + col + ' ' + CLOUD_ACCOUNT_COLUMNS[col]);
+        console.log('🗄️ 自愈：已为 ' + t + ' 补充列 ' + col);
+        _healedAccountCols[key] = true;
         return true;
     } catch (e) {
-        console.error('[云储存] 自愈补列 ' + col + ' 失败:', e.message);
+        console.error('[云储存] 自愈补列 ' + t + '.' + col + ' 失败:', e.message);
         return false;
     }
 }
@@ -4928,9 +4953,10 @@ async function dbSaveCloudAccount(acc) {
     // creator_client_id 仅注册时写入，登录/其它更新时保持不变（不可变）
     const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
-    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret];
+    const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
+    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes];
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(SQL, PARAMS);
@@ -4946,7 +4972,7 @@ async function dbSaveCloudAccount(acc) {
             console.error('[云储存] DB 写账号失败:', e.message);
         }
     }
-    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor, creator_client_id: creatorClientId, totp_secret: totpSecret }));
+    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor, creator_client_id: creatorClientId, totp_secret: totpSecret, totp_scopes: totpScopes }));
     saveCloudStorage();
 }
 // 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
@@ -5346,16 +5372,26 @@ async function dbSaveLinkAccount(acc) {
     // creator_client_id 仅注册时写入，登录/其它更新时保持不变（不可变）
     const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
+    const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
+    const SQL = 'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor, creatorClientId, totpSecret, totpScopes];
     if (DB_AVAILABLE && pool) {
         try {
-            await pool.query(
-                'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled, creator_client_id, totp_secret) VALUES (?,?,?,?,?,?,?,?,?) ' +
-                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor, creatorClientId, totpSecret]);
+            await pool.query(SQL, PARAMS);
             return;
-        } catch (e) { console.error('[云链接] DB 写账号失败:', e.message); }
+        } catch (e) {
+            // 自愈：云链接表缺列（迁移未执行）时补列并重试一次，避免整个写库失败落到 JSON 丢密钥
+            const m = String(e.message || '');
+            const mm = m.match(/Unknown column ['"]?([a-z_]+)['"]?/i);
+            if (mm && CLOUD_ACCOUNT_COLUMNS[mm[1]] && await _healAccountColumn(mm[1], 'cloud_link_accounts')) {
+                try { await pool.query(SQL, PARAMS); return; }
+                catch (e2) { console.error('[云链接] 自愈补列后写入仍失败:', e2.message); }
+            }
+            console.error('[云链接] DB 写账号失败:', e.message);
+        }
     }
-    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled, two_factor_enabled: twoFactor, creator_client_id: creatorClientId, totp_secret: totpSecret }));
+    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled, two_factor_enabled: twoFactor, creator_client_id: creatorClientId, totp_secret: totpSecret, totp_scopes: totpScopes }));
     saveCloudLinksFile();
 }
 async function dbAllLinkAccounts() {
@@ -5612,8 +5648,8 @@ app.post('/api/cloud-links/login', async (req, res) => {
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
         if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
-        // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码
-        if (acc.two_factor_enabled) {
+        // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码（管理员关闭该模块 2FA 时跳过，避免锁死）
+        if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
             const code = read2faCode(req);
             if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
             const deny = assert2faCode(acc, code);
@@ -5646,7 +5682,7 @@ app.put('/api/cloud-links/password', requireLinkAuth, async (req, res) => {
         if (newPassword.length < 4) return res.status(400).json({ success: false, message: '新密码至少 4 位' });
         const acc = await dbGetLinkAccount(req.linkUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
-        const denyPw = assert2faCode(acc, read2faCode(req));
+        const denyPw = assert2faScope(acc, 'password', read2faCode(req));
         if (denyPw) return res.status(403).json({ success: false, message: denyPw });
         if (!bcrypt.compareSync(oldPassword, acc.password_hash)) {
             return res.status(400).json({ success: false, message: '原密码错误' });
@@ -5667,7 +5703,7 @@ app.delete('/api/cloud-links/account', requireLinkAuth, async (req, res) => {
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
         const acc = await dbGetLinkAccount(req.linkUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
-        const denyDel = assert2faCode(acc, read2faCode(req));
+        const denyDel = assert2faScope(acc, 'account', read2faCode(req));
         if (denyDel) return res.status(403).json({ success: false, message: denyDel });
         if (!bcrypt.compareSync(password, acc.password_hash)) {
             return res.status(400).json({ success: false, message: '密码错误' });
@@ -5685,10 +5721,41 @@ app.get('/api/cloud-links/2fa', requireLinkAuth, async (req, res) => {
         res.json({ success: true, enabled: !!(acc && acc.two_factor_enabled) });
     } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
 });
+// 2FA 作用范围：哪些敏感操作需要动态码（登录始终强制，不在 scope 内）
+app.get('/api/cloud-links/2fa/scopes', requireLinkAuth, async (req, res) => {
+    try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        const enabled = !!(acc && acc.two_factor_enabled);
+        const scopes = {};
+        TOTP_SCOPES.forEach(s => { scopes[s] = enabled && twofaScopeEnabled(acc, s); });
+        res.json({ success: true, enabled, login: true, scopes });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+// 保存 2FA 作用范围：仅 2FA 开启时可修改，且必须提供正确动态码（防止拿到密码就能关掉全部保护）
+app.put('/api/cloud-links/2fa/scopes', requireLinkAuth, async (req, res) => {
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    if (!cloudLink2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.status(400).json({ success: false, message: '未开启二次认证，无需配置' });
+        const deny = assert2faCode(acc, read2faCode(req));
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        const reqScopes = (req.body && req.body.scopes) || {};
+        const list = TOTP_SCOPES.filter(s => !!reqScopes[s]);
+        acc.totp_scopes = (list.length === TOTP_SCOPES.length) ? null : JSON.stringify(list); // 全选 = 默认（全部需要）
+        acc.updated_at = new Date().toISOString();
+        await dbSaveLinkAccount(acc);
+        const scopes = {};
+        TOTP_SCOPES.forEach(s => { scopes[s] = twofaScopeEnabled(acc, s); });
+        res.json({ success: true, enabled: true, login: true, scopes });
+    } catch (e) { res.status(500).json({ success: false, message: '保存失败' }); }
+});
 // 获取开启二次认证所需信息：生成 TOTP 密钥、otpauth URI 与可扫码二维码。
 // 浏览器 2FA 插件（如 Authenticator）扫码或手动填入密钥即可添加该账号。
 app.get('/api/cloud-links/2fa/setup', requireLinkAuth, async (req, res) => {
     if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    if (!cloudLink2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
     try {
         const secret = totpGenSecret();
         const label = encodeURIComponent('迷宫探险:' + req.linkUser);
@@ -5704,6 +5771,7 @@ app.put('/api/cloud-links/2fa', requireLinkAuth, async (req, res) => {
     try {
         const password = ((req.body && req.body.password) || '').toString();
         const enabled = !!((req.body && req.body.enabled));
+        if (enabled && !cloudLink2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认操作' });
         const acc = await dbGetLinkAccount(req.linkUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
@@ -5711,17 +5779,13 @@ app.put('/api/cloud-links/2fa', requireLinkAuth, async (req, res) => {
             return res.status(400).json({ success: false, message: '密码错误' });
         }
         if (enabled) {
-            // ① 绑定阶段：校验密码 + 插件首个动态码，密钥先进待确认区，**此时并不开启**。
+            // ① 绑定阶段：校验密码 + 插件首个动态码，密钥先进待确认区。
+            // **不落库、不改账号状态**——防止误触（账号原本已开启 / 中途放弃 / 确认失败）时把已开启的 2FA 静默关掉。
             const secret = ((req.body && req.body.secret) || '').toString().trim();
             const code = ((req.body && req.body.code) || '').toString().trim();
             if (!secret) return res.status(400).json({ success: false, message: '缺少 TOTP 密钥' });
             if (!totpVerify(secret, code)) return res.status(400).json({ success: false, message: '动态验证码错误，请确认浏览器插件时间已同步' });
             pending2faPut('clink', req.linkUser, secret, code);
-            // 绑定期间保持关闭态，确认成功前不生效
-            acc.totp_secret = null;
-            acc.two_factor_enabled = 0;
-            acc.updated_at = new Date().toISOString();
-            await dbSaveLinkAccount(acc);
             return res.json({
                 success: true, enabled: false, pendingConfirm: true,
                 message: '绑定成功，请等待插件刷新出下一个验证码后再输入一次以完成确认'
@@ -5741,6 +5805,7 @@ app.put('/api/cloud-links/2fa', requireLinkAuth, async (req, res) => {
 // 一旦验证失败 → 丢弃待确认密钥并强制关闭二次认证，用户需从头重新开启。
 app.post('/api/cloud-links/2fa/confirm', requireLinkAuth, async (req, res) => {
     if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    if (!cloudLink2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
     try {
         const code = ((req.body && req.body.code) || '').toString().trim();
         const acc = await dbGetLinkAccount(req.linkUser);
@@ -5754,13 +5819,9 @@ app.post('/api/cloud-links/2fa/confirm', requireLinkAuth, async (req, res) => {
             return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
         }
         if (!totpVerify(pend.secret, code)) {
-            // 确认失败 → 强制关闭，密钥作废
+            // 确认失败 → 丢弃待确认密钥，账号保持原状（未开启仍是未开启；已开启的不受影响）
             pending2faDrop('clink', req.linkUser);
-            acc.totp_secret = null;
-            acc.two_factor_enabled = 0;
-            acc.updated_at = new Date().toISOString();
-            await dbSaveLinkAccount(acc);
-            appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-confirm-fail', `云链接账号「${req.linkUser}」二次认证确认失败，已自动关闭`, req);
+            appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-confirm-fail', `云链接账号「${req.linkUser}」二次认证确认失败，绑定已作废`, req);
             return res.status(400).json({ success: false, disabled: true, enabled: false, message: '确认验证失败，已自动关闭二次认证，请重新开启' });
         }
         pending2faDrop('clink', req.linkUser);
@@ -5793,7 +5854,7 @@ app.post('/api/cloud-links/authorize', requireLinkAuth, async (req, res) => {
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         if (!acc.two_factor_enabled) return res.json({ success: true, required: false });
         const provided = (req.body && req.body.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'authorize', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         res.json({ success: true, required: true });
     } catch (e) { res.status(500).json({ success: false, message: '授权校验失败' }); }
@@ -5804,7 +5865,7 @@ app.get('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
     try {
         const acc = await dbGetLinkAccount(req.linkUser);
         const provided = (req.query && req.query.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'sessions', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         const list = await dbGetCloudLinkSessions(req.linkUser);
         const out = list.map(s => ({
@@ -5824,7 +5885,7 @@ app.delete('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
     try {
         const acc = await dbGetLinkAccount(req.linkUser);
         const provided = (req.body && req.body.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'sessions', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         const exceptId = req.linkSessionId || '';
         await dbDeleteCloudLinkSessionsExcept(req.linkUser, exceptId);
@@ -5837,7 +5898,7 @@ app.delete('/api/cloud-links/sessions/:id', requireLinkAuth, async (req, res) =>
     try {
         const acc = await dbGetLinkAccount(req.linkUser);
         const provided = (req.body && req.body.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'sessions', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         const id = decodeURIComponent(req.params.id || '');
         if (!id) return res.status(400).json({ success: false, message: '缺少会话 id' });
@@ -6085,6 +6146,16 @@ app.delete('/api/admin/cloud-links/accounts/:username', requireAdminAuth, async 
 
 // 云储存功能总开关（受全局功能设定 cloudStorage 控制）
 function cloudStorageEnabled() { return globalFunctions.cloudStorage !== false; }
+// 云储存用户 2FA 可用开关（admin「功能设定」控制；关闭后禁止开启/配置，已开启的暂停生效）
+function cloud2faEnabled() { return globalFunctions.cloud2fa !== false; }
+// 云链接用户 2FA 可用开关
+function cloudLink2faEnabled() { return globalFunctions.cloudLink2fa !== false; }
+// 根据账号归属模块查对应的 2FA 全局开关（云储存账号带 max_mazes 字段，云链接账号无）
+function twofaGlobalEnabledFor(acc) {
+    if (!acc) return true;
+    if (acc.max_mazes != null) return cloud2faEnabled();
+    return cloudLink2faEnabled();
+}
 
 // 云储存鉴权：校验 Authorization: Bearer <jwt>
 async function requireCloudAuth(req, res, next) {
@@ -6171,8 +6242,8 @@ app.post('/api/cloud-storage/login', async (req, res) => {
                 return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) });
             }
         }
-        // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码
-        if (acc.two_factor_enabled) {
+        // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码（管理员关闭该模块 2FA 时跳过，避免锁死）
+        if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
             const code = read2faCode(req);
             if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
             const deny = assert2faCode(acc, code);
@@ -6207,7 +6278,7 @@ app.put('/api/cloud-storage/password', requireCloudAuth, async (req, res) => {
         if (newPassword.length < 4) return res.status(400).json({ success: false, message: '新密码至少 4 位' });
         const acc = await dbGetCloudAccount(req.cloudUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
-        const denyPw = assert2faCode(acc, read2faCode(req));
+        const denyPw = assert2faScope(acc, 'password', read2faCode(req));
         if (denyPw) return res.status(403).json({ success: false, message: denyPw });
         if (!bcrypt.compareSync(oldPassword, acc.password_hash)) {
             return res.status(400).json({ success: false, message: '原密码错误' });
@@ -6228,7 +6299,7 @@ app.delete('/api/cloud-storage/account', requireCloudAuth, async (req, res) => {
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
         const acc = await dbGetCloudAccount(req.cloudUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
-        const denyDel = assert2faCode(acc, read2faCode(req));
+        const denyDel = assert2faScope(acc, 'account', read2faCode(req));
         if (denyDel) return res.status(403).json({ success: false, message: denyDel });
         if (!bcrypt.compareSync(password, acc.password_hash)) {
             return res.status(400).json({ success: false, message: '密码错误' });
@@ -6247,10 +6318,41 @@ app.get('/api/cloud-storage/2fa', requireCloudAuth, async (req, res) => {
         res.json({ success: true, enabled: !!(acc && acc.two_factor_enabled) });
     } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
 });
+// 2FA 作用范围：哪些敏感操作需要动态码（登录始终强制，不在 scope 内）
+app.get('/api/cloud-storage/2fa/scopes', requireCloudAuth, async (req, res) => {
+    try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        const enabled = !!(acc && acc.two_factor_enabled);
+        const scopes = {};
+        TOTP_SCOPES.forEach(s => { scopes[s] = enabled && twofaScopeEnabled(acc, s); });
+        res.json({ success: true, enabled, login: true, scopes });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+// 保存 2FA 作用范围：仅 2FA 开启时可修改，且必须提供正确动态码（防止拿到密码就能关掉全部保护）
+app.put('/api/cloud-storage/2fa/scopes', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    if (!cloud2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.status(400).json({ success: false, message: '未开启二次认证，无需配置' });
+        const deny = assert2faCode(acc, read2faCode(req));
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        const reqScopes = (req.body && req.body.scopes) || {};
+        const list = TOTP_SCOPES.filter(s => !!reqScopes[s]);
+        acc.totp_scopes = (list.length === TOTP_SCOPES.length) ? null : JSON.stringify(list); // 全选 = 默认（全部需要）
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        const scopes = {};
+        TOTP_SCOPES.forEach(s => { scopes[s] = twofaScopeEnabled(acc, s); });
+        res.json({ success: true, enabled: true, login: true, scopes });
+    } catch (e) { res.status(500).json({ success: false, message: '保存失败' }); }
+});
 // 获取开启二次认证所需信息：生成 TOTP 密钥、otpauth URI 与可扫码二维码。
 // 浏览器 2FA 插件（如 Authenticator）扫码或手动填入密钥即可添加该账号。
 app.get('/api/cloud-storage/2fa/setup', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    if (!cloud2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
     try {
         const secret = totpGenSecret();
         const label = encodeURIComponent('迷宫探险:' + req.cloudUser);
@@ -6268,6 +6370,7 @@ app.put('/api/cloud-storage/2fa', requireCloudAuth, async (req, res) => {
     try {
         const password = ((req.body && req.body.password) || '').toString();
         const enabled = !!((req.body && req.body.enabled));
+        if (enabled && !cloud2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认操作' });
         const acc = await dbGetCloudAccount(req.cloudUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
@@ -6275,17 +6378,13 @@ app.put('/api/cloud-storage/2fa', requireCloudAuth, async (req, res) => {
             return res.status(400).json({ success: false, message: '密码错误' });
         }
         if (enabled) {
-            // ① 绑定阶段：校验密码 + 插件首个动态码，密钥先进待确认区，**此时并不开启**。
+            // ① 绑定阶段：校验密码 + 插件首个动态码，密钥先进待确认区。
+            // **不落库、不改账号状态**——防止误触（账号原本已开启 / 中途放弃 / 确认失败）时把已开启的 2FA 静默关掉。
             const secret = ((req.body && req.body.secret) || '').toString().trim();
             const code = ((req.body && req.body.code) || '').toString().trim();
             if (!secret) return res.status(400).json({ success: false, message: '缺少 TOTP 密钥' });
             if (!totpVerify(secret, code)) return res.status(400).json({ success: false, message: '动态验证码错误，请确认浏览器插件时间已同步' });
             pending2faPut('cloud', req.cloudUser, secret, code);
-            // 绑定期间保持关闭态，确认成功前不生效
-            acc.totp_secret = null;
-            acc.two_factor_enabled = 0;
-            acc.updated_at = new Date().toISOString();
-            await dbSaveCloudAccount(acc);
             return res.json({
                 success: true, enabled: false, pendingConfirm: true,
                 message: '绑定成功，请等待插件刷新出下一个验证码后再输入一次以完成确认'
@@ -6305,6 +6404,7 @@ app.put('/api/cloud-storage/2fa', requireCloudAuth, async (req, res) => {
 // 一旦验证失败 → 丢弃待确认密钥并强制关闭二次认证，用户需从头重新开启。
 app.post('/api/cloud-storage/2fa/confirm', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    if (!cloud2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
     try {
         const code = ((req.body && req.body.code) || '').toString().trim();
         const acc = await dbGetCloudAccount(req.cloudUser);
@@ -6318,13 +6418,9 @@ app.post('/api/cloud-storage/2fa/confirm', requireCloudAuth, async (req, res) =>
             return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
         }
         if (!totpVerify(pend.secret, code)) {
-            // 确认失败 → 强制关闭，密钥作废
+            // 确认失败 → 丢弃待确认密钥，账号保持原状（未开启仍是未开启；已开启的不受影响）
             pending2faDrop('cloud', req.cloudUser);
-            acc.totp_secret = null;
-            acc.two_factor_enabled = 0;
-            acc.updated_at = new Date().toISOString();
-            await dbSaveCloudAccount(acc);
-            appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-confirm-fail', `云储存账号「${req.cloudUser}」二次认证确认失败，已自动关闭`, req);
+            appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-confirm-fail', `云储存账号「${req.cloudUser}」二次认证确认失败，绑定已作废`, req);
             return res.status(400).json({ success: false, disabled: true, enabled: false, message: '确认验证失败，已自动关闭二次认证，请重新开启' });
         }
         pending2faDrop('cloud', req.cloudUser);
@@ -6448,10 +6544,35 @@ function read2faCode(req) {
 // 仅当账号开启二次认证且已登记 TOTP 密钥时，才强制要求动态码正确。
 function assert2faCode(acc, code) {
     if (!acc || !acc.two_factor_enabled) return null;
+    if (!twofaGlobalEnabledFor(acc)) return null; // 管理员关闭了该模块的 2FA：暂停生效（放行），避免锁死
     const secret = acc.totp_secret || null;
     if (!secret) return null; // 开启但无密钥（旧数据）：放行，待用户重新设置
     if (!totpVerify(secret, code || '')) return '二次认证失败：请输入正确的动态验证码（来自你的 2FA 浏览器插件）';
     return null;
+}
+// ===== 2FA 作用范围（scope）=====
+// 账号可配置哪些敏感操作需要动态码（登录始终强制，不在 scope 列表内）。
+// totp_scopes 存储「需要动态码的 scope 数组」的 JSON 字符串；为空（null/undefined/''）表示全部需要（安全默认）。
+const TOTP_SCOPES = ['authorize', 'sessions', 'password', 'account'];
+function parseTotpScopes(acc) {
+    const raw = (acc && acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : '';
+    if (!raw) return null; // 无配置 → 全部需要
+    let list = [];
+    try { const p = JSON.parse(raw); if (Array.isArray(p)) list = p.map(String); }
+    catch (e) { list = raw.split(',').map(s => s.trim()).filter(Boolean); }
+    return list.filter(s => TOTP_SCOPES.indexOf(s) >= 0);
+}
+// 指定操作在当前 2FA 配置下是否要求动态码
+function twofaScopeEnabled(acc, scope) {
+    if (!acc || !acc.two_factor_enabled) return false;
+    const list = parseTotpScopes(acc);
+    if (list === null) return true; // 默认全部需要
+    return list.indexOf(scope) >= 0;
+}
+// scope 化守卫：scope 启用则校验动态码，未启用直接放行；返回 null 放行，字符串为拒绝原因
+function assert2faScope(acc, scope, code) {
+    if (!twofaScopeEnabled(acc, scope)) return null;
+    return assert2faCode(acc, code || '');
 }
 // 二次认证「授权」：敏感操作（打开账号设置/管理设备/踢出设备）前的身份校验。
 // 必须由创建该账号的人（client_id 匹配）点击授权按钮放行，否则拒绝。
@@ -6462,7 +6583,7 @@ app.post('/api/cloud-storage/authorize', requireCloudAuth, async (req, res) => {
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         if (!acc.two_factor_enabled) return res.json({ success: true, required: false });
         const provided = (req.body && req.body.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'authorize', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         res.json({ success: true, required: true });
     } catch (e) { res.status(500).json({ success: false, message: '授权校验失败' }); }
@@ -6585,7 +6706,7 @@ app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
     try {
         const acc = await dbGetCloudAccount(req.cloudUser);
         const provided = (req.query && req.query.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'sessions', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         const list = await dbGetCloudSessions(req.cloudUser);
         const out = list.map(s => ({
@@ -6605,7 +6726,7 @@ app.delete('/api/cloud-storage/sessions/:id', requireCloudAuth, async (req, res)
     try {
         const acc = await dbGetCloudAccount(req.cloudUser);
         const provided = (req.body && req.body.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'sessions', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         const id = req.params.id;
         const list = await dbGetCloudSessions(req.cloudUser);
@@ -6621,7 +6742,7 @@ app.delete('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => 
     try {
         const acc = await dbGetCloudAccount(req.cloudUser);
         const provided = (req.body && req.body.clientId) || '';
-        const deny = assert2faCode(acc, read2faCode(req));
+        const deny = assert2faScope(acc, 'sessions', read2faCode(req));
         if (deny) return res.status(403).json({ success: false, message: deny });
         await dbDeleteCloudSessionsExcept(req.cloudUser, req.cloudSessionId);
         res.json({ success: true, message: '已退出其他所有设备' });
