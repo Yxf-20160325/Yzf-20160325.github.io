@@ -6574,6 +6574,119 @@ function assert2faScope(acc, scope, code) {
     if (!twofaScopeEnabled(acc, scope)) return null;
     return assert2faCode(acc, code || '');
 }
+// ===== 2FA 随机抽查（服务端安全抽查）=====
+// 每分钟按概率从「正在管理页面（已 checkin 心跳）」的云储存/云链接用户中随机抽一个，
+// 要求输入一次当前动态码；**不在管理页面的用户不参与抽查**，未开启 2FA 的用户也不抽。
+const _2FA_CHALLENGE_PROB = (process.env.TWOFA_SPOT_PROB != null && !isNaN(parseFloat(process.env.TWOFA_SPOT_PROB))) ? Math.max(0, Math.min(1, parseFloat(process.env.TWOFA_SPOT_PROB))) : 0.5; // 每分钟触发抽查的概率（默认 50%）
+const _2FA_SPOT_INTERVAL = (process.env.TWOFA_SPOT_INTERVAL != null && !isNaN(parseInt(process.env.TWOFA_SPOT_INTERVAL, 10))) ? Math.max(1000, parseInt(process.env.TWOFA_SPOT_INTERVAL, 10)) : 60000; // 抽查周期（默认 60s，测试可调小）
+const _2FA_ACTIVE_TTL = 75 * 1000;       // checkin 心跳有效时长（客户端每 ~30s 上报一次）
+const _2FA_CHALLENGE_TTL = 150 * 1000;   // 抽查任务有效期：2.5 分钟内未提交自动作废
+const _2faActive = new Map();            // key 'cloud:<u>' | 'clink:<u>' → { kind, username, activeAt, has2fa }
+const _2faChallenges = new Map();        // key → { at, expiresAt }（已下发待验证的抽查任务）
+function _2faKey(kind, username) { return kind + ':' + username; }
+
+// 管理页面心跳（进入管理面板后客户端定期上报；active:false 表示离开）
+app.post('/api/cloud-storage/2fa/checkin', requireCloudAuth, async (req, res) => {
+    try {
+        const active = !((req.body && req.body.active === false));
+        const key = _2faKey('cloud', req.cloudUser);
+        if (active) {
+            const acc = await dbGetCloudAccount(req.cloudUser);
+            const has2fa = !!(acc && acc.two_factor_enabled && acc.totp_secret && twofaGlobalEnabledFor(acc));
+            _2faActive.set(key, { kind: 'cloud', username: req.cloudUser, activeAt: Date.now(), has2fa });
+        } else { _2faActive.delete(key); }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.post('/api/cloud-links/2fa/checkin', requireLinkAuth, async (req, res) => {
+    try {
+        const active = !((req.body && req.body.active === false));
+        const key = _2faKey('clink', req.linkUser);
+        if (active) {
+            const acc = await dbGetLinkAccount(req.linkUser);
+            const has2fa = !!(acc && acc.two_factor_enabled && acc.totp_secret && twofaGlobalEnabledFor(acc));
+            _2faActive.set(key, { kind: 'clink', username: req.linkUser, activeAt: Date.now(), has2fa });
+        } else { _2faActive.delete(key); }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+
+// 客户端轮询：当前账号是否有待处理的抽查任务
+app.get('/api/cloud-storage/2fa/challenge', requireCloudAuth, async (req, res) => {
+    try {
+        const key = _2faKey('cloud', req.cloudUser);
+        const c = _2faChallenges.get(key);
+        const active = !!(c && c.expiresAt > Date.now());
+        if (c && c.expiresAt <= Date.now()) _2faChallenges.delete(key);
+        res.json({ success: true, challenge: active });
+    } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.get('/api/cloud-links/2fa/challenge', requireLinkAuth, async (req, res) => {
+    try {
+        const key = _2faKey('clink', req.linkUser);
+        const c = _2faChallenges.get(key);
+        const active = !!(c && c.expiresAt > Date.now());
+        if (c && c.expiresAt <= Date.now()) _2faChallenges.delete(key);
+        res.json({ success: true, challenge: active });
+    } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+
+// 提交抽查动态码：正确 → 任务完成；错误 → 403 可重试（写审计）；过期/未开启 → 直接放行
+app.post('/api/cloud-storage/2fa/challenge', requireCloudAuth, async (req, res) => {
+    try {
+        const key = _2faKey('cloud', req.cloudUser);
+        const c = _2faChallenges.get(key);
+        if (!c || c.expiresAt <= Date.now()) {
+            _2faChallenges.delete(key);
+            return res.status(400).json({ success: false, expired: true, message: '抽查已过期，无需验证' });
+        }
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc || !acc.two_factor_enabled || !acc.totp_secret) { _2faChallenges.delete(key); return res.json({ success: true, message: '未开启二次认证，跳过抽查' }); }
+        if (!totpVerify(acc.totp_secret, read2faCode(req) || '')) {
+            appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-spot-check-fail', `云储存账号「${req.cloudUser}」随机抽查验证失败`, req);
+            return res.status(403).json({ success: false, message: '动态码错误，请重新输入（来自你的 2FA 浏览器插件）' });
+        }
+        _2faChallenges.delete(key);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-spot-check', `云储存账号「${req.cloudUser}」随机抽查验证通过`, req);
+        res.json({ success: true, message: '抽查验证通过' });
+    } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.post('/api/cloud-links/2fa/challenge', requireLinkAuth, async (req, res) => {
+    try {
+        const key = _2faKey('clink', req.linkUser);
+        const c = _2faChallenges.get(key);
+        if (!c || c.expiresAt <= Date.now()) {
+            _2faChallenges.delete(key);
+            return res.status(400).json({ success: false, expired: true, message: '抽查已过期，无需验证' });
+        }
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc || !acc.two_factor_enabled || !acc.totp_secret) { _2faChallenges.delete(key); return res.json({ success: true, message: '未开启二次认证，跳过抽查' }); }
+        if (!totpVerify(acc.totp_secret, read2faCode(req) || '')) {
+            appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-spot-check-fail', `云链接账号「${req.linkUser}」随机抽查验证失败`, req);
+            return res.status(403).json({ success: false, message: '动态码错误，请重新输入（来自你的 2FA 浏览器插件）' });
+        }
+        _2faChallenges.delete(key);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-spot-check', `云链接账号「${req.linkUser}」随机抽查验证通过`, req);
+        res.json({ success: true, message: '抽查验证通过' });
+    } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+
+// 每分钟随机抽查：概率触发 → 从「在管理页面」的已开 2FA 用户中随机抽一个下发抽查任务
+setInterval(() => {
+    if (Math.random() >= _2FA_CHALLENGE_PROB) return;
+    const now = Date.now();
+    const candidates = [];
+    for (const [key, a] of _2faActive.entries()) {
+        if (now - a.activeAt > _2FA_ACTIVE_TTL) { _2faActive.delete(key); continue; } // 心跳过期 = 不在管理页面
+        if (!a.has2fa) continue;
+        candidates.push(key);
+    }
+    if (!candidates.length) return;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    _2faChallenges.set(pick, { at: now, expiresAt: now + _2FA_CHALLENGE_TTL });
+    console.log('[2FA抽查] 已向 ' + pick + ' 下发抽查任务（' + Math.round(_2FA_CHALLENGE_TTL / 1000) + 's 内需完成）');
+}, _2FA_SPOT_INTERVAL);
+
 // 二次认证「授权」：敏感操作（打开账号设置/管理设备/踢出设备）前的身份校验。
 // 必须由创建该账号的人（client_id 匹配）点击授权按钮放行，否则拒绝。
 app.post('/api/cloud-storage/authorize', requireCloudAuth, async (req, res) => {
