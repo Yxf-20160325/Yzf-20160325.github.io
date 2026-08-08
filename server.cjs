@@ -5189,9 +5189,11 @@ let cloudSessions = new Map(); // id -> { id, username, device, created_at, last
 async function loadCloudSessions() {
     try {
         if (DB_AVAILABLE && pool) {
-            const [rows] = await pool.query('SELECT * FROM cloud_sessions');
-            if (rows) rows.forEach(s => cloudSessions.set(s.id, s));
-            return;
+            try {
+                const [rows] = await pool.query('SELECT * FROM cloud_sessions');
+                if (rows) rows.forEach(s => cloudSessions.set(s.id, s));
+                return; // DB 成功 → 以 DB 为准
+            } catch (e) { console.error('[云储存] DB 会话载入失败，回退 JSON:', e.message); }
         }
         if (fs.existsSync(CLOUD_SESSIONS_FILE)) {
             const arr = JSON.parse(fs.readFileSync(CLOUD_SESSIONS_FILE, 'utf8'));
@@ -5508,9 +5510,11 @@ let cloudLinkSessions = new Map(); // id -> { id, username, device, ip, created_
 async function loadCloudLinkSessions() {
     try {
         if (DB_AVAILABLE && pool) {
-            const [rows] = await pool.query('SELECT * FROM cloud_link_sessions');
-            if (rows) rows.forEach(s => cloudLinkSessions.set(s.id, s));
-            return;
+            try {
+                const [rows] = await pool.query('SELECT * FROM cloud_link_sessions');
+                if (rows) rows.forEach(s => cloudLinkSessions.set(s.id, s));
+                return; // DB 成功 → 以 DB 为准
+            } catch (e) { console.error('[云链接] DB 会话载入失败，回退 JSON:', e.message); }
         }
         if (fs.existsSync(CLOUD_LINK_SESSIONS_FILE)) {
             const arr = JSON.parse(fs.readFileSync(CLOUD_LINK_SESSIONS_FILE, 'utf8'));
@@ -5854,10 +5858,9 @@ app.post('/api/cloud-links/2fa/confirm', requireLinkAuth, async (req, res) => {
             return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
         }
         if (!totpVerify(pend.secret, code)) {
-            // 确认失败 → 丢弃待确认密钥，账号保持原状（未开启仍是未开启；已开启的不受影响）
-            pending2faDrop('clink', req.linkUser);
-            appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-confirm-fail', `云链接账号「${req.linkUser}」二次认证确认失败，绑定已作废`, req);
-            return res.status(400).json({ success: false, disabled: true, enabled: false, message: '确认验证失败，已自动关闭二次认证，请重新开启' });
+            // 确认失败 → 保留待确认密钥，允许在有效期内重试（不强制作废，避免误输一次就前功尽弃）
+            appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-confirm-fail', `云链接账号「${req.linkUser}」二次认证确认失败（动态码错误，密钥保留可重试）`, req);
+            return res.status(400).json({ success: false, retryable: true, enabled: false, message: '动态码不正确，请确认你的 2FA 插件显示的验证码后重试（不能重复使用绑定时的那个码，需等插件刷新出新码）' });
         }
         pending2faDrop('clink', req.linkUser);
         acc.totp_secret = pend.secret;
@@ -6454,10 +6457,9 @@ app.post('/api/cloud-storage/2fa/confirm', requireCloudAuth, async (req, res) =>
             return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
         }
         if (!totpVerify(pend.secret, code)) {
-            // 确认失败 → 丢弃待确认密钥，账号保持原状（未开启仍是未开启；已开启的不受影响）
-            pending2faDrop('cloud', req.cloudUser);
-            appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-confirm-fail', `云储存账号「${req.cloudUser}」二次认证确认失败，绑定已作废`, req);
-            return res.status(400).json({ success: false, disabled: true, enabled: false, message: '确认验证失败，已自动关闭二次认证，请重新开启' });
+            // 确认失败 → 保留待确认密钥，允许在有效期内重试（不强制作废，避免误输一次就前功尽弃）
+            appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-confirm-fail', `云储存账号「${req.cloudUser}」二次认证确认失败（动态码错误，密钥保留可重试）`, req);
+            return res.status(400).json({ success: false, retryable: true, enabled: false, message: '动态码不正确，请确认你的 2FA 插件显示的验证码后重试（不能重复使用绑定时的那个码，需等插件刷新出新码）' });
         }
         pending2faDrop('cloud', req.cloudUser);
         acc.totp_secret = pend.secret;
@@ -6613,7 +6615,7 @@ function assert2faScope(acc, scope, code) {
 // ===== 2FA 随机抽查（服务端安全抽查）=====
 // 每分钟按概率从「正在管理页面（已 checkin 心跳）」的云储存/云链接用户中随机抽一个，
 // 要求输入一次当前动态码；**不在管理页面的用户不参与抽查**，未开启 2FA 的用户也不抽。
-const _2FA_CHALLENGE_PROB = (process.env.TWOFA_SPOT_PROB != null && !isNaN(parseFloat(process.env.TWOFA_SPOT_PROB))) ? Math.max(0, Math.min(1, parseFloat(process.env.TWOFA_SPOT_PROB))) : 0.5; // 每分钟触发抽查的概率（默认 50%）
+const _2FA_CHALLENGE_PROB = (process.env.TWOFA_SPOT_PROB != null && !isNaN(parseFloat(process.env.TWOFA_SPOT_PROB))) ? Math.max(0, Math.min(1, parseFloat(process.env.TWOFA_SPOT_PROB))) : 0.1; // 每分钟触发抽查的概率（默认 10%，2026-08-09 由 50% 下调：过高导致 2FA 用户停留管理页时频繁被抽超时退登）
 const _2FA_SPOT_INTERVAL = (process.env.TWOFA_SPOT_INTERVAL != null && !isNaN(parseInt(process.env.TWOFA_SPOT_INTERVAL, 10))) ? Math.max(1000, parseInt(process.env.TWOFA_SPOT_INTERVAL, 10)) : 60000; // 抽查周期（默认 60s，测试可调小）
 const _2FA_ACTIVE_TTL = 75 * 1000;       // checkin 心跳有效时长（客户端每 ~30s 上报一次）
 const _2FA_CHALLENGE_TTL = 150 * 1000;   // 抽查任务有效期：2.5 分钟内未提交自动作废
@@ -7049,7 +7051,13 @@ const BACKUP_SESSIONS_FILE = path.join(DATA_DIR, 'cloud-backup-sessions.json');
 let backupSessions = new Map();
 async function loadBackupSessions() {
     try {
-        if (DB_AVAILABLE && pool) { const [rows] = await pool.query('SELECT * FROM cloud_backup_sessions'); if (rows) rows.forEach(s => backupSessions.set(s.id, s)); return; }
+        if (DB_AVAILABLE && pool) {
+            try {
+                const [rows] = await pool.query('SELECT * FROM cloud_backup_sessions');
+                if (rows) rows.forEach(s => backupSessions.set(s.id, s));
+                return; // DB 成功 → 以 DB 为准
+            } catch (e) { console.error('[云备份] DB 会话载入失败，回退 JSON:', e.message); }
+        }
         if (fs.existsSync(BACKUP_SESSIONS_FILE)) { const arr = JSON.parse(fs.readFileSync(BACKUP_SESSIONS_FILE, 'utf8')); if (Array.isArray(arr)) arr.forEach(s => backupSessions.set(s.id, s)); }
     } catch (e) { console.error('[云备份] 会话载入失败:', e.message); }
 }
@@ -7058,7 +7066,7 @@ async function dbGetBackupSessions(username) {
     if (DB_AVAILABLE && pool) { try { const [rows] = await pool.query('SELECT * FROM cloud_backup_sessions WHERE username=? ORDER BY last_active_at DESC', [username]); if (rows) { rows.forEach(s => backupSessions.set(s.id, s)); return rows; } } catch (e) { console.error('[云备份] DB 读会话失败:', e.message); } }
     return Array.from(backupSessions.values()).filter(s => s.username === username).sort((a, b) => (b.last_active_at || '').localeCompare(a.last_active_at || ''));
 }
-async function dbUpsertBackupSession(s) { backupSessions.set(s.id, s); if (DB_AVAILABLE && pool) { try { await pool.query('INSERT INTO cloud_backup_sessions (id, username, device, ip, created_at, last_active_at) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE device=VALUES(device), ip=VALUES(ip), last_active_at=VALUES(last_active_at)', [s.id, s.username, s.device, s.ip, s.created_at, s.last_active_at]); } catch (e) { console.error('[云备份] DB 写会话失败:', e.message); } } }
+async function dbUpsertBackupSession(s) { backupSessions.set(s.id, s); if (DB_AVAILABLE && pool) { try { await pool.query('INSERT INTO cloud_backup_sessions (id, username, device, ip, created_at, last_active_at) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE device=VALUES(device), ip=VALUES(ip), last_active_at=VALUES(last_active_at)', [s.id, s.username, s.device, s.ip, s.created_at, s.last_active_at]); return; } catch (e) { console.error('[云备份] DB 写会话失败:', e.message); } } saveBackupSessions(); }
 async function dbDeleteBackupSession(id) { backupSessions.delete(id); if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backup_sessions WHERE id=?', [id]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } saveBackupSessions(); }
 async function dbDeleteBackupSessionsExcept(username, exceptId) { if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backup_sessions WHERE username=? AND id<>?', [username, exceptId]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } for (const [k, s] of backupSessions) if (s.username === username && k !== exceptId) backupSessions.delete(k); saveBackupSessions(); }
 async function dbDeleteBackupSessionsByUser(username) { if (!username) return; if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backup_sessions WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } for (const [k, s] of backupSessions) if (s.username === username) backupSessions.delete(k); saveBackupSessions(); }
@@ -7236,7 +7244,7 @@ app.post('/api/cloud-backup/2fa/confirm', requireBackupAuth, async (req, res) =>
         const code = ((req.body && req.body.code) || '').toString().trim(); const acc = await dbGetBackupAccount(req.backupUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         const pend = pending2faTake('backup', req.backupUser); if (!pend) return res.status(400).json({ success: false, expired: true, enabled: false, message: '绑定已超时失效，请重新开启二次认证' });
         if (code && code === pend.bindCode) return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
-        if (!totpVerify(pend.secret, code)) { pending2faDrop('backup', req.backupUser); appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-confirm-fail', `云备份账号「${req.backupUser}」二次认证确认失败，绑定已作废`, req); return res.status(400).json({ success: false, disabled: true, enabled: false, message: '确认验证失败，已自动关闭二次认证，请重新开启' }); }
+        if (!totpVerify(pend.secret, code)) { appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-confirm-fail', `云备份账号「${req.backupUser}」二次认证确认失败（动态码错误，密钥保留可重试）`, req); return res.status(400).json({ success: false, retryable: true, enabled: false, message: '动态码不正确，请确认你的 2FA 插件显示的验证码后重试（不能重复使用绑定时的那个码，需等插件刷新出新码）' }); }
         pending2faDrop('backup', req.backupUser); acc.totp_secret = pend.secret; acc.two_factor_enabled = 1; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc);
         appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-change', `云备份账号「${req.backupUser}」二次认证开启（已通过二次确认）`, req);
         res.json({ success: true, enabled: true, message: '二次认证已开启' });
