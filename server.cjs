@@ -250,6 +250,25 @@ const DB_TABLES_SQL = [
         progress JSON,
         updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_link_accounts (
+        username VARCHAR(64) PRIMARY KEY,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        client_id VARCHAR(64),
+        disabled TINYINT(1) NOT NULL DEFAULT 0
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_links (
+        code VARCHAR(32) PRIMARY KEY,
+        username VARCHAR(64) NOT NULL,
+        name VARCHAR(128),
+        data JSON NOT NULL,
+        views INT NOT NULL DEFAULT 0,
+        disabled TINYINT(1) NOT NULL DEFAULT 0,
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        INDEX idx_cloud_link_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS banned_ips (
         ip VARCHAR(64) PRIMARY KEY,
         reason TEXT,
@@ -444,6 +463,7 @@ const GLOBAL_FUNCTIONS_FILE = path.join(DATA_DIR, 'global-functions.json');
 //   debugInfo       —— 调试信息按钮是否显示
 //   f12DevConsole   —— F12 打开的开发者控制台是否显示
 //   ctrlShiftCD     —— CTRL+SHIFT+C/D 是否可以打开控制台/开发者模式
+//   mazeJsonShare   —— 玩家工坊「查看/分享迷宫（JSON）」功能，关闭后隐藏入口且禁止创建云链接
 //   antiDevtools    —— 反调试：开启后客户端强制无限 debugger 断点 + 全屏警告弹窗，
 //                      检测到浏览器开发者工具关闭后自动刷新页面。
 //                      注意：这是唯一「默认关闭」的开关（默认 false），开启才生效，
@@ -457,6 +477,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     f12DevConsole: true,
     ctrlShiftCD: true,
     cloudStorage: true,
+    mazeJsonShare: true,
     antiDevtools: false,
     showAntiCheatTab: true,
     newUi: { mode: 'probability', prob: 100 }
@@ -5186,6 +5207,436 @@ function genExpansionCode() {
     return 'MZ' + raw;
 }
 loadCloudCodes();
+
+// =============== 云链接（分享迷宫为可游玩的网页链接） ===============
+// 独立于「云储存」的一套轻量账号体系：玩家在工坊「查看/分享迷宫」里把一张迷宫发布成云链接，
+// 任何人打开 <服务器>/m/<code> 即可直接游玩该迷宫（无需登录）。
+// 存储：DB 优先（cloud_link_accounts / cloud_links 表），失败回退 JSON 文件（data/cloud-links.json）。
+const CLOUD_LINKS_FILE = path.join(DATA_DIR, 'cloud-links.json');
+const CLOUD_LINK_MAX_PER_USER = 50; // 每个云链接账号最多可创建的链接数
+let cloudLinkAccounts = new Map(); // username -> { username, password_hash, created_at, updated_at, client_id, disabled }
+let cloudLinks = new Map();        // code -> { code, username, name, data, views, disabled, created_at, updated_at }
+function loadCloudLinks() {
+    try {
+        if (fs.existsSync(CLOUD_LINKS_FILE)) {
+            const s = JSON.parse(fs.readFileSync(CLOUD_LINKS_FILE, 'utf8'));
+            if (s && s.accounts) s.accounts.forEach(a => cloudLinkAccounts.set(a.username, a));
+            if (s && s.links) s.links.forEach(l => cloudLinks.set(l.code, l));
+            console.log(`[云链接] 已从 ${CLOUD_LINKS_FILE} 加载 ${cloudLinkAccounts.size} 账号 / ${cloudLinks.size} 链接`);
+        }
+    } catch (e) { console.error('[云链接] 加载失败:', e.message); }
+}
+function saveCloudLinksFile() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(CLOUD_LINKS_FILE, JSON.stringify({
+            accounts: Array.from(cloudLinkAccounts.values()),
+            links: Array.from(cloudLinks.values())
+        }, null, 2));
+    } catch (e) { console.error('[云链接] 保存失败:', e.message); }
+}
+loadCloudLinks();
+
+// 生成短链码：8 位去混淆字符（无 I O 0 1），冲突则重试
+function genLinkCode() {
+    const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+    let s = '';
+    for (let i = 0; i < 8; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return s;
+}
+// 统一解析 data 字段（DB 可能返回字符串或对象）
+function parseLinkData(d) {
+    if (d == null) return null;
+    if (typeof d === 'string') { try { return JSON.parse(d); } catch (e) { return null; } }
+    return d;
+}
+async function dbGetLinkAccount(username) {
+    if (!username) return null;
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_link_accounts WHERE username=?', [username]);
+            if (rows && rows.length) return rows[0];
+        } catch (e) { console.error('[云链接] DB 读账号失败:', e.message); }
+    }
+    return cloudLinkAccounts.get(username) || null;
+}
+async function dbSaveLinkAccount(acc) {
+    const clientId = (acc.client_id != null) ? acc.client_id : null;
+    const disabled = acc.disabled ? 1 : 0;
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled) VALUES (?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled)',
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled]);
+            return;
+        } catch (e) { console.error('[云链接] DB 写账号失败:', e.message); }
+    }
+    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled }));
+    saveCloudLinksFile();
+}
+async function dbAllLinkAccounts() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT username, created_at, updated_at, client_id, disabled FROM cloud_link_accounts ORDER BY created_at DESC');
+            if (rows) return rows.map(r => ({ username: r.username, created_at: r.created_at, updated_at: r.updated_at, client_id: r.client_id || null, disabled: !!r.disabled }));
+        } catch (e) { console.error('[云链接] DB 读账号列表失败:', e.message); }
+    }
+    return Array.from(cloudLinkAccounts.values())
+        .map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null, disabled: !!a.disabled }))
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+}
+async function dbGetLink(code) {
+    if (!code) return null;
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_links WHERE code=?', [code]);
+            if (rows && rows.length) { const l = rows[0]; l.data = parseLinkData(l.data); return l; }
+        } catch (e) { console.error('[云链接] DB 读链接失败:', e.message); }
+    }
+    return cloudLinks.get(code) || null;
+}
+async function dbGetLinksOf(username) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_links WHERE username=? ORDER BY created_at DESC', [username]);
+            if (rows) return rows.map(l => { l.data = parseLinkData(l.data); return l; });
+        } catch (e) { console.error('[云链接] DB 读链接列表失败:', e.message); }
+    }
+    return Array.from(cloudLinks.values())
+        .filter(l => l.username === username)
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+}
+async function dbUpsertLink(l) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_links (code, username, name, data, views, disabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE name=VALUES(name), data=VALUES(data), views=VALUES(views), disabled=VALUES(disabled), updated_at=VALUES(updated_at)',
+                [l.code, l.username, l.name || '未命名迷宫',
+                 (typeof l.data === 'string') ? l.data : JSON.stringify(l.data || {}),
+                 Number(l.views || 0), l.disabled ? 1 : 0, l.created_at, l.updated_at]);
+            return;
+        } catch (e) { console.error('[云链接] DB 写链接失败:', e.message); }
+    }
+    cloudLinks.set(l.code, l);
+    saveCloudLinksFile();
+}
+async function dbDeleteLink(code) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_links WHERE code=?', [code]); } catch (e) { console.error('[云链接] DB 删链接失败:', e.message); }
+    }
+    cloudLinks.delete(code);
+    saveCloudLinksFile();
+}
+async function dbDeleteLinkAccount(username) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_links WHERE username=?', [username]); } catch (e) { console.error('[云链接] DB 删账号链接失败:', e.message); }
+        try { await pool.query('DELETE FROM cloud_link_accounts WHERE username=?', [username]); } catch (e) { console.error('[云链接] DB 删账号失败:', e.message); }
+    }
+    for (const [k, v] of cloudLinks) if (v.username === username) cloudLinks.delete(k);
+    cloudLinkAccounts.delete(username);
+    saveCloudLinksFile();
+}
+// 浏览计数（DB 优先，失败落内存）；失败不影响正常读取
+async function dbBumpLinkViews(code) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('UPDATE cloud_links SET views=views+1 WHERE code=?', [code]); return; } catch (e) { /* 忽略 */ }
+    }
+    const l = cloudLinks.get(code);
+    if (l) { l.views = Number(l.views || 0) + 1; saveCloudLinksFile(); }
+}
+
+// 「查看/分享迷宫（JSON）」总开关：同时管辖云链接的创建
+function mazeJsonShareEnabled() { return globalFunctions.mazeJsonShare !== false; }
+
+// 云链接鉴权：Authorization: Bearer <jwt>（type=clink）
+async function requireLinkAuth(req, res, next) {
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, message: '未登录' });
+    try {
+        const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        if (decoded.type !== 'clink' || !decoded.username) return res.status(401).json({ success: false, message: '无效的登录令牌' });
+        const acc = await dbGetLinkAccount(decoded.username);
+        if (!acc) return res.status(401).json({ success: false, message: '账号不存在，请重新注册' });
+        if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
+        req.linkUser = decoded.username;
+        next();
+    } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
+}
+
+// 规范化前端提交的迷宫数据（只保留游玩所需字段）
+function normalizeLinkMaze(b) {
+    if (!b || !Array.isArray(b.maze) || b.maze.length === 0) return null;
+    const grid = b.maze;
+    return {
+        name: (b.name || '未命名迷宫').toString().slice(0, 128),
+        description: (b.description || '').toString().slice(0, 500),
+        difficulty: (b.difficulty || '中等').toString().slice(0, 32),
+        size: b.size || { width: (grid[0] || []).length, height: grid.length },
+        maze: grid,
+        teleporters: Array.isArray(b.teleporters) ? b.teleporters : [],
+        enemySpeed: Number(b.enemySpeed) || 5,
+        showShop: b.showShop !== false,
+        author: (b.author || '').toString().slice(0, 64)
+    };
+}
+
+// 公开：云链接功能是否可用（跟随 mazeJsonShare 开关）
+app.get('/api/cloud-links/enabled', (req, res) => {
+    res.json({ success: true, enabled: mazeJsonShareEnabled() });
+});
+
+// 注册云链接账号
+app.post('/api/cloud-links/register', async (req, res) => {
+    try {
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        if (!username || !password) return res.status(400).json({ success: false, message: '用户名和密码不能为空' });
+        if (username.length > 64 || password.length < 4) return res.status(400).json({ success: false, message: '用户名过长或密码至少 4 位' });
+        if (await dbGetLinkAccount(username)) return res.status(409).json({ success: false, message: '该用户名已被注册' });
+        const now = new Date().toISOString();
+        const acc = {
+            username,
+            password_hash: bcrypt.hashSync(password, 10),
+            created_at: now, updated_at: now,
+            client_id: (req.body.clientId || '').toString().trim() || null,
+            disabled: 0
+        };
+        await dbSaveLinkAccount(acc);
+        const token = jwt.sign({ username, type: 'clink' }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username });
+    } catch (e) {
+        console.error('[云链接] 注册失败:', e);
+        res.status(500).json({ success: false, message: '注册失败' });
+    }
+});
+
+// 云链接账号登录
+app.post('/api/cloud-links/login', async (req, res) => {
+    try {
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        const acc = await dbGetLinkAccount(username);
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        }
+        if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        if (clientId && acc.client_id !== clientId) {
+            acc.client_id = clientId; acc.updated_at = new Date().toISOString();
+            await dbSaveLinkAccount(acc);
+        }
+        const token = jwt.sign({ username, type: 'clink' }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username });
+    } catch (e) {
+        console.error('[云链接] 登录失败:', e);
+        res.status(500).json({ success: false, message: '登录失败' });
+    }
+});
+
+// 我的云链接列表
+app.get('/api/cloud-links/mine', requireLinkAuth, async (req, res) => {
+    try {
+        const list = await dbGetLinksOf(req.linkUser);
+        res.json({
+            success: true,
+            max: CLOUD_LINK_MAX_PER_USER,
+            links: list.map(l => ({
+                code: l.code, name: l.name, views: Number(l.views || 0), disabled: !!l.disabled,
+                created_at: l.created_at, updated_at: l.updated_at
+            }))
+        });
+    } catch (e) {
+        console.error('[云链接] 读取列表失败:', e);
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 创建云链接（把一张迷宫发布为可游玩的公开链接）
+app.post('/api/cloud-links', requireLinkAuth, async (req, res) => {
+    try {
+        if (!mazeJsonShareEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭「查看/分享迷宫」功能' });
+        const data = normalizeLinkMaze(req.body || {});
+        if (!data) return res.status(400).json({ success: false, message: '迷宫数据无效' });
+        const list = await dbGetLinksOf(req.linkUser);
+        if (list.length >= CLOUD_LINK_MAX_PER_USER) {
+            return res.status(403).json({ success: false, message: `每个账号最多创建 ${CLOUD_LINK_MAX_PER_USER} 个云链接，请先删除旧链接` });
+        }
+        let code = genLinkCode();
+        for (let i = 0; i < 6 && await dbGetLink(code); i++) code = genLinkCode();
+        const now = new Date().toISOString();
+        const link = { code, username: req.linkUser, name: data.name, data, views: 0, disabled: 0, created_at: now, updated_at: now };
+        await dbUpsertLink(link);
+        res.json({ success: true, code, name: data.name, path: '/m/' + code });
+    } catch (e) {
+        console.error('[云链接] 创建失败:', e);
+        res.status(500).json({ success: false, message: '创建失败' });
+    }
+});
+
+// 删除自己的云链接
+app.delete('/api/cloud-links/:code', requireLinkAuth, async (req, res) => {
+    try {
+        const l = await dbGetLink(req.params.code);
+        if (!l || l.username !== req.linkUser) return res.status(404).json({ success: false, message: '链接不存在' });
+        await dbDeleteLink(req.params.code);
+        res.json({ success: true, message: '已删除' });
+    } catch (e) {
+        console.error('[云链接] 删除失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 公开：按短链码读取迷宫数据（游戏客户端凭 ?mazeLink=code 拉取后直接开玩）
+app.get('/api/maze-link/:code', async (req, res) => {
+    try {
+        const l = await dbGetLink(req.params.code);
+        if (!l) return res.status(404).json({ success: false, message: '链接不存在或已被删除' });
+        if (l.disabled) return res.status(403).json({ success: false, message: '该链接已被管理员停用' });
+        const data = parseLinkData(l.data);
+        if (!data) return res.status(500).json({ success: false, message: '迷宫数据损坏' });
+        dbBumpLinkViews(l.code).catch(() => {});
+        res.json({ success: true, code: l.code, name: l.name, author: l.username, views: Number(l.views || 0) + 1, maze: data });
+    } catch (e) {
+        console.error('[云链接] 读取失败:', e);
+        res.status(500).json({ success: false, message: '读取失败' });
+    }
+});
+
+// 短链入口：/m/<code> → 打开游戏页并自动载入该迷宫
+app.get('/m/:code', (req, res) => {
+    const code = (req.params.code || '').toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+    res.redirect(302, '/?mazeLink=' + encodeURIComponent(code));
+});
+
+// ===== 管理端：云链接账号 / 链接管理 =====
+// 账号列表（含每个账号的链接数与总浏览量）
+app.get('/api/admin/cloud-links/accounts', requireAdminAuth, async (req, res) => {
+    try {
+        const q = (req.query.q || '').toString().trim().toLowerCase();
+        let accounts = await dbAllLinkAccounts();
+        if (q) accounts = accounts.filter(a => (a.username || '').toLowerCase().includes(q) || (a.client_id || '').toLowerCase().includes(q));
+        const out = [];
+        for (const a of accounts) {
+            const links = await dbGetLinksOf(a.username);
+            out.push(Object.assign({}, a, {
+                linkCount: links.length,
+                totalViews: links.reduce((s, l) => s + Number(l.views || 0), 0)
+            }));
+        }
+        res.json({ success: true, accounts: out });
+    } catch (e) {
+        console.error('[云链接] 管理端读账号失败:', e);
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 某账号（或全部）的链接列表
+app.get('/api/admin/cloud-links', requireAdminAuth, async (req, res) => {
+    try {
+        const username = (req.query.username || '').toString().trim();
+        let list;
+        if (username) {
+            list = await dbGetLinksOf(username);
+        } else if (DB_AVAILABLE && pool) {
+            const [rows] = await pool.query('SELECT * FROM cloud_links ORDER BY created_at DESC LIMIT 500');
+            list = (rows || []).map(l => { l.data = parseLinkData(l.data); return l; });
+        } else {
+            list = Array.from(cloudLinks.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+        }
+        res.json({
+            success: true,
+            links: list.map(l => {
+                const d = parseLinkData(l.data) || {};
+                return {
+                    code: l.code, username: l.username, name: l.name, views: Number(l.views || 0),
+                    disabled: !!l.disabled, created_at: l.created_at, updated_at: l.updated_at,
+                    difficulty: d.difficulty || '', size: d.size || null
+                };
+            })
+        });
+    } catch (e) {
+        console.error('[云链接] 管理端读链接失败:', e);
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 修改链接（重命名 / 停用与恢复）
+app.put('/api/admin/cloud-links/:code', requireAdminAuth, async (req, res) => {
+    try {
+        const l = await dbGetLink(req.params.code);
+        if (!l) return res.status(404).json({ success: false, message: '链接不存在' });
+        if (req.body.name != null) l.name = req.body.name.toString().trim().slice(0, 128) || l.name;
+        if (req.body.disabled != null) l.disabled = req.body.disabled ? 1 : 0;
+        l.data = parseLinkData(l.data);
+        if (l.data && req.body.name != null) l.data.name = l.name; // 同步到迷宫数据，游玩页标题一致
+        l.updated_at = new Date().toISOString();
+        await dbUpsertLink(l);
+        res.json({ success: true, message: '已更新', link: { code: l.code, name: l.name, disabled: !!l.disabled } });
+    } catch (e) {
+        console.error('[云链接] 管理端修改失败:', e);
+        res.status(500).json({ success: false, message: '修改失败' });
+    }
+});
+
+// 删除链接
+app.delete('/api/admin/cloud-links/:code', requireAdminAuth, async (req, res) => {
+    try {
+        const l = await dbGetLink(req.params.code);
+        if (!l) return res.status(404).json({ success: false, message: '链接不存在' });
+        await dbDeleteLink(req.params.code);
+        res.json({ success: true, message: '已删除' });
+    } catch (e) {
+        console.error('[云链接] 管理端删除失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 封禁 / 解封云链接账号
+app.put('/api/admin/cloud-links/accounts/:username/ban', requireAdminAuth, async (req, res) => {
+    try {
+        const acc = await dbGetLinkAccount(req.params.username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        acc.disabled = req.body.disabled ? 1 : 0;
+        acc.updated_at = new Date().toISOString();
+        await dbSaveLinkAccount(acc);
+        res.json({ success: true, message: acc.disabled ? '已封禁' : '已解封' });
+    } catch (e) {
+        console.error('[云链接] 管理端封禁失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 重置云链接账号密码
+app.put('/api/admin/cloud-links/accounts/:username/password', requireAdminAuth, async (req, res) => {
+    try {
+        const acc = await dbGetLinkAccount(req.params.username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const password = (req.body.password || '').toString();
+        if (password.length < 4) return res.status(400).json({ success: false, message: '密码至少 4 位' });
+        acc.password_hash = bcrypt.hashSync(password, 10);
+        acc.updated_at = new Date().toISOString();
+        await dbSaveLinkAccount(acc);
+        res.json({ success: true, message: '密码已重置' });
+    } catch (e) {
+        console.error('[云链接] 管理端改密失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 删除云链接账号（级联删除其全部链接）
+app.delete('/api/admin/cloud-links/accounts/:username', requireAdminAuth, async (req, res) => {
+    try {
+        const acc = await dbGetLinkAccount(req.params.username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        await dbDeleteLinkAccount(req.params.username);
+        res.json({ success: true, message: '已删除账号及其全部链接' });
+    } catch (e) {
+        console.error('[云链接] 管理端删账号失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
 
 // 云储存功能总开关（受全局功能设定 cloudStorage 控制）
 function cloudStorageEnabled() { return globalFunctions.cloudStorage !== false; }
