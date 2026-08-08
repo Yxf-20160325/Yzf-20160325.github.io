@@ -3385,6 +3385,7 @@
             <div class="main-tabs" id="mainTabs">
                 <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">开始</button>
                 <button class="main-tab" data-tab="mine" onclick="switchMainTab('mine')">我的</button>
+                <button class="main-tab" data-tab="cloud" onclick="switchMainTab('cloud')">我的云空间</button>
                 <button class="main-tab" data-tab="anticheat" onclick="switchMainTab('anticheat'); loadAntiCheatTab();">🛡️ 反作弊</button>
                 <button class="main-tab" data-tab="more" onclick="switchMainTab('more')">调试</button>
             </div>
@@ -3399,12 +3400,15 @@
                     <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
                 </div>
                 <div class="main-tab-panel" data-tab="mine">
-                    <button class="menu-button" onclick="openCloudSpaceModal()">☁️ 云空间</button>
-                    <button class="menu-button" onclick="openCloudLinkModal()">🔗 云链接管理</button>
                     <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
                     <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
                     <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
                     <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
+                </div>
+                <div class="main-tab-panel" data-tab="cloud">
+                    <button class="menu-button" onclick="openCloudSpaceModal()">☁️ 云空间</button>
+                    <button class="menu-button" onclick="openCloudLinkModal()">🔗 云链接管理</button>
+                    <button class="menu-button" onclick="openCloudBackupModal()">💾 云备份</button>
                 </div>
                 <div class="main-tab-panel" data-tab="anticheat">
                     <div id="antiCheatTabBox" style="width:100%; text-align:left; font-size:13px; color:#333; padding:8px 0; box-sizing:border-box;">
@@ -20081,6 +20085,11 @@ function cloudStartSpotCheck() {
             const r = await cloudApi('/2fa/challenge');
             const d = await r.json();
             if (r.ok && d && d.challenge) cloudSpotCheckModal();
+            else if (r.ok && d && d.expired) {
+                // 抽查任务已超时未完成（如弹窗未弹出/用户切走未响应）→ 退出登录
+                showNotification('⚠️ 安全抽查超时未完成，已退出云储存账号');
+                cloudLogout();
+            }
         } catch (e) {}
     };
     beat();
@@ -20110,17 +20119,27 @@ function cloudSpotCheckModal() {
     const uname = localStorage.getItem(CLOUD_USER_KEY) || '';
     m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
         '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
-        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。<br><span style="color:#ff8a80;">超时未完成将自动退出登录。</span></div>' +
+        '<div id="cloudSpotCountdown" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
         '<input id="cloudSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
         '<div id="cloudSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
         '<div style="display:flex;gap:8px;">' +
-        '<button onclick="closeCloudSpotCheckModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button onclick="cloudSpotCheckCancel()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消（退出登录）</button>' +
         '<button id="cloudSpotOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 提交验证</button>' +
         '</div></div>';
-    m.onclick = (e) => { if (e.target === m) closeCloudSpotCheckModal(); };
+    m.onclick = (e) => { if (e.target === m) cloudSpotCheckCancel(); };
     document.body.appendChild(m);
     const okBtn = document.getElementById('cloudSpotOk');
     const codeEl = document.getElementById('cloudSpotCode');
+    // 超时兜底：与服务端抽查任务 TTL（2.5 分钟）一致，超时未完成 → 退出登录
+    const deadline = Date.now() + 150000;
+    window.__cloudSpotTimer = setTimeout(() => { cloudSpotCheckCancel(); }, 150000);
+    const cntEl = document.getElementById('cloudSpotCountdown');
+    window.__cloudSpotCountdown = setInterval(() => {
+        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        if (cntEl) cntEl.textContent = '⏱️ 剩余 ' + left + ' 秒完成验证，超时将退出登录';
+        if (left <= 0) { if (window.__cloudSpotCountdown) clearInterval(window.__cloudSpotCountdown); }
+    }, 500);
     const submit = async () => {
         const code = (codeEl.value || '').trim();
         if (!/^\d{4,8}$/.test(code)) { document.getElementById('cloudSpotMsg').textContent = '请输入 6 位动态码'; return; }
@@ -20133,7 +20152,8 @@ function cloudSpotCheckModal() {
                 showNotification('🛡️ 抽查验证通过');
                 return;
             }
-            if (d && d.expired) { closeCloudSpotCheckModal(); showNotification('抽查已过期，无需验证'); return; }
+            // 任务已超时：本次抽查未在期限内完成 → 退出登录
+            if (d && d.expired) { closeCloudSpotCheckModal(); showNotification('⚠️ 抽查已超时未完成，已退出云储存账号'); cloudLogout(); return; }
             const msg = document.getElementById('cloudSpotMsg');
             if (msg) msg.textContent = '❌ ' + (d.message || '验证失败');
             okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
@@ -20147,7 +20167,18 @@ function cloudSpotCheckModal() {
     codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     setTimeout(() => { try { codeEl.focus(); } catch (e) {} }, 50);
 }
-function closeCloudSpotCheckModal() { const m = document.getElementById('cloudSpotCheckModal'); if (m) m.remove(); }
+function closeCloudSpotCheckModal() {
+    if (window.__cloudSpotTimer) { clearTimeout(window.__cloudSpotTimer); window.__cloudSpotTimer = null; }
+    if (window.__cloudSpotCountdown) { clearInterval(window.__cloudSpotCountdown); window.__cloudSpotCountdown = null; }
+    const m = document.getElementById('cloudSpotCheckModal');
+    if (m) m.remove();
+}
+// 取消抽查 = 不配合安全验证 → 强制退出登录（安全兜底，防止账号被他人持续持有会话）
+function cloudSpotCheckCancel() {
+    closeCloudSpotCheckModal();
+    showNotification('⚠️ 未完成安全抽查，已退出云储存账号');
+    cloudLogout();
+}
 // ===== 全屏「云空间」管理页（从「我的」标签页打开）=====
 // 云储存 UI 标记复用同一套 id（#cloudStorageArea 等），模态内唯一存在，故无 id 冲突
 function openCloudSpaceModal() {
@@ -25816,6 +25847,11 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                 const r = await clinkApi('/2fa/challenge');
                 const d = await r.json();
                 if (r.ok && d && d.challenge) clinkSpotCheckModal();
+                else if (r.ok && d && d.expired) {
+                    // 抽查任务已超时未完成（如弹窗未弹出/用户切走未响应）→ 退出登录
+                    showNotification('⚠️ 安全抽查超时未完成，已退出云链接账号');
+                    window.clinkLogout();
+                }
             } catch (e) {}
         };
         beat();
@@ -25845,17 +25881,27 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         const uname = localStorage.getItem(CLINK_USER_KEY) || '';
         m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
             '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
-            '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
+            '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。<br><span style="color:#ff8a80;">超时未完成将自动退出登录。</span></div>' +
+            '<div id="clinkSpotCountdown" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
             '<input id="clinkSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
             '<div id="clinkSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
             '<div style="display:flex;gap:8px;">' +
-            '<button onclick="closeClinkSpotCheckModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+            '<button onclick="clinkSpotCheckCancel()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消（退出登录）</button>' +
             '<button id="clinkSpotOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 提交验证</button>' +
             '</div></div>';
-        m.onclick = (e) => { if (e.target === m) closeClinkSpotCheckModal(); };
+        m.onclick = (e) => { if (e.target === m) clinkSpotCheckCancel(); };
         document.body.appendChild(m);
         const okBtn = document.getElementById('clinkSpotOk');
         const codeEl = document.getElementById('clinkSpotCode');
+        // 超时兜底：与服务端抽查任务 TTL（2.5 分钟）一致，超时未完成 → 退出登录
+        const deadline = Date.now() + 150000;
+        window.__clinkSpotTimer = setTimeout(() => { clinkSpotCheckCancel(); }, 150000);
+        const cntEl = document.getElementById('clinkSpotCountdown');
+        window.__clinkSpotCountdown = setInterval(() => {
+            const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+            if (cntEl) cntEl.textContent = '⏱️ 剩余 ' + left + ' 秒完成验证，超时将退出登录';
+            if (left <= 0) { if (window.__clinkSpotCountdown) clearInterval(window.__clinkSpotCountdown); }
+        }, 500);
         const submit = async () => {
             const code = (codeEl.value || '').trim();
             if (!/^\d{4,8}$/.test(code)) { document.getElementById('clinkSpotMsg').textContent = '请输入 6 位动态码'; return; }
@@ -25868,7 +25914,8 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                     showNotification('🛡️ 抽查验证通过');
                     return;
                 }
-                if (d && d.expired) { closeClinkSpotCheckModal(); showNotification('抽查已过期，无需验证'); return; }
+                // 任务已超时：本次抽查未在期限内完成 → 退出登录
+                if (d && d.expired) { closeClinkSpotCheckModal(); showNotification('⚠️ 抽查已超时未完成，已退出云链接账号'); window.clinkLogout(); return; }
                 const msg = document.getElementById('clinkSpotMsg');
                 if (msg) msg.textContent = '❌ ' + (d.message || '验证失败');
                 okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
@@ -25882,7 +25929,18 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
         setTimeout(() => { try { codeEl.focus(); } catch (e) {} }, 50);
     }
-    window.closeClinkSpotCheckModal = function() { const m = document.getElementById('clinkSpotCheckModal'); if (m) m.remove(); };
+    window.closeClinkSpotCheckModal = function() {
+        if (window.__clinkSpotTimer) { clearTimeout(window.__clinkSpotTimer); window.__clinkSpotTimer = null; }
+        if (window.__clinkSpotCountdown) { clearInterval(window.__clinkSpotCountdown); window.__clinkSpotCountdown = null; }
+        const m = document.getElementById('clinkSpotCheckModal');
+        if (m) m.remove();
+    };
+    // 取消抽查 = 不配合安全验证 → 强制退出登录（安全兜底，防止账号被他人持续持有会话）
+    window.clinkSpotCheckCancel = function() {
+        closeClinkSpotCheckModal();
+        showNotification('⚠️ 未完成安全抽查，已退出云链接账号');
+        window.clinkLogout();
+    };
     // ===== 云链接「账号设置」：查看账号名 / 改密（验原密码）/ 注销（需密码）=====
     window.showClinkAccountSettings = async function() {
         let modal = document.getElementById('clinkAccountSettingsModal');
@@ -26595,13 +26653,785 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         const sp = document.getElementById('singlePlayerGame');
         if (sp) sp.classList.remove('hidden');
         // 等 DOMContentLoaded（远早于 window.load，且保证游戏 init 已完成）后下一帧立即加载迷宫开玩
+
+
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => requestAnimationFrame(() => loadMazeFromLink(code)));
         } else {
             requestAnimationFrame(() => loadMazeFromLink(code));
         }
     })();
-    </script>
+    
+// ===================== 云备份（独立账号体系，平行于云储存/云链接）=====================
+const BACKUP_TOKEN_KEY = 'cloudBackupToken';
+const BACKUP_USER_KEY = 'cloudBackupUser';
+const BACKUP_SID_KEY = 'cloudBackupSid';
+const BACKUP_KINDS = [
+    { kind: 'achievements', label: '成就信息', desc: '🏆 成就信息（通关/胜利/陷阱等）' },
+    { kind: 'statistics', label: '统计信息', desc: '📊 统计信息（时长/步数/金币等）' },
+    { kind: 'ui_settings', label: 'UI设置', desc: '🎨 UI 设置（控制/音乐等）' }
+];
+const BACKUP_DEFAULT_ACH = { allLevelsCompleted:false, multiplayerWins:0, trapHits:0, chineseEmojiUsed:false, puzzleMaster:false };
+const BACKUP_DEFAULT_STATS = { timeChallengeBest:0, puzzleLevelsCompleted:0, totalLevelsCompleted:0, totalPlayTime:0, totalMoves:0, totalTrapsTriggered:0, totalCoinsCollected:0, averageMovesPerLevel:0, completionRate:0 };
+
+function backupIsEnabled() { return !window.globalFunctionControl || window.globalFunctionControl.backup !== false; }
+function backup2faDisabled() { return !!(window.globalFunctionControl && window.globalFunctionControl.backup2fa === false); }
+function backupApi(path, opts) {
+    const token = localStorage.getItem(BACKUP_TOKEN_KEY);
+    opts = opts || {};
+    opts.headers = Object.assign({ 'Content-Type':'application/json', 'Authorization':'Bearer '+(token||'') }, opts.headers||{});
+    return fetch(GAME_SERVER_URL.replace(/\/+$/,'') + '/api/cloud-backup' + path, opts).then(r => { if (r.status===401) backupForceLogout(); return r; });
+}
+
+function openCloudBackupModal() {
+    if (document.getElementById('cloudBackupModal')) closeCloudBackupModal();
+    const overlay = document.createElement('div');
+    overlay.id = 'cloudBackupModal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:32000;';
+    const sections = BACKUP_KINDS.map(k => backupKindSection(k.kind, k.label, k.desc)).join('');
+    overlay.innerHTML = `
+      <div style="position:relative;width:min(720px,94vw);height:min(88vh,900px);background:#16161f;color:#fff;border-radius:14px;padding:22px;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <h2 style="margin:0;">💾 云备份</h2>
+          <button onclick="closeCloudBackupModal()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
+        </div>
+        <div id="backupStorageArea" class="hidden" style="padding:14px; background:rgba(0,188,212,0.10); border:1px solid rgba(0,188,212,0.4); border-radius:10px;">
+            <div id="backupLoginBox">
+                <div style="font-weight:bold; margin-bottom:8px; color:#80deea;">💾 云备份（注册独立账号，备份成就 / 统计 / UI 设置，可在任意设备恢复）</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <input id="backupUser" type="text" placeholder="用户名" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <input id="backupPass" type="password" placeholder="密码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:120px;">
+                    <input id="backupOtp" type="text" placeholder="动态码" style="padding:6px; border-radius:6px; border:1px solid #555; background:#222; color:#fff; min-width:90px; display:none;">
+                    <button onclick="backupLogin()" style="padding:6px 14px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer;">登录</button>
+                    <button onclick="backupRegister()" style="padding:6px 14px; background:#43A047; color:#fff; border:none; border-radius:6px; cursor:pointer;">注册</button>
+                </div>
+                <div id="backupMsg" style="font-size:12px; margin-top:6px; color:#ffb74d;"></div>
+            </div>
+            <div id="backupPanelBox" class="hidden">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <span style="color:#80deea;">💾 已登录：<b id="backupCurUser"></b></span>
+                    <span>
+                        <button onclick="backupOpenAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
+                        <button onclick="backupOpenDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
+                        <button onclick="backupLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
+                    </span>
+                </div>
+                <div id="backupKindsWrap">${sections}</div>
+            </div>
+        </div>
+      </div>`;
+    overlay.onclick = (e) => { if (e.target === overlay) closeCloudBackupModal(); };
+    document.body.appendChild(overlay);
+    initBackupUI();
+    backupStartSpotCheck();
+}
+function closeCloudBackupModal() {
+    backupStopSpotCheck();
+    const m = document.getElementById('cloudBackupModal');
+    if (m) m.remove();
+}
+function backupKindSection(kind, label, desc) {
+    return '<div style="padding:12px; background:rgba(0,188,212,0.10); border:1px solid rgba(0,188,212,0.4); border-radius:10px; margin-bottom:12px;">' +
+        '<div style="font-weight:bold; color:#80deea; margin-bottom:4px;">' + escapeHtmlLocal(desc) + '</div>' +
+        '<div id="backupKindInfo_' + kind + '" style="font-size:12px; color:#bbb; margin-bottom:8px;">云端暂无备份</div>' +
+        '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
+        '<button onclick="backupUpload(\'' + kind + '\')" style="padding:5px 12px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">⬆️ 上传本机到云</button>' +
+        '<button onclick="backupDownloadApply(\'' + kind + '\')" style="padding:5px 12px; background:#1E88E5; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">⬇️ 下载并应用</button>' +
+        '<button onclick="backupDeleteKind(\'' + kind + '\')" style="padding:5px 12px; background:#e53935; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">🗑️ 删云端</button>' +
+        '<span id="backupKindMsg_' + kind + '" style="font-size:12px; color:#ffb74d; align-self:center;"></span>' +
+        '</div></div>';
+}
+function initBackupUI() {
+    const area = document.getElementById('backupStorageArea');
+    if (!area) return;
+    if (!backupIsEnabled()) { backupShowFeatureOff(); return; }
+    const ban = document.getElementById('backupFeatureOffBanner');
+    if (ban) ban.remove();
+    area.classList.remove('hidden');
+    const token = localStorage.getItem(BACKUP_TOKEN_KEY);
+    const user = localStorage.getItem(BACKUP_USER_KEY);
+    if (token && user) {
+        document.getElementById('backupLoginBox').classList.add('hidden');
+        document.getElementById('backupPanelBox').classList.remove('hidden');
+        document.getElementById('backupCurUser').textContent = user;
+        backupLoadKinds();
+    } else {
+        document.getElementById('backupLoginBox').classList.remove('hidden');
+        document.getElementById('backupPanelBox').classList.add('hidden');
+    }
+}
+function backupSetMsg(t, isErr) {
+    const el = document.getElementById('backupMsg');
+    if (!el) return;
+    el.textContent = t || '';
+    el.style.color = isErr ? '#ff8a80' : '#aed581';
+}
+function backupShowFeatureOff() {
+    const area = document.getElementById('backupStorageArea');
+    if (!area) return;
+    area.classList.remove('hidden');
+    const lb = document.getElementById('backupLoginBox');
+    const pb = document.getElementById('backupPanelBox');
+    if (lb) lb.classList.add('hidden');
+    if (pb) pb.classList.add('hidden');
+    const oldBan = document.getElementById('backupDisabledBanner');
+    if (oldBan) oldBan.remove();
+    let ban = document.getElementById('backupFeatureOffBanner');
+    if (!ban) {
+        ban = document.createElement('div');
+        ban.id = 'backupFeatureOffBanner';
+        ban.style.cssText = 'padding:18px; background:rgba(255,152,0,0.12); border:1px solid rgba(255,152,0,0.5); border-radius:10px; color:#ffb74d; font-weight:bold; text-align:center; font-size:15px;';
+        area.appendChild(ban);
+    }
+    ban.textContent = '管理员关闭了云备份功能';
+}
+function backupShowDisabled(msg) {
+    const area = document.getElementById('backupStorageArea');
+    if (!area) return;
+    const lb = document.getElementById('backupLoginBox');
+    const pb = document.getElementById('backupPanelBox');
+    if (lb) lb.classList.add('hidden');
+    if (pb) pb.classList.add('hidden');
+    let ban = document.getElementById('backupDisabledBanner');
+    if (!ban) {
+        ban = document.createElement('div');
+        ban.id = 'backupDisabledBanner';
+        ban.style.cssText = 'padding:18px; background:rgba(244,67,54,0.12); border:1px solid rgba(244,67,54,0.5); border-radius:10px; color:#ff8a80; font-weight:bold; text-align:center; font-size:15px;';
+        area.appendChild(ban);
+    }
+    ban.textContent = (msg && String(msg).trim()) ? String(msg) : '云备份功能被管理员禁用';
+}
+function backupDetectDisabled(r, d) {
+    if (r && r.status === 403 && d && d.disabled) { backupShowDisabled(d.banMessage); return true; }
+    return false;
+}
+function backupClearDisabled() {
+    const ban = document.getElementById('backupDisabledBanner');
+    if (ban) ban.remove();
+    const token = localStorage.getItem(BACKUP_TOKEN_KEY);
+    const lb = document.getElementById('backupLoginBox');
+    const pb = document.getElementById('backupPanelBox');
+    if (lb) lb.classList.toggle('hidden', !!token);
+    if (pb) pb.classList.toggle('hidden', !token);
+}
+async function backupRegister() {
+    const username = (document.getElementById('backupUser').value || '').trim();
+    const password = document.getElementById('backupPass').value || '';
+    backupSetMsg('');
+    if (!username || !password) { backupSetMsg('请输入用户名和密码', true); return; }
+    try {
+        const r = await backupApi('/register', { method:'POST', body: JSON.stringify({ username, password, device: navigator.userAgent, clientId: (typeof gameState!=='undefined' && gameState.clientId) ? gameState.clientId : '' }) });
+        const d = await r.json();
+        if (backupDetectDisabled(r,d)) return;
+        if (!r.ok || !d.success) throw new Error(d.message||'注册失败');
+        localStorage.setItem(BACKUP_TOKEN_KEY, d.token);
+        localStorage.setItem(BACKUP_USER_KEY, d.username);
+        if (d.sid) localStorage.setItem(BACKUP_SID_KEY, d.sid);
+        initBackupUI();
+        showNotification('💾 注册并登录成功');
+    } catch(e){ backupSetMsg(e.message, true); }
+}
+async function backupDoLogin(username, password, code) {
+    backupSetMsg('');
+    const r = await backupApi('/login', { method:'POST', body: JSON.stringify({ username, password, code: code||'', device: navigator.userAgent, clientId: (typeof gameState!=='undefined' && gameState.clientId) ? gameState.clientId : '' }) });
+    const d = await r.json();
+    if (backupDetectDisabled(r,d)) return { disabled:true };
+    if (d && d.twoFactorRequired) return { twoFactorRequired:true, message: d.message || '该账号已开启二次认证，请输入动态验证码' };
+    if (!r.ok || !d.success) throw new Error(d.message||'登录失败');
+    const otpEl = document.getElementById('backupOtp');
+    if (otpEl) { otpEl.value=''; otpEl.style.display='none'; }
+    localStorage.setItem(BACKUP_TOKEN_KEY, d.token);
+    localStorage.setItem(BACKUP_USER_KEY, d.username);
+    if (d.sid) localStorage.setItem(BACKUP_SID_KEY, d.sid);
+    initBackupUI();
+    showNotification('💾 登录成功');
+    return { ok:true };
+}
+async function backupLogin() {
+    const username = (document.getElementById('backupUser').value||'').trim();
+    const password = document.getElementById('backupPass').value || '';
+    if (!username || !password) { backupSetMsg('请输入用户名和密码', true); return; }
+    try {
+        const res = await backupDoLogin(username, password, '');
+        if (res && res.twoFactorRequired) { backupLogin2faPrompt(username, password, res.message); return; }
+    } catch(e){ backupSetMsg(e.message, true); }
+}
+function backupLogin2faPrompt(username, password, hint) {
+    let m = document.getElementById('backup2faLoginModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'backup2faLoginModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:37000;';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(400px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 二次认证</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">账号 <b>' + escapeHtmlLocal(username) + '</b> 已开启二次认证，请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 完成登录。</div>' +
+        '<input id="backup2faLoginCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:12px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:20px;letter-spacing:5px;text-align:center;margin-bottom:10px;">' +
+        '<div id="backup2faLoginMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;">' + escapeHtmlLocal(hint||'') + '</div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeBackup2faLoginModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="backup2faLoginOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">登录</button>' +
+        '</div></div>';
+    m.onclick = (e)=>{ if(e.target===m) closeBackup2faLoginModal(); };
+    document.body.appendChild(m);
+    const okBtn = document.getElementById('backup2faLoginOk');
+    const codeEl = document.getElementById('backup2faLoginCode');
+    const setMsg = (t,isErr)=>{ const el=document.getElementById('backup2faLoginMsg'); if(el){ el.textContent=t; el.style.color=isErr?'#ff8a80':'#aed581'; } };
+    const submit = async () => {
+        const code = (codeEl.value||'').trim();
+        if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码', true); return; }
+        okBtn.disabled = true; okBtn.textContent='验证中...';
+        try {
+            const res = await backupDoLogin(username, password, code);
+            if (res && res.twoFactorRequired) { setMsg(res.message||'动态码错误，请重新输入', true); okBtn.disabled=false; okBtn.textContent='登录'; return; }
+            if (res && res.disabled) { closeBackup2faLoginModal(); return; }
+            closeBackup2faLoginModal();
+        } catch(e){ setMsg('❌ '+e.message, true); okBtn.disabled=false; okBtn.textContent='登录'; }
+    };
+    okBtn.onclick = submit;
+    codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') submit(); });
+    setTimeout(()=>{ try{ codeEl.focus(); }catch(e){} },80);
+}
+function closeBackup2faLoginModal(){ const m=document.getElementById('backup2faLoginModal'); if(m) m.remove(); }
+function backupLogout() {
+    backupStopSpotCheck();
+    localStorage.removeItem(BACKUP_TOKEN_KEY);
+    localStorage.removeItem(BACKUP_USER_KEY);
+    localStorage.removeItem(BACKUP_SID_KEY);
+    window.__backup2fa = false; window.__backupScopes = { authorize:true, sessions:true, password:true, account:true }; window.__backup2faCode = '';
+    initBackupUI();
+}
+function backupForceLogout() {
+    if (!localStorage.getItem(BACKUP_TOKEN_KEY)) return;
+    backupStopSpotCheck();
+    localStorage.removeItem(BACKUP_TOKEN_KEY);
+    localStorage.removeItem(BACKUP_USER_KEY);
+    localStorage.removeItem(BACKUP_SID_KEY);
+    window.__backup2fa = false; window.__backup2faCode = '';
+    initBackupUI();
+    showNotification('⚠️ 你的云备份账号已在其他设备被退出登录，请重新登录');
+}
+// ===== 云备份 随机抽查 =====
+let __backupSpotTimers = null;
+function backupStartSpotCheck() {
+    backupStopSpotCheck();
+    if (!localStorage.getItem(BACKUP_TOKEN_KEY)) return;
+    if (backup2faDisabled()) return;
+    const beat = () => { try { backupApi('/2fa/checkin', { method:'POST', body: JSON.stringify({ active:true }) }).catch(()=>{}); } catch(e){} };
+    const poll = async () => {
+        if (document.getElementById('backupSpotCheckModal')) return;
+        try {
+            const r = await backupApi('/2fa/challenge');
+            const d = await r.json();
+            if (r.ok && d && d.challenge) backupSpotCheckModal();
+            else if (r.ok && d && d.expired) { showNotification('⚠️ 安全抽查超时未完成，已退出云备份账号'); backupLogout(); }
+        } catch(e){}
+    };
+    beat();
+    __backupSpotTimers = { beat: setInterval(beat, 25000), poll: setInterval(poll, 12000) };
+}
+function backupStopSpotCheck() {
+    if (__backupSpotTimers) { clearInterval(__backupSpotTimers.beat); clearInterval(__backupSpotTimers.poll); __backupSpotTimers = null; }
+    if (localStorage.getItem(BACKUP_TOKEN_KEY)) { try { backupApi('/2fa/checkin', { method:'POST', body: JSON.stringify({ active:false }) }).catch(()=>{}); } catch(e){} }
+}
+function backupSpotCheckModal() {
+    let m = document.getElementById('backupSpotCheckModal');
+    if (m) return;
+    m = document.createElement('div');
+    m.id = 'backupSpotCheckModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36500;';
+    const uname = localStorage.getItem(BACKUP_USER_KEY)||'';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">账号 <b>' + escapeHtmlLocal(uname) + '</b> 正在接受二次认证随机抽查，请输入你的 2FA 插件当前显示的 <b>6 位动态验证码</b> 完成验证（取消或超时将退出登录）。</div>' +
+        '<input id="backupSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
+        '<div id="backupSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeBackupSpotCheckModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="backupSpotOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">验证</button>' +
+        '</div></div>';
+    m.onclick = (e)=>{ if(e.target===m) closeBackupSpotCheckModal(); };
+    document.body.appendChild(m);
+    const okBtn = document.getElementById('backupSpotOk');
+    const codeEl = document.getElementById('backupSpotCode');
+    const setMsg = (t)=>{ const el=document.getElementById('backupSpotMsg'); if(el) el.textContent=t; };
+    const submit = async () => {
+        const code = (codeEl.value||'').trim();
+        if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码'); return; }
+        okBtn.disabled=true; okBtn.textContent='验证中...';
+        try {
+            const r = await backupApi('/2fa/challenge', { method:'POST', body: JSON.stringify({ code }) });
+            const d = await r.json();
+            if (r.ok && d.success) { closeBackupSpotCheckModal(); showNotification('✅ 安全抽查通过'); return; }
+            if (d && d.expired) { closeBackupSpotCheckModal(); backupLogout(); return; }
+            setMsg('❌ '+(d.message||'验证失败')); okBtn.disabled=false; okBtn.textContent='验证';
+        } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='验证'; }
+    };
+    okBtn.onclick = submit;
+    codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') submit(); });
+    setTimeout(()=>{ try{ codeEl.focus(); }catch(e){} },80);
+}
+function closeBackupSpotCheckModal(){ const m=document.getElementById('backupSpotCheckModal'); if(m) m.remove(); }
+// ===== 云备份 2FA 辅助 =====
+window.__backup2fa = false;
+window.__backupScopes = { authorize:true, sessions:true, password:true, account:true };
+window.__backup2faCode = '';
+async function backupFetch2fa() {
+    try {
+        const r = await backupApi('/2fa/scopes');
+        const d = await r.json();
+        if (r.ok && d.success) { window.__backup2fa = !!d.enabled; if (d.scopes) window.__backupScopes = Object.assign({ authorize:true, sessions:true, password:true, account:true }, d.scopes); return window.__backup2fa; }
+        const r2 = await backupApi('/2fa');
+        const d2 = await r2.json();
+        if (r2.ok && d2.success) window.__backup2fa = !!d2.enabled;
+    } catch(e){}
+    return window.__backup2fa;
+}
+function backupNeed2fa(scope) {
+    if (!window.__backup2fa) return false;
+    return !!(window.__backupScopes && window.__backupScopes[scope]);
+}
+function backupStepUpAuth(titleText, onAuthorized, opts) {
+    let m = document.getElementById('backupStepUpModal');
+    if (!m) { m = document.createElement('div'); m.id='backupStepUpModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;'; document.body.appendChild(m); }
+    const uname = localStorage.getItem(BACKUP_USER_KEY)||'未知账号';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 ' + (titleText||'需要二次认证') + '</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">账号 <b>' + escapeHtmlLocal(uname) + '</b> 已开启二次认证。<br>请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 后才能继续。</div>' +
+        '<input id="backupStepUpCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
+        '<div id="backupStepUpMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeBackupStepUp()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="backupStepUpOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 验证并继续</button>' +
+        '</div></div>';
+    m.onclick = (e)=>{ if(e.target===m) closeBackupStepUp(); };
+    const okBtn = document.getElementById('backupStepUpOk');
+    const codeEl = document.getElementById('backupStepUpCode');
+    const submit = async () => {
+        const code = (codeEl.value||'').trim();
+        if (!/^\d{4,8}$/.test(code)) { document.getElementById('backupStepUpMsg').textContent='请输入 6 位动态码'; return; }
+        okBtn.disabled=true; okBtn.textContent='校验中...';
+        if (opts && opts.direct) { window.__backup2faCode = code; closeBackupStepUp(); onAuthorized(code); return; }
+        try {
+            const r = await backupApi('/authorize', { method:'POST', body: JSON.stringify({ code }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message||'验证失败');
+            window.__backup2faCode = code; closeBackupStepUp(); onAuthorized(code);
+        } catch(e){ const msg=document.getElementById('backupStepUpMsg'); if(msg) msg.textContent='❌ '+e.message; okBtn.disabled=false; okBtn.textContent='✅ 验证并继续'; }
+    };
+    okBtn.onclick = submit;
+    codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') submit(); });
+    setTimeout(()=>{ try{ codeEl.focus(); }catch(e){} },50);
+}
+function closeBackupStepUp(){ const m=document.getElementById('backupStepUpModal'); if(m) m.remove(); }
+function backupPromptPassword(titleText, onOk) {
+    let m = document.getElementById('backupPwdModal');
+    if (!m) { m = document.createElement('div'); m.id='backupPwdModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;'; document.body.appendChild(m); }
+    const uname = localStorage.getItem(BACKUP_USER_KEY)||'未知账号';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:6px;font-size:16px;">🔐 ' + (titleText||'验证密码') + '</div>' +
+        '<div style="font-size:12px;color:#ffb74d;margin-bottom:12px;">账号：' + escapeHtmlLocal(uname) + '，请输入账号密码以修改二次认证设置。</div>' +
+        '<input id="backupPwdInput" type="password" placeholder="账号密码" style="width:100%;box-sizing:border-box;padding:9px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:10px;">' +
+        '<div id="backupPwdMsg" style="font-size:12px;color:#ff8a80;min-height:14px;margin-bottom:8px;"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeBackupPwdModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="backupPwdOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">确定</button>' +
+        '</div></div>';
+    m.onclick = (e)=>{ if(e.target===m) closeBackupPwdModal(); };
+    const okBtn = document.getElementById('backupPwdOk');
+    const passEl = document.getElementById('backupPwdInput');
+    okBtn.onclick = () => { const p=passEl.value||''; if(!p){ document.getElementById('backupPwdMsg').textContent='请输入密码'; return; } closeBackupPwdModal(); onOk(p); };
+    passEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') okBtn.click(); });
+}
+function closeBackupPwdModal(){ const m=document.getElementById('backupPwdModal'); if(m) m.remove(); }
+// ===== 云备份 账号设置 / 设备管理 =====
+async function backupOpenAccountSettings() {
+    if (await backupFetch2fa() && backupNeed2fa('authorize')) backupStepUpAuth('打开账号设置需验证身份', () => showBackupAccountSettings());
+    else showBackupAccountSettings();
+}
+async function backupOpenDevices() {
+    if (await backupFetch2fa() && backupNeed2fa('sessions')) backupStepUpAuth('查看/管理设备需验证身份', () => showBackupDevices());
+    else showBackupDevices();
+}
+async function backupRevokeSessionGated(id, isCurrent) {
+    if (await backupFetch2fa() && backupNeed2fa('sessions')) backupStepUpAuth('踢出设备需二次认证', (code) => backupRevokeSession(id, isCurrent, code));
+    else backupRevokeSession(id, isCurrent);
+}
+async function backupRevokeOtherSessionsGated() {
+    if (await backupFetch2fa() && backupNeed2fa('sessions')) backupStepUpAuth('退出其他设备需二次认证', (code) => backupRevokeOtherSessions(code));
+    else backupRevokeOtherSessions();
+}
+async function backupToggle2fa() {
+    if (backup2faDisabled()) { showNotification('❌ 管理员已关闭二次认证功能'); return; }
+    await backupFetch2fa();
+    const want = !window.__backup2fa;
+    if (want) { backupOpen2faSetup(); return; }
+    backupPromptPassword('关闭二次认证需验证密码', async (password) => {
+        try {
+            const r = await backupApi('/2fa', { method:'PUT', body: JSON.stringify({ password, enabled:false }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message||'操作失败');
+            window.__backup2fa = false; showBackupAccountSettings(); showNotification(d.message||'已关闭二次认证');
+        } catch(e){ showNotification('❌ '+e.message); }
+    });
+}
+async function backupSave2faScopes() {
+    if (!window.__backup2fa) { const m=document.getElementById('backupScopesMsg'); if(m) m.textContent='请先开启二次认证'; return; }
+    backupStepUpAuth('保存 2FA 设置需验证身份', async (code) => {
+        const g = (id,def)=>{ const el=document.getElementById(id); return el?el.checked:def; };
+        const scopes = { authorize:g('backupScopeAuthorize',true), sessions:g('backupScopeSessions',true), password:g('backupScopePassword',true), account:g('backupScopeAccount',true) };
+        try {
+            const r = await backupApi('/2fa/scopes', { method:'PUT', body: JSON.stringify({ code, scopes }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message||'保存失败');
+            if (d.scopes) window.__backupScopes = Object.assign({}, window.__backupScopes, d.scopes);
+            const msg = document.getElementById('backupScopesMsg'); if(msg) msg.textContent='✅ 已保存';
+            showNotification('🔐 2FA 作用范围已保存');
+        } catch(e){ showNotification('❌ '+e.message); }
+    }, { direct:true });
+}
+async function backupOpen2faSetup() {
+    let m = document.getElementById('backup2faSetupModal');
+    if (!m) { m = document.createElement('div'); m.id='backup2faSetupModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;'; document.body.appendChild(m); }
+    m.onclick = (e)=>{ if(e.target===m) closeBackup2faSetup(); };
+    let secretVal=''; let bindCode='';
+    function renderStep1() {
+        m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(440px,94vw);padding:22px;border-radius:12px;max-height:92vh;overflow-y:auto;">' +
+            '<div style="font-weight:bold;margin-bottom:4px;font-size:16px;">🔐 开启二次认证（TOTP）</div>' +
+            '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 1 步 / 共 2 步 · 绑定 2FA 插件</div>' +
+            '<div style="font-size:12px;color:#aaa;margin-bottom:10px;">用浏览器里的 2FA 插件（Authenticator / Bitwarden / 1Password 等）扫描下方二维码，或手动输入密钥，然后填入插件显示的 6 位动态码。</div>' +
+            '<div id="backup2faQr" style="text-align:center;margin:10px 0;min-height:40px;"></div>' +
+            '<div style="font-size:12px;color:#aaa;margin-bottom:4px;">密钥（手动输入用）：</div>' +
+            '<div style="display:flex;gap:6px;margin-bottom:12px;"><input id="backup2faSecret" readonly style="flex:1;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#aed581;font-family:monospace;font-size:13px;"><button onclick="window.__copyBackupSecret&&window.__copyBackupSecret()" style="padding:0 12px;background:#555;color:#fff;border:none;border-radius:6px;cursor:pointer;">复制</button></div>' +
+            '<input id="backup2faSetupPass" type="password" placeholder="账号密码" style="width:100%;box-sizing:border-box;padding:9px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:8px;">' +
+            '<input id="backup2faSetupCode" inputmode="numeric" maxlength="6" placeholder="插件显示的 6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:8px;">' +
+            '<div id="backup2faSetupMsg" style="font-size:12px;color:#ff8a80;min-height:14px;margin-bottom:8px;"></div>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button onclick="closeBackup2faSetup()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+            '<button id="backup2faSetupOk" style="flex:1;padding:10px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">下一步</button>' +
+            '</div></div>';
+        const okBtn = document.getElementById('backup2faSetupOk');
+        const passEl = document.getElementById('backup2faSetupPass');
+        const codeEl = document.getElementById('backup2faSetupCode');
+        const setMsg = (t)=>{ const el=document.getElementById('backup2faSetupMsg'); if(el) el.textContent=t; };
+        okBtn.onclick = async () => {
+            const password = passEl.value||''; const code=(codeEl.value||'').trim();
+            if (!password) { setMsg('请输入账号密码'); return; }
+            if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码'); return; }
+            if (!secretVal) { setMsg('密钥尚未生成，请稍候或重新打开'); return; }
+            okBtn.disabled=true; okBtn.textContent='校验中...';
+            try {
+                const r = await backupApi('/2fa', { method:'PUT', body: JSON.stringify({ password, enabled:true, secret:secretVal, code }) });
+                const d = await r.json();
+                if (!r.ok || !d.success) throw new Error(d.message||'绑定失败');
+                bindCode = code; renderStep2();
+            } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='下一步'; }
+        };
+        codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') okBtn.click(); });
+        window.__copyBackupSecret = function(){ const v=document.getElementById('backup2faSecret'); if(v && navigator.clipboard) navigator.clipboard.writeText(v.value).catch(()=>{}); };
+        loadSetupInfo();
+    }
+    function renderStep2() {
+        window.__backup2faPending = true;
+        m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(440px,94vw);padding:22px;border-radius:12px;">' +
+            '<div style="font-weight:bold;margin-bottom:4px;font-size:16px;">🔐 开启二次认证（TOTP）</div>' +
+            '<div style="font-size:12px;color:#7e9cff;margin-bottom:10px;">第 2 步 / 共 2 步 · 确认验证</div>' +
+            '<div style="background:#3a2a1a;border:1px solid #ff9800;border-radius:8px;padding:10px;font-size:12.5px;color:#ffcc80;line-height:1.7;margin-bottom:12px;">' +
+            '⚠️ <b>最后一次验证</b>：请等待插件刷新出<b>新的</b>验证码（最多 30 秒），再输入一次。<br>' +
+            '<b style="color:#ff8a80;">若本次验证失败，二次认证将被自动关闭，需要从头重新开启。</b></div>' +
+            '<div id="backup2faTick" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
+            '<input id="backup2faConfirmCode" inputmode="numeric" maxlength="6" placeholder="插件刷新后的新验证码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:8px;">' +
+            '<div id="backup2faConfirmMsg" style="font-size:12px;color:#ff8a80;min-height:14px;margin-bottom:8px;"></div>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button onclick="closeBackup2faSetup()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">放弃</button>' +
+            '<button id="backup2faConfirmOk" style="flex:1;padding:10px;background:#43A047;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">完成确认并开启</button>' +
+            '</div></div>';
+        const okBtn = document.getElementById('backup2faConfirmOk');
+        const codeEl = document.getElementById('backup2faConfirmCode');
+        const setMsg = (t)=>{ const el=document.getElementById('backup2faConfirmMsg'); if(el) el.textContent=t; };
+        if (window.__backup2faTick) clearInterval(window.__backup2faTick);
+        window.__backup2faTick = setInterval(()=>{ const el=document.getElementById('backup2faTick'); if(!el){ clearInterval(window.__backup2faTick); window.__backup2faTick=null; return; } const left=30-(Math.floor(Date.now()/1000)%30); el.textContent='⏱️ 距离插件刷新下一个验证码约 '+left+' 秒'; },500);
+        okBtn.onclick = async () => {
+            const code=(codeEl.value||'').trim();
+            if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码'); return; }
+            if (code===bindCode) { setMsg('⏳ 这是上一步用过的码，请等插件刷新出新的验证码'); return; }
+            okBtn.disabled=true; okBtn.textContent='验证中...';
+            try {
+                const r = await backupApi('/2fa/confirm', { method:'POST', body: JSON.stringify({ code }) });
+                const d = await r.json();
+                if (r.ok && d.success) { window.__backup2fa=true; window.__backup2faCode=code; window.__backup2faPending=false; closeBackup2faSetup(); showBackupAccountSettings(); showNotification(d.message||'二次认证已开启'); return; }
+                if (d.sameCode) { setMsg('⏳ '+(d.message||'请等待插件刷新出新的验证码')); okBtn.disabled=false; okBtn.textContent='完成确认并开启'; return; }
+                window.__backup2fa=false; window.__backup2faPending=false; closeBackup2faSetup(); showBackupAccountSettings(); showNotification('❌ '+(d.message||'确认失败，请重新开启二次认证'));
+            } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='完成确认并开启'; }
+        };
+        codeEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') okBtn.click(); });
+        setTimeout(()=>{ try{ codeEl.focus(); }catch(e){} },50);
+    }
+    async function loadSetupInfo() {
+        const secretEl = document.getElementById('backup2faSecret');
+        const qrBox = document.getElementById('backup2faQr');
+        if (!secretEl || !qrBox) return;
+        try {
+            const r = await backupApi('/2fa/setup');
+            const d = await r.json();
+            if (r.ok && d.success) { secretVal=d.secret||''; secretEl.value=secretVal; if(d.qr) qrBox.innerHTML='<img src="'+d.qr+'" style="width:180px;height:180px;background:#fff;padding:8px;border-radius:8px;">'; else if(d.otpauthUri) qrBox.innerHTML='<div style="font-size:12px;color:#aaa;word-break:break-all;">二维码不可用，请在插件里手动输入上方密钥：<br>'+escapeHtmlLocal(d.otpauthUri)+'</div>'; }
+            else qrBox.innerHTML='<div style="color:#ff8a80;font-size:12px;">'+escapeHtmlLocal(d.message||'获取设置失败')+'</div>';
+        } catch(e){ qrBox.innerHTML='<div style="color:#ff8a80;font-size:12px;">获取设置失败</div>'; }
+    }
+    renderStep1();
+}
+function closeBackup2faSetup() {
+    if (window.__backup2faTick) { clearInterval(window.__backup2faTick); window.__backup2faTick=null; }
+    if (window.__backup2faPending && !window.__backup2fa) { window.__backup2faPending=false; showNotification('⚠️ 二次认证尚未开启：你已完成绑定但未完成最后确认。请重新打开「开启二次认证」，等插件刷新出【新的】动态码后输入完成确认。'); }
+    else window.__backup2faPending=false;
+    const m=document.getElementById('backup2faSetupModal'); if(m) m.remove();
+}
+async function backupChangePassword() {
+    if (await backupFetch2fa() && backupNeed2fa('password')) { backupStepUpAuth('更改密码需二次认证', (code)=>backupDoChangePassword(code)); return; }
+    backupDoChangePassword();
+}
+async function backupDoChangePassword(code) {
+    const oldP = document.getElementById('backupSetOldPass').value||'';
+    const newP = document.getElementById('backupSetNewPass').value||'';
+    const newP2 = document.getElementById('backupSetNewPass2').value||'';
+    const msg = document.getElementById('backupSetMsg');
+    msg.textContent='';
+    if (!oldP || !newP) { msg.textContent='请输入原密码和新密码'; msg.style.color='#ff8a80'; return; }
+    if (newP.length<4) { msg.textContent='新密码至少 4 位'; msg.style.color='#ff8a80'; return; }
+    if (newP!==newP2) { msg.textContent='两次输入的新密码不一致'; msg.style.color='#ff8a80'; return; }
+    try {
+        const r = await backupApi('/password', { method:'PUT', body: JSON.stringify({ oldPassword:oldP, newPassword:newP, code: code||'' }) });
+        if (r.status===401) { backupForceLogout(); return; }
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message||'修改失败');
+        msg.textContent='✅ 密码已修改，下次登录请使用新密码'; msg.style.color='#aed581';
+        document.getElementById('backupSetOldPass').value=''; document.getElementById('backupSetNewPass').value=''; document.getElementById('backupSetNewPass2').value='';
+    } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='#ff8a80'; }
+}
+async function backupDeleteAccount() {
+    if (await backupFetch2fa() && backupNeed2fa('account')) { backupStepUpAuth('注销账号需二次认证', (code)=>backupDoDeleteAccount(code)); return; }
+    backupDoDeleteAccount();
+}
+async function backupDoDeleteAccount(code) {
+    const p = document.getElementById('backupSetDelPass').value||'';
+    const msg = document.getElementById('backupSetMsg');
+    msg.textContent='';
+    if (!p) { msg.textContent='请输入密码以确认注销'; msg.style.color='#ff8a80'; return; }
+    if (!confirm('确定要注销该云备份账号吗？\n全部云端备份数据与设备登录将被永久删除，且不可恢复！')) return;
+    try {
+        const r = await backupApi('/account', { method:'DELETE', body: JSON.stringify({ password:p, code: code||'' }) });
+        if (r.status===401) { backupForceLogout(); return; }
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message||'注销失败');
+        closeBackupAccountSettings(); backupForceLogout(); showNotification('💾 云备份账号已注销');
+    } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='#ff8a80'; }
+}
+async function showBackupDevices() {
+    let modal = document.getElementById('backupDevicesModal');
+    if (!modal) { modal=document.createElement('div'); modal.id='backupDevicesModal'; modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:33000;'; document.body.appendChild(modal); }
+    modal.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(460px,92vw);max-height:84vh;overflow:auto;padding:20px;border-radius:12px;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+        '<h3 style="margin:0;">📱 管理设备</h3>' +
+        '<button onclick="closeBackupDevices()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;">✕</button></div>' +
+        '<div id="backupDevicesList" style="font-size:13px;">加载中...</div>' +
+        '<div style="margin-top:14px;display:flex;gap:8px;">' +
+        '<button onclick="backupRevokeOtherSessionsGated()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
+        '</div></div>';
+    modal.onclick = (e)=>{ if(e.target===modal) closeBackupDevices(); };
+    await renderBackupDevices();
+}
+function closeBackupDevices(){ const m=document.getElementById('backupDevicesModal'); if(m) m.remove(); }
+async function renderBackupDevices() {
+    const box = document.getElementById('backupDevicesList');
+    if (!box) return;
+    try {
+        const r = await backupApi('/sessions', { headers: { 'X-2FA-Code': window.__backup2faCode||'' } });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message||'获取失败');
+        const list = d.sessions||[];
+        if (list.length===0) { box.innerHTML='<p style="color:#aaa;">暂无设备信息</p>'; return; }
+        box.innerHTML = list.map(s => `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;background:rgba(255,255,255,0.06);border-radius:8px;margin-bottom:8px;">
+                <div style="overflow:hidden;">
+                    <div style="font-weight:bold;">${escapeHtmlLocal(parseUserAgent(s.device))}${s.current ? ' <span style="color:#4caf50;font-size:11px;">（当前设备）</span>' : ''}</div>
+                    <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)} ｜ IP:${escapeHtmlLocal(s.ip||'—')}</div>
+                </div>
+                <button onclick="backupRevokeSessionGated('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
+            </div>`).join('');
+    } catch(e){ box.innerHTML='<p style="color:#ff8a80;">加载失败：'+escapeHtmlLocal(e.message)+'</p>'; }
+}
+async function backupRevokeSession(id, isCurrent, code) {
+    if (!confirm(isCurrent ? '确定退出当前设备？退出后需重新登录。' : '确定退登该设备？')) return;
+    try {
+        const r = await backupApi('/sessions/'+encodeURIComponent(id), { method:'DELETE', body: JSON.stringify({ code: code||'' }) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message||'操作失败');
+        if (isCurrent) { backupForceLogout(); return; }
+        showNotification('已退登该设备'); await renderBackupDevices();
+    } catch(e){ showNotification('退登失败：'+e.message); }
+}
+async function backupRevokeOtherSessions(code) {
+    if (!confirm('确定退出其他所有设备？当前设备保持不变。')) return;
+    try {
+        const r = await backupApi('/sessions', { method:'DELETE', body: JSON.stringify({ code: code||'' }) });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message||'操作失败');
+        showNotification('已退出其他所有设备'); await renderBackupDevices();
+    } catch(e){ showNotification('操作失败：'+e.message); }
+}
+async function showBackupAccountSettings() {
+    let modal = document.getElementById('backupAccountSettingsModal');
+    if (!modal) { modal=document.createElement('div'); modal.id='backupAccountSettingsModal'; modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:34000;'; document.body.appendChild(modal); }
+    const uname = localStorage.getItem(BACKUP_USER_KEY)||'未知账号';
+    let twoFa = window.__backup2fa||false;
+    let scopes = Object.assign({ authorize:true, sessions:true, password:true, account:true }, window.__backupScopes||{});
+    try {
+        const r = await backupApi('/2fa/scopes');
+        const d = await r.json();
+        if (r.ok && d.success) { twoFa=!!d.enabled; if(d.scopes) scopes=Object.assign(scopes,d.scopes); }
+        else { const r2 = await backupApi('/2fa'); const d2 = await r2.json(); if (r2.ok && d2.success) twoFa=!!d2.enabled; }
+    } catch(e){ twoFa=window.__backup2fa||false; }
+    window.__backup2fa = twoFa; window.__backupScopes = scopes;
+    const twofaOff = backup2faDisabled();
+    modal.innerHTML = `
+      <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <h3 style="margin:0;">⚙️ 账号设置</h3>
+          <button onclick="closeBackupAccountSettings()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
+        </div>
+        <div style="padding:12px;background:rgba(0,188,212,0.10);border:1px solid rgba(0,188,212,0.4);border-radius:10px;margin-bottom:14px;">
+          <div style="color:#80deea;font-size:13px;">当前账号</div>
+          <div style="font-weight:bold;font-size:18px;">${escapeHtmlLocal(uname)}</div>
+        </div>
+        <div style="padding:14px;background:rgba(0,188,212,0.10);border:1px solid rgba(0,188,212,0.4);border-radius:10px;margin-bottom:18px;">
+          <div style="font-weight:bold;margin-bottom:6px;color:#80deea;">🔐 二次认证（2FA）</div>
+          ${twofaOff
+            ? '<div style="font-size:13px;color:#ffb74d;line-height:1.6;">管理员已关闭二次认证功能，当前无法开启或配置。已开启的二次认证暂停生效（登录与敏感操作不再要求动态码）。</div>'
+            : '<div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，登录账号始终需要输入动态码；以下操作可按需选择是否也要动态码。</div>' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">' +
+              '<span style="font-size:13px;">当前状态：<b id="backup2faState" style="color:'+(twoFa?'#aed581':'#ff8a80')+';">'+(twoFa?'已开启':'未开启')+'</b></span>' +
+              '<button id="backup2faBtn" onclick="backupToggle2fa()" style="padding:6px 14px;background:'+(twoFa?'#F44336':'#26A69A')+';color:#fff;border:none;border-radius:8px;cursor:pointer;">'+(twoFa?'关闭二次认证':'开启二次认证')+'</button>' +
+              '</div>' +
+              '<div id="backup2faScopesBox" style="display:'+(twoFa?'block':'none')+';margin-top:12px;border-top:1px dashed rgba(255,255,255,0.25);padding-top:10px;">' +
+              '<div style="font-size:12px;color:#80deea;margin-bottom:8px;">哪些操作需要动态码？<span style="color:#78909c;">（登录始终需要，不可关闭）</span></div>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;color:#78909c;"><input type="checkbox" checked disabled style="accent-color:#26A69A;"> 登录账号（强制）</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="backupScopeAuthorize" '+(scopes.authorize?'checked':'')+' style="accent-color:#26A69A;"> 打开账号设置</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="backupScopeSessions" '+(scopes.sessions?'checked':'')+' style="accent-color:#26A69A;"> 查看 / 踢出设备</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="backupScopePassword" '+(scopes.password?'checked':'')+' style="accent-color:#26A69A;"> 修改密码</label>' +
+              '<label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;"><input type="checkbox" id="backupScopeAccount" '+(scopes.account?'checked':'')+' style="accent-color:#26A69A;"> 注销账号</label>' +
+              '<div style="display:flex;align-items:center;gap:10px;margin-top:8px;">' +
+              '<button onclick="backupSave2faScopes()" style="padding:6px 14px;background:#26A69A;color:#fff;border:none;border-radius:8px;cursor:pointer;">保存设置</button>' +
+              '<span id="backupScopesMsg" style="font-size:12px;color:#ffb74d;"></span>' +
+              '</div></div>'}
+        </div>
+        <div style="margin-bottom:18px;">
+          <div style="font-weight:bold;margin-bottom:8px;color:#80deea;">🔑 更改密码</div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <input id="backupSetOldPass" type="password" placeholder="原密码" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+            <input id="backupSetNewPass" type="password" placeholder="新密码（至少 4 位）" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+            <input id="backupSetNewPass2" type="password" placeholder="确认新密码" style="padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;">
+            <button onclick="backupChangePassword()" style="padding:8px;background:#00897B;color:#fff;border:none;border-radius:8px;cursor:pointer;">保存修改</button>
+          </div>
+        </div>
+        <div style="padding:14px;background:rgba(244,67,54,0.1);border:1px solid rgba(244,67,54,0.4);border-radius:10px;">
+          <div style="font-weight:bold;margin-bottom:8px;color:#ff8a80;">⚠️ 注销账号</div>
+          <div style="font-size:12px;color:#ffb74d;margin-bottom:10px;">注销后将永久删除你的全部云端备份数据与设备登录，不可恢复。</div>
+          <input id="backupSetDelPass" type="password" placeholder="输入密码以确认注销" style="width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:8px;">
+          <button onclick="backupDeleteAccount()" style="width:100%;padding:8px;background:#F44336;color:#fff;border:none;border-radius:8px;cursor:pointer;">永久注销账号</button>
+        </div>
+        <div id="backupSetMsg" style="font-size:13px;margin-top:12px;min-height:16px;"></div>
+      </div>`;
+    modal.onclick = (e)=>{ if(e.target===modal) closeBackupAccountSettings(); };
+}
+function closeBackupAccountSettings(){ const m=document.getElementById('backupAccountSettingsModal'); if(m) m.remove(); }
+// ===== 云备份 三项数据（成就/统计/UI设置）上传 / 下载应用 / 删除 =====
+function backupCollectLocal(kind) {
+    if (kind==='achievements') return JSON.parse(JSON.stringify(Object.assign({}, BACKUP_DEFAULT_ACH, gameState.achievements||{})));
+    if (kind==='statistics') return JSON.parse(JSON.stringify(Object.assign({}, BACKUP_DEFAULT_STATS, gameState.gameStats||{})));
+    if (kind==='ui_settings') return JSON.parse(JSON.stringify(gameState.uiSettings||{}));
+    return {};
+}
+function backupApplyLocal(kind, data) {
+    if (!data || typeof data!=='object') return;
+    if (kind==='achievements') {
+        gameState.achievements = Object.assign({}, BACKUP_DEFAULT_ACH, data);
+        try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch(e){}
+        if (typeof updateAchievementProgress==='function' && document.getElementById('progress1')) { try { updateAchievementProgress(); } catch(e){} }
+    } else if (kind==='statistics') {
+        gameState.gameStats = Object.assign({}, BACKUP_DEFAULT_STATS, data);
+        try { localStorage.setItem('gameStats', JSON.stringify(gameState.gameStats)); } catch(e){}
+        if (typeof updateStatistics==='function' && document.getElementById('totalPlayTime')) { try { updateStatistics(); } catch(e){} }
+    } else if (kind==='ui_settings') {
+        if (typeof applyServerUISettings==='function') { try { applyServerUISettings(data); } catch(e){} }
+    }
+}
+async function backupLoadKinds() {
+    const wrap = document.getElementById('backupKindsWrap');
+    if (!wrap) return;
+    try {
+        const r = await backupApi('/backups');
+        const d = await r.json();
+        if (backupDetectDisabled(r,d)) return;
+        if (!r.ok || !d.success) return;
+        const list = d.backups||[];
+        const map = {};
+        (list||[]).forEach(b => { map[b.kind] = b; });
+        BACKUP_KINDS.forEach(k => {
+            const info = document.getElementById('backupKindInfo_'+k.kind);
+            if (info) {
+                const b = map[k.kind];
+                info.textContent = b ? (k.label+'：云端已备份（更新于 '+formatCloudTime(b.updatedAt)+'）') : (k.label+'：云端暂无备份');
+            }
+        });
+    } catch(e){}
+}
+async function backupUpload(kind) {
+    if (!localStorage.getItem(BACKUP_TOKEN_KEY)) { showNotification('请先登录云备份账号'); openCloudBackupModal(); return; }
+    const def = BACKUP_KINDS.find(k=>k.kind===kind);
+    const label = def ? def.label : kind;
+    const setMsg = (t)=>{ const el=document.getElementById('backupKindMsg_'+kind); if(el) el.textContent=t||''; };
+    try {
+        setMsg('上传中...');
+        const data = backupCollectLocal(kind);
+        const r = await backupApi('/backup/'+encodeURIComponent(kind), { method:'PUT', body: JSON.stringify({ data }) });
+        const d = await r.json();
+        if (backupDetectDisabled(r,d)) return;
+        if (!r.ok || !d.success) throw new Error(d.message||'上传失败');
+        setMsg('✅ 已上传本机'+label+'到云');
+        backupLoadKinds();
+        showNotification('💾 '+label+'已备份到云');
+    } catch(e){ setMsg('❌ '+e.message); }
+}
+async function backupDownloadApply(kind) {
+    if (!localStorage.getItem(BACKUP_TOKEN_KEY)) { showNotification('请先登录云备份账号'); openCloudBackupModal(); return; }
+    const def = BACKUP_KINDS.find(k=>k.kind===kind);
+    const label = def ? def.label : kind;
+    const setMsg = (t)=>{ const el=document.getElementById('backupKindMsg_'+kind); if(el) el.textContent=t||''; };
+    try {
+        setMsg('下载中...');
+        const r = await backupApi('/backup/'+encodeURIComponent(kind));
+        const d = await r.json();
+        if (backupDetectDisabled(r,d)) return;
+        if (r.status === 404 || !d.data) { setMsg('📭 云端暂无该备份，可先上传'); return; }
+        if (!r.ok || !d.success) throw new Error(d.message||'下载失败');
+        backupApplyLocal(kind, d.data);
+        setMsg('✅ 已下载并应用到本机');
+        backupLoadKinds();
+        showNotification('💾 '+label+'已从云恢复并应用到本机');
+    } catch(e){ setMsg('❌ '+e.message); }
+}
+async function backupDeleteKind(kind) {
+    const def = BACKUP_KINDS.find(k=>k.kind===kind);
+    const label = def ? def.label : kind;
+    if (!confirm('确定删除云端「'+label+'」备份？此操作不可恢复。')) return;
+    try {
+        const r = await backupApi('/backup/'+encodeURIComponent(kind), { method:'DELETE' });
+        const d = await r.json();
+        if (!r.ok || !d.success) throw new Error(d.message||'删除失败');
+        showNotification('💾 云端'+label+'备份已删除');
+        backupLoadKinds();
+    } catch(e){ showNotification('删除失败：'+e.message); }
+}
+</script>
 
     <!-- 传送确认弹窗（顶层，避免被屏幕容器隐藏） -->
     <div id="teleportConfirmModal" class="hidden" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); z-index: 20000; display: none; flex-direction: column; justify-content: center; align-items: center;">
