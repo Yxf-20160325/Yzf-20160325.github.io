@@ -4652,7 +4652,7 @@ function applyAntiDevtools(on) {
 // 应用全局功能设定：更新内存开关，并同步隐藏/显示对应 UI 按钮
 function applyGlobalFunctions(settings) {
     if (!settings || typeof settings !== 'object') return;
-    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false, showAntiCheatTab: true, mazeJsonShare: true };
+    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false, showAntiCheatTab: true, mazeJsonShare: true, cloudLinkEnabled: true };
     window.globalFunctionControl = Object.assign({}, def, settings);
     // 记录全局「使用新UI」策略，供主菜单旧/新 UI 决策使用
     window.__globalUiMode = (settings && settings.newUi && typeof settings.newUi === 'object') ? settings.newUi : { mode: 'always', prob: 100 };
@@ -4680,6 +4680,15 @@ function applyGlobalFunctions(settings) {
     if (!jsonShareOn) {
         const jv = document.getElementById('mazeJsonViewerModal');
         if (jv && !jv.classList.contains('hidden')) { jv.classList.add('hidden'); jv.style.display = 'none'; }
+    }
+    // 云链接功能总开关：关闭后隐藏所有「🔗 云链接管理」入口、JSON 查看器里的「创建云链接」框
+    const clinkOn = g.cloudLinkEnabled !== false;
+    document.querySelectorAll('button[onclick="openCloudLinkModal()"]').forEach(b => b.style.display = clinkOn ? '' : 'none');
+    const clinkShareBox = document.getElementById('cloudLinkShareBox');
+    if (clinkShareBox) clinkShareBox.style.display = (jsonShareOn && clinkOn) ? '' : 'none';
+    if (!clinkOn) {
+        const clm = document.getElementById('cloudLinkModal');
+        if (clm) clm.remove();
     }
     // 反调试开关：仅在显式为 true 时启用（默认关闭，避免影响正常调试）
     if (typeof applyAntiDevtools === 'function') applyAntiDevtools(g.antiDevtools === true);
@@ -20003,8 +20012,8 @@ function openCloudSpaceModal() {
                     <span style="color:#90caf9;">☁️ 已登录：<b id="cloudCurUser"></b>（<span id="cloudCount">0</span>/<span id="cloudMax">5</span>）</span>
                     <span>
                         <button onclick="cloudRedeemCode()" style="padding:4px 10px; background:#AB47BC; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">🎁 使用扩容码</button>
-                        <button onclick="showCloudDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
-                        <button onclick="showCloudAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
+                        <button onclick="cloudOpenDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
+                        <button onclick="cloudOpenAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
                         <button onclick="cloudLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
                     </span>
                 </div>
@@ -20206,7 +20215,7 @@ async function showCloudDevices() {
         '<button onclick="closeCloudDevices()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;">✕</button></div>' +
         '<div id="cloudDevicesList" style="font-size:13px;">加载中...</div>' +
         '<div style="margin-top:14px;display:flex;gap:8px;">' +
-        '<button onclick="cloudRevokeOtherSessions()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
+        '<button onclick="cloudRevokeOtherSessionsGated()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
         '</div></div>';
     modal.onclick = (e) => { if (e.target === modal) closeCloudDevices(); };
     await renderCloudDevices();
@@ -20216,7 +20225,7 @@ function closeCloudDevices() {
     if (m) m.remove();
 }
 // ===== 云储存「账号设置」：查看账号名 / 改密（验原密码）/ 注销（需密码）=====
-function showCloudAccountSettings() {
+async function showCloudAccountSettings() {
     let modal = document.getElementById('cloudAccountSettingsModal');
     if (!modal) {
         modal = document.createElement('div');
@@ -20225,15 +20234,26 @@ function showCloudAccountSettings() {
         document.body.appendChild(modal);
     }
     const uname = localStorage.getItem(CLOUD_USER_KEY) || '未知账号';
+    let twoFa = false;
+    try { const r = await cloudApi('/2fa'); const d = await r.json(); if (r.ok && d.success) twoFa = !!d.enabled; } catch (e) {}
+    window.__cloud2fa = twoFa;
     modal.innerHTML = `
       <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
           <h3 style="margin:0;">⚙️ 账号设置</h3>
           <button onclick="closeCloudAccountSettings()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
         </div>
-        <div style="padding:12px;background:rgba(33,150,243,0.12);border:1px solid rgba(33,150,243,0.4);border-radius:10px;margin-bottom:18px;">
+        <div style="padding:12px;background:rgba(33,150,243,0.12);border:1px solid rgba(33,150,243,0.4);border-radius:10px;margin-bottom:14px;">
           <div style="color:#90caf9;font-size:13px;">当前账号</div>
           <div style="font-weight:bold;font-size:18px;">${escapeHtmlLocal(uname)}</div>
+        </div>
+        <div style="padding:14px;background:rgba(0,188,212,0.1);border:1px solid rgba(0,188,212,0.4);border-radius:10px;margin-bottom:18px;">
+          <div style="font-weight:bold;margin-bottom:6px;color:#80deea;">🔐 二次认证（2FA）</div>
+          <div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，打开账号设置、管理设备、踢出设备等敏感操作需重新输入密码，由注册账号本人授权。</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <span style="font-size:13px;">当前状态：<b id="cloud2faState" style="color:${twoFa ? '#aed581' : '#ff8a80'};">${twoFa ? '已开启' : '未开启'}</b></span>
+            <button id="cloud2faBtn" onclick="cloudToggle2fa()" style="padding:6px 14px;background:${twoFa ? '#F44336' : '#26A69A'};color:#fff;border:none;border-radius:8px;cursor:pointer;">${twoFa ? '关闭二次认证' : '开启二次认证'}</button>
+          </div>
         </div>
         <div style="margin-bottom:18px;">
           <div style="font-weight:bold;margin-bottom:8px;color:#90caf9;">🔑 更改密码</div>
@@ -20257,6 +20277,105 @@ function showCloudAccountSettings() {
 function closeCloudAccountSettings() {
     const m = document.getElementById('cloudAccountSettingsModal');
     if (m) m.remove();
+}
+// ===== 云储存「二次认证（2FA）」辅助 =====
+window.__cloud2fa = false;
+async function cloudFetch2fa() {
+    try {
+        const r = await cloudApi('/2fa');
+        const d = await r.json();
+        if (r.ok && d.success) window.__cloud2fa = !!d.enabled;
+    } catch (e) {}
+    return window.__cloud2fa;
+}
+// 二次认证「授权」弹窗：由创建该账号的人点击「授权」按钮放行敏感操作（不再要求输密码）。
+// onAuthorized() 在点击授权后调用。
+function cloudStepUpAuth(titleText, onAuthorized) {
+    let m = document.getElementById('cloudStepUpModal');
+    if (!m) {
+        m = document.createElement('div');
+        m.id = 'cloudStepUpModal';
+        m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;';
+        document.body.appendChild(m);
+    }
+    const uname = localStorage.getItem(CLOUD_USER_KEY) || '未知账号';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 ' + (titleText || '需要授权') + '</div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:16px;line-height:1.6;">此操作需要<b>创建该账号的人（' + escapeHtmlLocal(uname) + '）</b>亲自点击「授权」按钮确认后才能继续。<br>仅该账号的创建者可以完成授权。</div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeCloudStepUp()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="cloudStepUpOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 授权并继续</button>' +
+        '</div></div>';
+    m.onclick = (e) => { if (e.target === m) closeCloudStepUp(); };
+    document.getElementById('cloudStepUpOk').onclick = () => { closeCloudStepUp(); onAuthorized(); };
+}
+function closeCloudStepUp() { const m = document.getElementById('cloudStepUpModal'); if (m) m.remove(); }
+// 通用密码弹窗：用于开启/关闭二次认证等需验证密码的操作（与上面的「授权」按钮区分）。
+function cloudPromptPassword(titleText, onOk) {
+    let m = document.getElementById('cloudPwdModal');
+    if (!m) {
+        m = document.createElement('div');
+        m.id = 'cloudPwdModal';
+        m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;';
+        document.body.appendChild(m);
+    }
+    const uname = localStorage.getItem(CLOUD_USER_KEY) || '未知账号';
+    m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+        '<div style="font-weight:bold;margin-bottom:6px;font-size:16px;">🔐 ' + (titleText || '验证密码') + '</div>' +
+        '<div style="font-size:12px;color:#ffb74d;margin-bottom:12px;">账号：' + escapeHtmlLocal(uname) + '，请输入账号密码以修改二次认证设置。</div>' +
+        '<input id="cloudPwdInput" type="password" placeholder="账号密码" style="width:100%;box-sizing:border-box;padding:9px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:10px;">' +
+        '<div id="cloudPwdMsg" style="font-size:12px;color:#ff8a80;min-height:14px;margin-bottom:8px;"></div>' +
+        '<div style="display:flex;gap:8px;">' +
+        '<button onclick="closeCloudPwdModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+        '<button id="cloudPwdOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">确定</button>' +
+        '</div></div>';
+    m.onclick = (e) => { if (e.target === m) closeCloudPwdModal(); };
+    const okBtn = document.getElementById('cloudPwdOk');
+    const passEl = document.getElementById('cloudPwdInput');
+    okBtn.onclick = () => {
+        const p = passEl.value || '';
+        if (!p) { document.getElementById('cloudPwdMsg').textContent = '请输入密码'; return; }
+        closeCloudPwdModal();
+        onOk(p);
+    };
+    passEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') okBtn.click(); });
+}
+function closeCloudPwdModal() { const m = document.getElementById('cloudPwdModal'); if (m) m.remove(); }
+// 打开账号设置：若开启二次认证，先弹密码验证
+async function cloudOpenAccountSettings() {
+    if (await cloudFetch2fa()) cloudStepUpAuth('打开账号设置需验证身份', () => showCloudAccountSettings());
+    else showCloudAccountSettings();
+}
+// 打开设备管理：若开启二次认证，先弹密码验证
+async function cloudOpenDevices() {
+    if (await cloudFetch2fa()) cloudStepUpAuth('查看/管理设备需验证身份', () => showCloudDevices());
+    else showCloudDevices();
+}
+// 踢出单个设备：若开启二次认证，先弹密码验证
+async function cloudRevokeSessionGated(id, isCurrent) {
+    if (await cloudFetch2fa()) cloudStepUpAuth('踢出设备需验证身份', () => cloudRevokeSession(id, isCurrent));
+    else cloudRevokeSession(id, isCurrent);
+}
+// 退出其他所有设备：若开启二次认证，先弹密码验证
+async function cloudRevokeOtherSessionsGated() {
+    if (await cloudFetch2fa()) cloudStepUpAuth('退出其他设备需验证身份', () => cloudRevokeOtherSessions());
+    else cloudRevokeOtherSessions();
+}
+// 切换二次认证开关：需验证密码（开启/关闭安全设置本身，仍要密码）
+async function cloudToggle2fa() {
+    const want = !window.__cloud2fa;
+    cloudPromptPassword('修改二次认证设置需验证密码', async (password) => {
+        try {
+            const r = await cloudApi('/2fa', { method: 'PUT', body: JSON.stringify({ password, enabled: want }) });
+            const d = await r.json();
+            if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
+            window.__cloud2fa = !!d.enabled;
+            showCloudAccountSettings(); // 重新渲染开关状态
+            showNotification(d.message || '已更新二次认证');
+        } catch (e) {
+            showNotification('❌ ' + e.message);
+        }
+    });
 }
 async function cloudChangePassword() {
     const oldP = document.getElementById('cloudSetOldPass').value || '';
@@ -20332,7 +20451,7 @@ async function renderCloudDevices() {
                     <div style="font-weight:bold;">${escapeHtmlLocal(parseUserAgent(s.device))}${s.current ? ' <span style="color:#4caf50;font-size:11px;">（当前设备）</span>' : ''}</div>
                     <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)} ｜ IP:${escapeHtmlLocal(s.ip || '—')}</div>
                 </div>
-                <button onclick="cloudRevokeSession('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
+                <button onclick="cloudRevokeSessionGated('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
             </div>
         `).join('');
     } catch (e) { box.innerHTML = '<p style="color:#ff8a80;">加载失败：' + escapeHtmlLocal(e.message) + '</p>'; }
@@ -25086,7 +25205,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     }
     function clinkUrlOf(code) { return clinkBase() + '/m/' + code; }
     function clinkIsEnabled() {
-        return !window.globalFunctionControl || window.globalFunctionControl.mazeJsonShare !== false;
+        return !window.globalFunctionControl || window.globalFunctionControl.cloudLinkEnabled !== false;
     }
     function clinkApi(path, opts) {
         opts = opts || {};
@@ -25104,6 +25223,12 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         el.style.color = isErr ? '#ff8a80' : '#aed581';
     }
     window.openCloudLinkModal = function() {
+        // 管理员可关闭整套云链接功能
+        if (window.globalFunctionControl && window.globalFunctionControl.cloudLinkEnabled === false) {
+            if (typeof showNotification === 'function') showNotification('⚠️ 管理员已关闭云链接功能');
+            else alert('管理员已关闭云链接功能');
+            return;
+        }
         const old = document.getElementById('cloudLinkModal');
         if (old) old.remove();
         const overlay = document.createElement('div');
@@ -25150,8 +25275,8 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             <span style="color:#b39ddb;">🔗 已登录：<b>${escapeHtmlSafe(user)}</b>（<span id="clinkCount">0</span>/<span id="clinkMax">50</span> 条链接）</span>
             <span style="display:flex; gap:6px;">
               <button onclick="clinkLoadList()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">🔄 刷新</button>
-              <button onclick="showClinkDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
-              <button onclick="showClinkAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
+              <button onclick="clinkOpenDevices()" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">📱 管理设备</button>
+              <button onclick="clinkOpenAccountSettings()" style="padding:4px 10px; background:#5C6BC0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; margin-right:6px;">⚙️ 账号设置</button>
               <button onclick="clinkLogout()" style="padding:4px 10px; background:#666; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">退出</button>
             </span>
           </div>
@@ -25197,7 +25322,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         showNotification('已退出云链接账号');
     };
     // ===== 云链接「账号设置」：查看账号名 / 改密（验原密码）/ 注销（需密码）=====
-    window.showClinkAccountSettings = function() {
+    window.showClinkAccountSettings = async function() {
         let modal = document.getElementById('clinkAccountSettingsModal');
         if (!modal) {
             modal = document.createElement('div');
@@ -25206,15 +25331,26 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             document.body.appendChild(modal);
         }
         const uname = localStorage.getItem(CLINK_USER_KEY) || '未知账号';
+        let twoFa = false;
+        try { const r = await clinkApi('/2fa'); const d = await r.json(); if (r.ok && d.success) twoFa = !!d.enabled; } catch (e) {}
+        window.__clink2fa = twoFa;
         modal.innerHTML = `
           <div style="background:#1e1e2e;color:#fff;width:min(440px,92vw);max-height:88vh;overflow:auto;padding:22px;border-radius:12px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
               <h3 style="margin:0;">⚙️ 账号设置</h3>
               <button onclick="closeClinkAccountSettings()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button>
             </div>
-            <div style="padding:12px;background:rgba(126,87,194,0.14);border:1px solid rgba(126,87,194,0.5);border-radius:10px;margin-bottom:18px;">
+            <div style="padding:12px;background:rgba(126,87,194,0.14);border:1px solid rgba(126,87,194,0.5);border-radius:10px;margin-bottom:14px;">
               <div style="color:#b39ddb;font-size:13px;">当前账号</div>
               <div style="font-weight:bold;font-size:18px;">${escapeHtmlLocal(uname)}</div>
+            </div>
+            <div style="padding:14px;background:rgba(0,188,212,0.1);border:1px solid rgba(0,188,212,0.4);border-radius:10px;margin-bottom:18px;">
+              <div style="font-weight:bold;margin-bottom:6px;color:#80deea;">🔐 二次认证（2FA）</div>
+              <div style="font-size:12px;color:#b0bec5;margin-bottom:10px;">开启后，打开账号设置、管理设备、踢出设备等敏感操作需重新输入密码，由注册账号本人授权。</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                <span style="font-size:13px;">当前状态：<b id="clink2faState" style="color:${twoFa ? '#aed581' : '#ff8a80'};">${twoFa ? '已开启' : '未开启'}</b></span>
+                <button id="clink2faBtn" onclick="clinkToggle2fa()" style="padding:6px 14px;background:${twoFa ? '#F44336' : '#26A69A'};color:#fff;border:none;border-radius:8px;cursor:pointer;">${twoFa ? '关闭二次认证' : '开启二次认证'}</button>
+              </div>
             </div>
             <div style="margin-bottom:18px;">
               <div style="font-weight:bold;margin-bottom:8px;color:#b39ddb;">🔑 更改密码</div>
@@ -25238,6 +25374,104 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     window.closeClinkAccountSettings = function() {
         const m = document.getElementById('clinkAccountSettingsModal');
         if (m) m.remove();
+    };
+    // ===== 云链接「二次认证（2FA）」辅助 =====
+    window.__clink2fa = false;
+    window.clinkFetch2fa = async function() {
+        try {
+            const r = await clinkApi('/2fa');
+            const d = await r.json();
+            if (r.ok && d.success) window.__clink2fa = !!d.enabled;
+        } catch (e) {}
+        return window.__clink2fa;
+    };
+    // 二次认证「升级验证」弹窗：由注册账号本人输入密码授权后才放行敏感操作。
+    function clinkStepUpAuth(titleText, onAuthorized) {
+        let m = document.getElementById('clinkStepUpModal');
+        if (!m) {
+            m = document.createElement('div');
+            m.id = 'clinkStepUpModal';
+            m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;';
+            document.body.appendChild(m);
+        }
+        const uname = localStorage.getItem(CLINK_USER_KEY) || '未知账号';
+        m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+            '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🔐 ' + (titleText || '需要授权') + '</div>' +
+            '<div style="font-size:13px;color:#ffb74d;margin-bottom:16px;line-height:1.6;">此操作需要<b>创建该账号的人（' + escapeHtmlLocal(uname) + '）</b>亲自点击「授权」按钮确认后才能继续。<br>仅该账号的创建者可以完成授权。</div>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button onclick="closeClinkStepUp()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+            '<button id="clinkStepUpOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">✅ 授权并继续</button>' +
+            '</div></div>';
+        m.onclick = (e) => { if (e.target === m) closeClinkStepUp(); };
+        document.getElementById('clinkStepUpOk').onclick = () => { closeClinkStepUp(); onAuthorized(); };
+    }
+    window.closeClinkStepUp = function() { const m = document.getElementById('clinkStepUpModal'); if (m) m.remove(); };
+    // 通用密码弹窗：用于开启/关闭二次认证等需验证密码的操作（与上面的「授权」按钮区分）。
+    function clinkPromptPassword(titleText, onOk) {
+        let m = document.getElementById('clinkPwdModal');
+        if (!m) {
+            m = document.createElement('div');
+            m.id = 'clinkPwdModal';
+            m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:36000;';
+            document.body.appendChild(m);
+        }
+        const uname = localStorage.getItem(CLINK_USER_KEY) || '未知账号';
+        m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
+            '<div style="font-weight:bold;margin-bottom:6px;font-size:16px;">🔐 ' + (titleText || '验证密码') + '</div>' +
+            '<div style="font-size:12px;color:#ffb74d;margin-bottom:12px;">账号：' + escapeHtmlLocal(uname) + '，请输入账号密码以修改二次认证设置。</div>' +
+            '<input id="clinkPwdInput" type="password" placeholder="账号密码" style="width:100%;box-sizing:border-box;padding:9px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;margin-bottom:10px;">' +
+            '<div id="clinkPwdMsg" style="font-size:12px;color:#ff8a80;min-height:14px;margin-bottom:8px;"></div>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button onclick="closeClinkPwdModal()" style="flex:1;padding:10px;background:#555;color:#fff;border:none;border-radius:8px;cursor:pointer;">取消</button>' +
+            '<button id="clinkPwdOk" style="flex:1;padding:10px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:bold;">确定</button>' +
+            '</div></div>';
+        m.onclick = (e) => { if (e.target === m) closeClinkPwdModal(); };
+        const okBtn = document.getElementById('clinkPwdOk');
+        const passEl = document.getElementById('clinkPwdInput');
+        okBtn.onclick = () => {
+            const p = passEl.value || '';
+            if (!p) { document.getElementById('clinkPwdMsg').textContent = '请输入密码'; return; }
+            closeClinkPwdModal();
+            onOk(p);
+        };
+        passEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') okBtn.click(); });
+    }
+    window.closeClinkPwdModal = function() { const m = document.getElementById('clinkPwdModal'); if (m) m.remove(); };
+    // 打开账号设置：若开启二次认证，先弹密码验证
+    window.clinkOpenAccountSettings = async function() {
+        if (await window.clinkFetch2fa()) clinkStepUpAuth('打开账号设置需验证身份', () => window.showClinkAccountSettings());
+        else window.showClinkAccountSettings();
+    };
+    // 打开设备管理：若开启二次认证，先弹密码验证
+    window.clinkOpenDevices = async function() {
+        if (await window.clinkFetch2fa()) clinkStepUpAuth('查看/管理设备需验证身份', () => window.showClinkDevices());
+        else window.showClinkDevices();
+    };
+    // 踢出单个设备：若开启二次认证，先弹密码验证
+    window.clinkRevokeSessionGated = async function(id, isCurrent) {
+        if (await window.clinkFetch2fa()) clinkStepUpAuth('踢出设备需验证身份', () => window.clinkRevokeSession(id, isCurrent));
+        else window.clinkRevokeSession(id, isCurrent);
+    };
+    // 退出其他所有设备：若开启二次认证，先弹密码验证
+    window.clinkRevokeOtherSessionsGated = async function() {
+        if (await window.clinkFetch2fa()) clinkStepUpAuth('退出其他设备需验证身份', () => window.clinkRevokeOtherSessions());
+        else window.clinkRevokeOtherSessions();
+    };
+    // 切换二次认证开关：需验证密码（开启/关闭安全设置本身，仍要密码）
+    window.clinkToggle2fa = async function() {
+        const want = !window.__clink2fa;
+        clinkPromptPassword('修改二次认证设置需验证密码', async (password) => {
+            try {
+                const r = await clinkApi('/2fa', { method: 'PUT', body: JSON.stringify({ password, enabled: want }) });
+                const d = await r.json();
+                if (!r.ok || !d.success) throw new Error(d.message || '操作失败');
+                window.__clink2fa = !!d.enabled;
+                window.showClinkAccountSettings(); // 重新渲染开关状态
+                showNotification(d.message || '已更新二次认证');
+            } catch (e) {
+                showNotification('❌ ' + e.message);
+            }
+        });
     };
     window.clinkChangePassword = async function() {
         const oldP = document.getElementById('clinkSetOldPass').value || '';
@@ -25302,7 +25536,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             '<button onclick="closeClinkDevices()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;">✕</button></div>' +
             '<div id="clinkDevicesList" style="font-size:13px;">加载中...</div>' +
             '<div style="margin-top:14px;display:flex;gap:8px;">' +
-            '<button onclick="clinkRevokeOtherSessions()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
+            '<button onclick="clinkRevokeOtherSessionsGated()" style="flex:1;padding:8px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;">退出其他所有设备</button>' +
             '</div></div>';
         modal.onclick = (e) => { if (e.target === modal) closeClinkDevices(); };
         renderClinkDevices();
@@ -25327,7 +25561,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                         <div style="font-weight:bold;">${escapeHtmlLocal(parseUserAgent(s.device))}${s.current ? ' <span style="color:#4caf50;font-size:11px;">（当前设备）</span>' : ''}</div>
                         <div style="font-size:11px;color:#aaa;">登录:${formatCloudTime(s.created_at)} ｜ 活跃:${formatCloudTime(s.last_active_at)} ｜ IP:${escapeHtmlLocal(s.ip || '—')}</div>
                     </div>
-                    <button onclick="clinkRevokeSession('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
+                    <button onclick="clinkRevokeSessionGated('${s.id}', ${s.current})" ${s.current ? 'style="padding:5px 10px;background:#666;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"' : 'style="padding:5px 10px;background:#FF5252;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;"'}>${s.current ? '退出此设备' : '退登'}</button>
                 </div>
             `).join('');
         } catch (e) { box.innerHTML = '<p style="color:#ff8a80;">加载失败：' + escapeHtmlLocal(e.message) + '</p>'; }
