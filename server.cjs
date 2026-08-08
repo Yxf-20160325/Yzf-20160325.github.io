@@ -208,7 +208,8 @@ const DB_TABLES_SQL = [
         max_mazes INT NOT NULL DEFAULT 5,
         client_id VARCHAR(64),
         disabled TINYINT(1) NOT NULL DEFAULT 0,
-        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0
+        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
+        creator_client_id VARCHAR(64)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_mazes (
         id VARCHAR(64) PRIMARY KEY,
@@ -258,7 +259,8 @@ const DB_TABLES_SQL = [
         updated_at VARCHAR(32),
         client_id VARCHAR(64),
         disabled TINYINT(1) NOT NULL DEFAULT 0,
-        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0
+        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
+        creator_client_id VARCHAR(64)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_links (
         code VARCHAR(32) PRIMARY KEY,
@@ -433,6 +435,23 @@ async function initDatabase() {
                 if (!ltfaCols || ltfaCols.length === 0) {
                     await pool.query('ALTER TABLE cloud_link_accounts ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0');
                     console.log('🗄️ 已为 cloud_link_accounts 表补充 two_factor_enabled 列（二次认证）');
+                }
+                // 补充 creator_client_id 列：记录「创建该账号的人」的客户端标识（注册时固定，登录不改），用于 2FA 授权身份判定
+                const [cCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_accounts' AND COLUMN_NAME='creator_client_id'",
+                    [dbName]
+                );
+                if (!cCols || cCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN creator_client_id VARCHAR(64)');
+                    console.log('🗄️ 已为 cloud_storage_accounts 表补充 creator_client_id 列（创建者标识）');
+                }
+                const [lcCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_link_accounts' AND COLUMN_NAME='creator_client_id'",
+                    [dbName]
+                );
+                if (!lcCols || lcCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_link_accounts ADD COLUMN creator_client_id VARCHAR(64)');
+                    console.log('🗄️ 已为 cloud_link_accounts 表补充 creator_client_id 列（创建者标识）');
                 }
                 // 补充 ip 列：记录会话登录 IP，供"管理设备"展示
                 const [sessIpCols] = await pool.query(
@@ -4860,7 +4879,8 @@ const CLOUD_ACCOUNT_COLUMNS = {
     client_id: 'VARCHAR(64)',
     disabled: 'TINYINT(1) NOT NULL DEFAULT 0',
     banned_until: 'VARCHAR(32)',
-    two_factor_enabled: 'TINYINT(1) NOT NULL DEFAULT 0'
+    two_factor_enabled: 'TINYINT(1) NOT NULL DEFAULT 0',
+    creator_client_id: 'VARCHAR(64)'
 };
 const _healedAccountCols = {};
 async function _healAccountColumn(col) {
@@ -4881,9 +4901,11 @@ async function dbSaveCloudAccount(acc) {
     const disabled = (acc.disabled != null) ? (acc.disabled ? 1 : 0) : 0;
     const bannedUntil = (acc.banned_until != null && acc.banned_until !== '') ? String(acc.banned_until) : null;
     const twoFactor = (acc.two_factor_enabled != null) ? (acc.two_factor_enabled ? 1 : 0) : 0;
-    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled) VALUES (?,?,?,?,?,?,?,?,?) ' +
+    // creator_client_id 仅注册时写入，登录/其它更新时保持不变（不可变）
+    const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
+    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled, creator_client_id) VALUES (?,?,?,?,?,?,?,?,?,?) ' +
         'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor];
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor, creatorClientId];
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(SQL, PARAMS);
@@ -4899,7 +4921,7 @@ async function dbSaveCloudAccount(acc) {
             console.error('[云储存] DB 写账号失败:', e.message);
         }
     }
-    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor }));
+    cloudAccounts.set(acc.username, Object.assign({}, acc, { max_mazes: maxMazes, client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor, creator_client_id: creatorClientId }));
     saveCloudStorage();
 }
 // 读取某账号允许的云地图数量（受扩容码影响）；缺省回退常量
@@ -5296,16 +5318,18 @@ async function dbSaveLinkAccount(acc) {
     const clientId = (acc.client_id != null) ? acc.client_id : null;
     const disabled = acc.disabled ? 1 : 0;
     const twoFactor = acc.two_factor_enabled ? 1 : 0;
+    // creator_client_id 仅注册时写入，登录/其它更新时保持不变（不可变）
+    const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled) VALUES (?,?,?,?,?,?,?) ' +
+                'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled, creator_client_id) VALUES (?,?,?,?,?,?,?,?) ' +
                 'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), two_factor_enabled=VALUES(two_factor_enabled)',
-                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor]);
+                [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor, creatorClientId]);
             return;
         } catch (e) { console.error('[云链接] DB 写账号失败:', e.message); }
     }
-    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled, two_factor_enabled: twoFactor }));
+    cloudLinkAccounts.set(acc.username, Object.assign({}, acc, { client_id: clientId, disabled, two_factor_enabled: twoFactor, creator_client_id: creatorClientId }));
     saveCloudLinksFile();
 }
 async function dbAllLinkAccounts() {
@@ -5535,6 +5559,7 @@ app.post('/api/cloud-links/register', async (req, res) => {
             password_hash: bcrypt.hashSync(password, 10),
             created_at: now, updated_at: now,
             client_id: (req.body.clientId || '').toString().trim() || null,
+            creator_client_id: (req.body.clientId || '').toString().trim() || null,
             disabled: 0
         };
         await dbSaveLinkAccount(acc);
@@ -5652,10 +5677,28 @@ app.post('/api/cloud-links/verify', requireLinkAuth, async (req, res) => {
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false, message: '验证失败' }); }
 });
+// 二次认证「授权」：敏感操作（打开账号设置/管理设备/踢出设备）前的身份校验。
+// 必须由创建该账号的人（creator_client_id 匹配）点击授权按钮放行，否则拒绝。
+app.post('/api/cloud-links/authorize', requireLinkAuth, async (req, res) => {
+    if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.json({ success: true, required: false });
+        const provided = (req.body && req.body.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        res.json({ success: true, required: true });
+    } catch (e) { res.status(500).json({ success: false, message: '授权校验失败' }); }
+});
 
 // 查看本账号登录过的设备/会话
 app.get('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
     try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        const provided = (req.query && req.query.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
         const list = await dbGetCloudLinkSessions(req.linkUser);
         const out = list.map(s => ({
             id: s.id,
@@ -5672,6 +5715,10 @@ app.get('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
 // 退登其他所有设备（保留当前设备）
 app.delete('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
     try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        const provided = (req.body && req.body.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
         const exceptId = req.linkSessionId || '';
         await dbDeleteCloudLinkSessionsExcept(req.linkUser, exceptId);
         res.json({ success: true, message: '已退出其他所有设备' });
@@ -5681,6 +5728,10 @@ app.delete('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
 // 退登指定设备（传入 current=true 表示退登当前设备，等价于退出登录）
 app.delete('/api/cloud-links/sessions/:id', requireLinkAuth, async (req, res) => {
     try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        const provided = (req.body && req.body.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
         const id = decodeURIComponent(req.params.id || '');
         if (!id) return res.status(400).json({ success: false, message: '缺少会话 id' });
         const s = cloudLinkSessions.get(id);
@@ -5951,7 +6002,7 @@ app.post('/api/cloud-storage/register', async (req, res) => {
         const password_hash = bcrypt.hashSync(password, 10);
         const now = new Date().toISOString();
         const clientId = (req.body.clientId || '').toString().trim() || null;
-        const acc = { username, password_hash, created_at: now, updated_at: now, client_id: clientId };
+        const acc = { username, password_hash, created_at: now, updated_at: now, client_id: clientId, creator_client_id: clientId };
         await dbSaveCloudAccount(acc);
         const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
         const ip = getClientIp(req);
@@ -6082,6 +6133,33 @@ app.post('/api/cloud-storage/verify', requireCloudAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: '验证失败' }); }
 });
 
+// 2FA 授权身份判定：返回 null 表示放行；返回字符串表示拒绝原因。
+// 仅当账号开启二次认证、且登记了「创建者 client_id」时，才强制要求请求方 clientId 与创建者一致。
+// 用户名由 JWT 保证即本人；creator_client_id 把敏感操作绑定到「创建该账号的设备」，避免任何登录态都能授权。
+function assert2faCreator(acc, providedClientId) {
+    if (!acc || !acc.two_factor_enabled) return null;
+    const stored = acc.creator_client_id || null;
+    if (!stored) return null; // 旧账号未登记创建者：退化为仅用户名（已登录即本人），不锁定
+    if (!providedClientId || String(providedClientId) !== String(stored)) {
+        return '只有创建该账号的人（client_id 匹配）才能完成此操作';
+    }
+    return null;
+}
+// 二次认证「授权」：敏感操作（打开账号设置/管理设备/踢出设备）前的身份校验。
+// 必须由创建该账号的人（client_id 匹配）点击授权按钮放行，否则拒绝。
+app.post('/api/cloud-storage/authorize', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.json({ success: true, required: false });
+        const provided = (req.body && req.body.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        res.json({ success: true, required: true });
+    } catch (e) { res.status(500).json({ success: false, message: '授权校验失败' }); }
+});
+
 // 获取当前账号的云地图列表（含网格，用于下载）
 app.get('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
@@ -6197,6 +6275,10 @@ app.post('/api/cloud-storage/progress', requireCloudAuth, async (req, res) => {
 app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        const provided = (req.query && req.query.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
         const list = await dbGetCloudSessions(req.cloudUser);
         const out = list.map(s => ({
             id: s.id,
@@ -6213,6 +6295,10 @@ app.get('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
 app.delete('/api/cloud-storage/sessions/:id', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        const provided = (req.body && req.body.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
         const id = req.params.id;
         const list = await dbGetCloudSessions(req.cloudUser);
         const target = list.find(s => s.id === id);
@@ -6225,6 +6311,10 @@ app.delete('/api/cloud-storage/sessions/:id', requireCloudAuth, async (req, res)
 app.delete('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
     try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        const provided = (req.body && req.body.clientId) || '';
+        const deny = assert2faCreator(acc, provided);
+        if (deny) return res.status(403).json({ success: false, message: deny });
         await dbDeleteCloudSessionsExcept(req.cloudUser, req.cloudSessionId);
         res.json({ success: true, message: '已退出其他所有设备' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
