@@ -269,6 +269,15 @@ const DB_TABLES_SQL = [
         updated_at VARCHAR(32),
         INDEX idx_cloud_link_user (username)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_link_sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        username VARCHAR(64) NOT NULL,
+        device VARCHAR(128),
+        ip VARCHAR(64),
+        created_at VARCHAR(32),
+        last_active_at VARCHAR(32),
+        INDEX idx_cloud_link_sess_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS banned_ips (
         ip VARCHAR(64) PRIMARY KEY,
         reason TEXT,
@@ -5333,8 +5342,10 @@ async function dbDeleteLinkAccount(username) {
     if (DB_AVAILABLE && pool) {
         try { await pool.query('DELETE FROM cloud_links WHERE username=?', [username]); } catch (e) { console.error('[云链接] DB 删账号链接失败:', e.message); }
         try { await pool.query('DELETE FROM cloud_link_accounts WHERE username=?', [username]); } catch (e) { console.error('[云链接] DB 删账号失败:', e.message); }
+        try { await pool.query('DELETE FROM cloud_link_sessions WHERE username=?', [username]); } catch (e) { console.error('[云链接] DB 删账号会话失败:', e.message); }
     }
     for (const [k, v] of cloudLinks) if (v.username === username) cloudLinks.delete(k);
+    for (const [k, s] of cloudLinkSessions) if (s.username === username) cloudLinkSessions.delete(k);
     cloudLinkAccounts.delete(username);
     saveCloudLinksFile();
 }
@@ -5346,6 +5357,91 @@ async function dbBumpLinkViews(code) {
     const l = cloudLinks.get(code);
     if (l) { l.views = Number(l.views || 0) + 1; saveCloudLinksFile(); }
 }
+
+// ===== 云链接会话（设备）管理：记录账号在哪些设备/浏览器登录，支持远端退登 =====
+const CLOUD_LINK_SESSIONS_FILE = path.join(DATA_DIR, 'cloud-link-sessions.json');
+let cloudLinkSessions = new Map(); // id -> { id, username, device, ip, created_at, last_active_at, _lastTouch? }
+async function loadCloudLinkSessions() {
+    try {
+        if (DB_AVAILABLE && pool) {
+            const [rows] = await pool.query('SELECT * FROM cloud_link_sessions');
+            if (rows) rows.forEach(s => cloudLinkSessions.set(s.id, s));
+            return;
+        }
+        if (fs.existsSync(CLOUD_LINK_SESSIONS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(CLOUD_LINK_SESSIONS_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(s => cloudLinkSessions.set(s.id, s));
+        }
+    } catch (e) { console.error('[云链接] 会话载入失败:', e.message); }
+}
+function saveCloudLinkSessions() {
+    try { ensureDataDir(); fs.writeFileSync(CLOUD_LINK_SESSIONS_FILE, JSON.stringify(Array.from(cloudLinkSessions.values()), null, 2)); }
+    catch (e) { console.error('[云链接] 会话保存失败:', e.message); }
+}
+async function dbGetCloudLinkSessions(username) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT * FROM cloud_link_sessions WHERE username=? ORDER BY last_active_at DESC', [username]);
+            if (rows) { rows.forEach(s => cloudLinkSessions.set(s.id, s)); return rows; }
+        } catch (e) { console.error('[云链接] DB 读会话失败:', e.message); }
+    }
+    return Array.from(cloudLinkSessions.values()).filter(s => s.username === username)
+        .sort((a, b) => (b.last_active_at || '').localeCompare(a.last_active_at || ''));
+}
+async function dbUpsertCloudLinkSession(s) {
+    cloudLinkSessions.set(s.id, s); // 内存始终同步，保证 requireLinkAuth 校验可用
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_link_sessions (id, username, device, ip, created_at, last_active_at) VALUES (?,?,?,?,?,?) ' +
+                'ON DUPLICATE KEY UPDATE device=VALUES(device), last_active_at=VALUES(last_active_at)',
+                [s.id, s.username, s.device, s.ip || '', s.created_at, s.last_active_at]);
+            return;
+        } catch (e) { console.error('[云链接] DB 写会话失败:', e.message); }
+    }
+    saveCloudLinkSessions();
+}
+async function dbDeleteCloudLinkSession(id) {
+    cloudLinkSessions.delete(id);
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_link_sessions WHERE id=?', [id]); } catch (e) { console.error('[云链接] DB 删会话失败:', e.message); }
+    }
+    saveCloudLinkSessions();
+}
+async function dbDeleteCloudLinkSessionsExcept(username, exceptId) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_link_sessions WHERE username=? AND id<>?', [username, exceptId]); } catch (e) { console.error('[云链接] DB 删会话失败:', e.message); }
+    }
+    for (const [k, s] of cloudLinkSessions) if (s.username === username && k !== exceptId) cloudLinkSessions.delete(k);
+    saveCloudLinkSessions();
+}
+// 退登某账号的全部设备（注销账号 / 管理员封禁时强制下线）
+async function dbDeleteCloudLinkSessionsByUser(username) {
+    if (!username) return;
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_link_sessions WHERE username=?', [username]); } catch (e) { console.error('[云链接] DB 删会话失败:', e.message); }
+    }
+    for (const [k, s] of cloudLinkSessions) if (s.username === username) cloudLinkSessions.delete(k);
+    saveCloudLinkSessions();
+}
+function genLinkSessionId() { return 'cl_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 12); }
+function makeCloudLinkSession(username, device, ip) {
+    const id = genLinkSessionId();
+    const now = new Date().toISOString();
+    const s = { id, username, device: (device || '未知设备').toString().slice(0, 128), ip: (ip || '').toString().slice(0, 64), created_at: now, last_active_at: now };
+    dbUpsertCloudLinkSession(s).catch(e => console.error('[云链接] 创建会话失败:', e.message));
+    return s;
+}
+// 更新会话活跃时间（内存即时更新；DB 写入节流到每 60 秒一次，避免请求级写库打满连接池）
+function touchCloudLinkSession(sess) {
+    sess.last_active_at = new Date().toISOString();
+    const now = Date.now();
+    if (!sess._lastTouch || now - sess._lastTouch > 60000) {
+        sess._lastTouch = now;
+        dbUpsertCloudLinkSession(sess).catch(() => {});
+    }
+}
+loadCloudLinkSessions().catch(e => console.error('[云链接] 会话载入失败:', e.message));
 
 // 「查看/分享迷宫（JSON）」总开关：同时管辖云链接的创建
 function mazeJsonShareEnabled() { return globalFunctions.mazeJsonShare !== false; }
@@ -5361,6 +5457,16 @@ async function requireLinkAuth(req, res, next) {
         if (!acc) return res.status(401).json({ success: false, message: '账号不存在，请重新注册' });
         if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
         req.linkUser = decoded.username;
+        // 会话校验（新版令牌带 sid；旧版无 sid 向后兼容）
+        const sid = decoded.sid;
+        if (sid) {
+            const sess = cloudLinkSessions.get(sid);
+            if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' });
+            touchCloudLinkSession(sess);
+            req.linkSessionId = sid;
+        } else {
+            req.linkSessionId = null;
+        }
         next();
     } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
 }
@@ -5404,8 +5510,11 @@ app.post('/api/cloud-links/register', async (req, res) => {
             disabled: 0
         };
         await dbSaveLinkAccount(acc);
-        const token = jwt.sign({ username, type: 'clink' }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ success: true, token, username });
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const ip = getClientIp(req);
+        const sess = makeCloudLinkSession(username, device, ip);
+        const token = jwt.sign({ username, type: 'clink', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云链接] 注册失败:', e);
         res.status(500).json({ success: false, message: '注册失败' });
@@ -5427,12 +5536,92 @@ app.post('/api/cloud-links/login', async (req, res) => {
             acc.client_id = clientId; acc.updated_at = new Date().toISOString();
             await dbSaveLinkAccount(acc);
         }
-        const token = jwt.sign({ username, type: 'clink' }, JWT_SECRET, { expiresIn: '30d' });
-        res.json({ success: true, token, username });
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const ip = getClientIp(req);
+        const sess = makeCloudLinkSession(username, device, ip);
+        const token = jwt.sign({ username, type: 'clink', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云链接] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
     }
+});
+
+// ===== 云链接账号自助管理（需登录态）=====
+// 自助修改密码：需验证原密码
+app.put('/api/cloud-links/password', requireLinkAuth, async (req, res) => {
+    if (!mazeJsonShareEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    try {
+        const oldPassword = ((req.body && req.body.oldPassword) || '').toString();
+        const newPassword = ((req.body && req.body.newPassword) || '').toString();
+        if (!oldPassword || !newPassword) return res.status(400).json({ success: false, message: '请输入原密码和新密码' });
+        if (newPassword.length < 4) return res.status(400).json({ success: false, message: '新密码至少 4 位' });
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(oldPassword, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '原密码错误' });
+        }
+        acc.password_hash = bcrypt.hashSync(newPassword, 10);
+        acc.updated_at = new Date().toISOString();
+        await dbSaveLinkAccount(acc);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-account-password-change', `云链接账号「${req.linkUser}」修改密码`, req);
+        res.json({ success: true, message: '密码已修改' });
+    } catch (e) { res.status(500).json({ success: false, message: '修改失败' }); }
+});
+
+// 自助注销账号：需验证密码（级联删除全部云链接、会话与登录态）
+app.delete('/api/cloud-links/account', requireLinkAuth, async (req, res) => {
+    if (!mazeJsonShareEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString();
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        await dbDeleteLinkAccount(req.linkUser);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-account-delete', `云链接账号「${req.linkUser}」自行注销`, req);
+        res.json({ success: true, message: '账号已注销' });
+    } catch (e) { res.status(500).json({ success: false, message: '注销失败' }); }
+});
+
+// 查看本账号登录过的设备/会话
+app.get('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
+    try {
+        const list = await dbGetCloudLinkSessions(req.linkUser);
+        const out = list.map(s => ({
+            id: s.id,
+            device: s.device || '未知设备',
+            ip: s.ip || '',
+            created_at: s.created_at,
+            last_active_at: s.last_active_at,
+            current: (req.linkSessionId && s.id === req.linkSessionId)
+        }));
+        res.json({ success: true, sessions: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 退登其他所有设备（保留当前设备）
+app.delete('/api/cloud-links/sessions', requireLinkAuth, async (req, res) => {
+    try {
+        const exceptId = req.linkSessionId || '';
+        await dbDeleteCloudLinkSessionsExcept(req.linkUser, exceptId);
+        res.json({ success: true, message: '已退出其他所有设备' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 退登指定设备（传入 current=true 表示退登当前设备，等价于退出登录）
+app.delete('/api/cloud-links/sessions/:id', requireLinkAuth, async (req, res) => {
+    try {
+        const id = decodeURIComponent(req.params.id || '');
+        if (!id) return res.status(400).json({ success: false, message: '缺少会话 id' });
+        const s = cloudLinkSessions.get(id);
+        if (!s || s.username !== req.linkUser) return res.status(404).json({ success: false, message: '会话不存在' });
+        await dbDeleteCloudLinkSession(id);
+        const isCurrent = (req.linkSessionId && id === req.linkSessionId);
+        res.json({ success: true, message: isCurrent ? '已退出当前设备' : '已退登该设备', current: !!isCurrent });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
 // 我的云链接列表
@@ -5601,6 +5790,7 @@ app.put('/api/admin/cloud-links/accounts/:username/ban', requireAdminAuth, async
         acc.disabled = req.body.disabled ? 1 : 0;
         acc.updated_at = new Date().toISOString();
         await dbSaveLinkAccount(acc);
+        if (acc.disabled) await dbDeleteCloudLinkSessionsByUser(acc.username); // 封禁即退登全部设备
         res.json({ success: true, message: acc.disabled ? '已封禁' : '已解封' });
     } catch (e) {
         console.error('[云链接] 管理端封禁失败:', e);
@@ -5742,6 +5932,45 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         console.error('[云储存] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
     }
+});
+
+// ===== 云储存账号自助管理（需登录态）=====
+// 自助修改密码：需验证原密码
+app.put('/api/cloud-storage/password', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    try {
+        const oldPassword = ((req.body && req.body.oldPassword) || '').toString();
+        const newPassword = ((req.body && req.body.newPassword) || '').toString();
+        if (!oldPassword || !newPassword) return res.status(400).json({ success: false, message: '请输入原密码和新密码' });
+        if (newPassword.length < 4) return res.status(400).json({ success: false, message: '新密码至少 4 位' });
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(oldPassword, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '原密码错误' });
+        }
+        acc.password_hash = bcrypt.hashSync(newPassword, 10);
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-account-password-change', `云储存账号「${req.cloudUser}」修改密码`, req);
+        res.json({ success: true, message: '密码已修改' });
+    } catch (e) { res.status(500).json({ success: false, message: '修改失败' }); }
+});
+
+// 自助注销账号：需验证密码（级联删除全部云端地图、会话与登录态）
+app.delete('/api/cloud-storage/account', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString();
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(password, acc.password_hash)) {
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        await dbDeleteCloudAccount(req.cloudUser);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-account-delete', `云储存账号「${req.cloudUser}」自行注销`, req);
+        res.json({ success: true, message: '账号已注销' });
+    } catch (e) { res.status(500).json({ success: false, message: '注销失败' }); }
 });
 
 // 获取当前账号的云地图列表（含网格，用于下载）
