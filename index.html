@@ -3374,6 +3374,7 @@
             <div class="main-tabs" id="mainTabs">
                 <button class="main-tab active" data-tab="start" onclick="switchMainTab('start')">开始</button>
                 <button class="main-tab" data-tab="mine" onclick="switchMainTab('mine')">我的</button>
+                <button class="main-tab" data-tab="anticheat" onclick="switchMainTab('anticheat'); loadAntiCheatTab();">🛡️ 反作弊</button>
                 <button class="main-tab" data-tab="more" onclick="switchMainTab('more')">调试</button>
             </div>
             <div class="main-tab-panels">
@@ -3393,8 +3394,14 @@
                     <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
                     <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
                 </div>
+                <div class="main-tab-panel" data-tab="anticheat">
+                    <div id="antiCheatTabBox" style="width:100%; text-align:left; font-size:13px; color:#333; padding:8px 0; box-sizing:border-box;">
+                        <p style="text-align:center; color:#666;">加载中...</p>
+                    </div>
+                </div>
                 <div class="main-tab-panel" data-tab="more">
                     <button class="menu-button" onclick="openConsolePasswordModal()" ontouchstart="openConsolePasswordModal()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🛠️ 控制台</button>
+                    <button class="menu-button" onclick="showClientIdInfo()" style="cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;">🐛 调试信息</button>
                 </div>
             </div>
         </div>
@@ -4359,8 +4366,53 @@ const ANTI_DEBUG = {
     isOpen: false,       // 当前是否判定为「devtools 已打开」
     wasOpen: false,      // 是否曾经被判定为打开（用于「关闭后刷新」）
     reloading: false,
-    hits: 0              // 连续命中次数，需连续 2 次才判定打开（滤掉偶发卡顿误判）
+    hits: 0,             // 连续命中次数，需连续 2 次才判定打开（滤掉偶发卡顿误判）
+    maskObserver: null,  // 监视遮罩被移除/隐藏的 MutationObserver
+    maskShown: false,    // 遮罩当前是否应当存在（用于完整性兜底校验）
+    selfRemoving: false, // 标记「遮罩由本模块主动移除」，避免自查误判为篡改
+    tamperHandled: false // 篡改只处理一次（避免重复上报刷屏）
 };
+
+// ==================== 游戏模式全局封锁（IP 封禁 / 反调试 devtools 打开）====================
+// 关键：以 JS 状态为准，不依赖「可删除的弹窗 DOM」。即便玩家用开发者工具删除封禁/警告弹窗，
+// GAME_LOCK 仍处于锁定态，任何游戏模式入口都会再次拦截，无法绕过。
+const GAME_LOCK = {
+    ipBan: null,     // {reason, expiresAt, term} 非 null 即 IP 被封禁（全部功能禁用）
+    devtools: false  // 检测到开发者工具打开时为 true，禁用单人 / 多人 / 解密 / 自定义游戏
+};
+function isGameModeLocked() {
+    return !!(GAME_LOCK.ipBan || GAME_LOCK.devtools);
+}
+function setIPBanLock(info) {
+    GAME_LOCK.ipBan = info || null;
+    // 立即重建封禁遮罩（即使被删除也会重新挂上，玩家无法靠删弹窗继续游玩）
+    if (GAME_LOCK.ipBan) showIPBannedModal(GAME_LOCK.ipBan);
+}
+function clearIPBanLock() {
+    GAME_LOCK.ipBan = null;
+    hideIPBannedModal();
+}
+function setDevtoolsLock(on) {
+    GAME_LOCK.devtools = !!on;
+}
+// 统一的「游戏模式被封锁」提示：依据封锁原因展示对应反馈
+function showGameModeLockedModal() {
+    if (GAME_LOCK.ipBan) {
+        showIPBannedModal(GAME_LOCK.ipBan);
+    } else if (GAME_LOCK.devtools) {
+        showNotification('🚫 检测到开发者工具已打开，单人 / 多人 / 解密 / 自定义游戏已被禁用。请关闭开发者工具后刷新页面。', 4000);
+    }
+}
+// 封禁生效时强制退出当前对局回到主菜单（封禁遮罩盖在上层），避免删掉弹窗后仍在游戏中继续游玩
+function forceExitToMenuOnBan() {
+    try {
+        const cur = gameState.currentScreen;
+        if (cur === 'multiplayerGame' && typeof disconnectMultiplayer === 'function') {
+            try { disconnectMultiplayer(); } catch (e) {}
+        }
+        showScreen('mainMenu');
+    } catch (e) {}
+}
 
 // 检测开发者工具是否打开：两种独立信号，任一命中即判定为打开
 function antiDebugDetect() {
@@ -4402,12 +4454,89 @@ function antiDebugShowWarning() {
     (document.body || document.documentElement).appendChild(mask);
     // 弹窗期间禁止页面滚动
     try { document.body.style.overflow = 'hidden'; } catch (e) {}
+    ANTI_DEBUG.maskShown = true;
+    antiDebugWatchMask(mask);
 }
 
 function antiDebugHideWarning() {
     const mask = document.getElementById('antiDebugMask');
+    // 先断开监视再移除，否则本模块的合法移除会被自己判成「玩家篡改」
+    ANTI_DEBUG.selfRemoving = true;
+    ANTI_DEBUG.maskShown = false;
+    try {
+        if (ANTI_DEBUG.maskObserver) { ANTI_DEBUG.maskObserver.disconnect(); ANTI_DEBUG.maskObserver = null; }
+    } catch (e) {}
     if (mask) mask.remove();
     try { document.body.style.overflow = ''; } catch (e) {}
+    ANTI_DEBUG.selfRemoving = false;
+}
+
+// 遮罩是否仍真实可见（覆盖大半屏幕且未被隐藏）。取不到样式时返回 true，宁可漏判不误判。
+function antiDebugMaskVisible(mask) {
+    try {
+        if (!mask) return false;
+        if (mask.isConnected === false) return false;
+        const cs = (typeof window.getComputedStyle === 'function') ? window.getComputedStyle(mask) : null;
+        if (!cs) return true;
+        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+        if (parseFloat(cs.opacity) < 0.5) return false;
+        const r = mask.getBoundingClientRect();
+        if (r.width < (window.innerWidth || 0) * 0.5 || r.height < (window.innerHeight || 0) * 0.5) return false;
+        return true;
+    } catch (e) { return true; }
+}
+
+// 监视遮罩：被移除、被改样式/属性隐藏，都视为主动对抗反作弊
+function antiDebugWatchMask(mask) {
+    if (typeof MutationObserver !== 'function') return;
+    try {
+        if (ANTI_DEBUG.maskObserver) { ANTI_DEBUG.maskObserver.disconnect(); ANTI_DEBUG.maskObserver = null; }
+        const parent = mask.parentNode || document.body || document.documentElement;
+        const obs = new MutationObserver(function (records) {
+            if (!ANTI_DEBUG.enabled || ANTI_DEBUG.reloading) return;
+            if (ANTI_DEBUG.selfRemoving) { ANTI_DEBUG.selfRemoving = false; return; }
+            for (let i = 0; i < records.length; i++) {
+                const r = records[i];
+                if (r.type === 'childList' && r.removedNodes) {
+                    for (let j = 0; j < r.removedNodes.length; j++) {
+                        const n = r.removedNodes[j];
+                        if (n === mask || (n && n.id === 'antiDebugMask')) {
+                            antiDebugOnTamper('移除反调试警告遮罩');
+                            return;
+                        }
+                    }
+                } else if (r.type === 'attributes' && r.target === mask) {
+                    if (!antiDebugMaskVisible(mask)) {
+                        antiDebugOnTamper('修改 ' + r.attributeName + ' 隐藏反调试警告遮罩');
+                        return;
+                    }
+                }
+            }
+        });
+        obs.observe(parent, { childList: true });
+        obs.observe(mask, { attributes: true, attributeFilter: ['style', 'class', 'id', 'hidden'] });
+        ANTI_DEBUG.maskObserver = obs;
+    } catch (e) {}
+}
+
+// 遮罩被篡改：上报反作弊（服务端据此按 IP 封禁 5 天），并立即重建遮罩 + 弹出封禁提示
+function antiDebugOnTamper(how) {
+    if (ANTI_DEBUG.tamperHandled) { antiDebugShowWarning(); return; }
+    ANTI_DEBUG.tamperHandled = true;
+    console.warn('[反调试] 检测到篡改行为:', how);
+    // 上报由服务端裁决封禁（封禁时长与 IP 归属均在服务端判定，客户端不可伪造）
+    try {
+        if (typeof reportCheat === 'function') {
+            reportCheat('anti_debug_tamper', '尝试' + how + '以绕过反调试检测');
+        }
+    } catch (e) {}
+    // 重新挂回遮罩，避免通过删除节点继续游戏
+    antiDebugShowWarning();
+    // 本地即时反馈并写入全局封锁状态（服务端随后也会通过 ip-banned 推送权威封禁状态，会覆盖此处）
+    try {
+        const until = new Date(Date.now() + 5 * 86400000).toISOString();
+        setIPBanLock({ reason: '检测到你尝试' + how + '，此行为被判定为对抗反作弊系统', expiresAt: until, term: '5 天' });
+    } catch (e) {}
 }
 
 // 单次状态检查：打开→弹窗+启动无限断点；由开转关→刷新页面
@@ -4422,6 +4551,23 @@ function antiDebugTick() {
     if (open) {
         ANTI_DEBUG.isOpen = true;
         ANTI_DEBUG.wasOpen = true;
+        setDevtoolsLock(true); // devtools 打开 → 禁用单人 / 多人 / 解密 / 自定义游戏
+        // 上报服务端：打开 devtools 即触发真实 IP 封禁（与删遮罩同机制，封禁时长由服务端 IP_BAN_CHEAT_TYPES 决定）
+        // 仅上报一次，避免每 500ms 轮询重复刷服务端
+        if (!ANTI_DEBUG.reportedOpen) {
+            ANTI_DEBUG.reportedOpen = true;
+            try {
+                if (typeof reportCheat === 'function') reportCheat('devtools_open', '检测到开发者工具已打开');
+            } catch (e) {}
+        }
+        // 完整性兜底：遮罩本应存在却消失/被隐藏 —— 即使 MutationObserver 被绕过也能在 500ms 内捕获
+        if (ANTI_DEBUG.maskShown) {
+            const cur = document.getElementById('antiDebugMask');
+            if (!cur || !antiDebugMaskVisible(cur)) {
+                antiDebugOnTamper(cur ? '隐藏反调试警告遮罩' : '移除反调试警告遮罩');
+                return;
+            }
+        }
         antiDebugShowWarning();
         // 启动高频无限断点，持续打断调试
         if (!ANTI_DEBUG.trapTimer) {
@@ -4448,6 +4594,10 @@ function antiDebugStart() {
     ANTI_DEBUG.isOpen = false;
     ANTI_DEBUG.reloading = false;
     ANTI_DEBUG.hits = 0;
+    ANTI_DEBUG.tamperHandled = false;
+    ANTI_DEBUG.maskShown = false;
+    ANTI_DEBUG.selfRemoving = false;
+    ANTI_DEBUG.reportedOpen = false; // 复位 devtools 打开的上报标记，允许新一轮检测时再次上报
 
     // 拦截打开 devtools 的常用快捷键（capture 阶段，早于游戏自身按键逻辑）
     ANTI_DEBUG.keyHandler = function (e) {
@@ -4469,13 +4619,15 @@ function antiDebugStart() {
 
 function antiDebugStop() {
     ANTI_DEBUG.enabled = false;
+    setDevtoolsLock(false); // 关闭反调试时解除 devtools 封锁（关闭 devtools 后页面会刷新，此处为兜底）
     if (ANTI_DEBUG.detectTimer) { clearInterval(ANTI_DEBUG.detectTimer); ANTI_DEBUG.detectTimer = null; }
     if (ANTI_DEBUG.trapTimer) { clearInterval(ANTI_DEBUG.trapTimer); ANTI_DEBUG.trapTimer = null; }
     if (ANTI_DEBUG.keyHandler) { document.removeEventListener('keydown', ANTI_DEBUG.keyHandler, true); ANTI_DEBUG.keyHandler = null; }
     ANTI_DEBUG.isOpen = false;
     ANTI_DEBUG.wasOpen = false;
     ANTI_DEBUG.hits = 0;
-    antiDebugHideWarning();
+    ANTI_DEBUG.tamperHandled = false;
+    antiDebugHideWarning();   // 内部会断开 maskObserver 并复位 maskShown
 }
 
 // 按全局开关启停（管理员实时改开关时会再次调用，需保证幂等）
@@ -4487,7 +4639,7 @@ function applyAntiDevtools(on) {
 // 应用全局功能设定：更新内存开关，并同步隐藏/显示对应 UI 按钮
 function applyGlobalFunctions(settings) {
     if (!settings || typeof settings !== 'object') return;
-    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false };
+    const def = { export: true, importClear: true, multiplayerChat: true, multiplayer: true, debugInfo: true, f12DevConsole: true, ctrlShiftCD: true, antiDevtools: false, showAntiCheatTab: true };
     window.globalFunctionControl = Object.assign({}, def, settings);
     // 记录全局「使用新UI」策略，供主菜单旧/新 UI 决策使用
     window.__globalUiMode = (settings && settings.newUi && typeof settings.newUi === 'object') ? settings.newUi : { mode: 'always', prob: 100 };
@@ -4511,6 +4663,8 @@ function applyGlobalFunctions(settings) {
     if (typeof refreshCloudStorageVisibility === 'function') refreshCloudStorageVisibility();
     // 反调试开关：仅在显式为 true 时启用（默认关闭，避免影响正常调试）
     if (typeof applyAntiDevtools === 'function') applyAntiDevtools(g.antiDevtools === true);
+    // 反作弊标签页可见性（游戏客户端新UI主菜单）
+    if (typeof applyAntiCheatTabVisibility === 'function') applyAntiCheatTabVisibility(g.showAntiCheatTab !== false);
     console.log('[功能设定] 已应用全局功能开关:', window.globalFunctionControl);
 }
 
@@ -4804,15 +4958,16 @@ function connectNotificationSocket() {
             applyBanState(data);
         });
 
-        // 管理员按 IP 封禁：强制弹出全屏封禁框（无法关闭，提示永久封禁）
+        // 管理员按 IP 封禁：写入全局封锁状态 + 强制弹出全屏封禁框 + 退出当前对局（删除弹窗也无法绕过）
         notificationSocket.on('ip-banned', (data) => {
             console.log('[通知] 收到 IP 封禁:', data);
-            showIPBannedModal((data && data.reason) || '');
+            setIPBanLock({ reason: (data && data.reason) || '', expiresAt: (data && data.expiresAt) || null, term: (data && data.term) || '', ip: (data && data.ip) || null, username: (data && data.username) || null, clientId: (data && data.clientId) || null });
+            forceExitToMenuOnBan();
         });
-        // 管理员解除 IP 封禁：关闭全屏封禁框
+        // 管理员解除 IP 封禁：清除全局封锁状态并关闭全屏封禁框
         notificationSocket.on('ip-unbanned', () => {
             console.log('[通知] 收到 IP 解封');
-            hideIPBannedModal();
+            clearIPBanLock();
         });
 
         // 服务器下发的游戏内角色变更（管理员/超级管理员）
@@ -5110,11 +5265,22 @@ function unregisterSelfWithServer() {
 // 关键：使用 REST POST 上报（普通 HTTPS 请求，onrender 等代理下最稳，不依赖 socket.io 传输层，
 //       因为实测 socket.io 的 polling 发送在 onrender 代理下会丢包、websocket 又被部分浏览器/网络挡掉）；
 //       socket.io 仅作为冗余通道（环境支持 websocket 时双写）。clientId 作为稳定标识，与多人 peerId 解耦。
+// 检测当前游戏运行平台：微信小程序内嵌 web-view（URL 带 ?from=miniprogram）→ 'miniprogram'，其余（普通浏览器）→ 'web'
+function getClientPlatform() {
+    try {
+        const p = new URLSearchParams(window.location.search);
+        const from = (p.get('from') || p.get('platform') || '').toLowerCase();
+        if (from === 'miniprogram' || from === 'wechat' || from === 'wx') return 'miniprogram';
+    } catch (e) {}
+    return 'web';
+}
+
 async function registerPlayerOnline() {
     if (!gameState.playerName || !gameState.clientId) return;
     const gs = gameState;
     const payload = {
         id: gs.clientId,
+        platform: getClientPlatform(),
         name: gs.playerName,
         coins: (typeof gs.coins !== 'undefined') ? gs.coins : 0,
         unlockedLevel: (typeof gs.unlockedLevel === 'number') ? gs.unlockedLevel : 1,
@@ -5160,8 +5326,13 @@ async function registerPlayerOnline() {
             if (typeof refreshSuperadminUI === 'function') refreshSuperadminUI();
             // 若管理员已远程覆盖 UI 设置，连接时即采用（避免覆盖玩家本地自行修改的值，仅在有覆盖时应用）
             if (data && data.adminOverridden && data.uiSettings) applyServerUISettings(data.uiSettings);
-            // 若本机 IP 已被封禁，强制弹出全屏封禁框（永久）
-            if (data && data.ipBanned) showIPBannedModal(data.ipBanReason || '');
+            // 若本机 IP 已被封禁，写入全局封锁状态并强制弹出全屏封禁框（限时封禁会显示解封时间）
+            if (data && data.ipBanned) {
+                setIPBanLock({ reason: data.ipBanReason || '', expiresAt: data.ipBanExpiresAt || null, term: data.ipBanTerm || '', ip: data.ipBanIp || null, username: data.ipBanUsername || null, clientId: data.ipBanClientId || null });
+            } else if (GAME_LOCK.ipBan) {
+                // 服务端已不再返回封禁（即已解封），同步清除本地封锁状态
+                clearIPBanLock();
+            }
             console.log('[进度上报] 成功:', JSON.stringify(payload), 'HTTP', resp.status);
         } catch (e) {
             console.warn('[进度上报] 失败:', e && e.message, 'payload=', JSON.stringify(payload));
@@ -5969,30 +6140,136 @@ function showTelemetryExitOverlay() {
     document.body.appendChild(overlay);
 }
 
-// IP 被封禁时的强制全屏遮罩（无法关闭，提示永久封禁）
-function showIPBannedModal(reason) {
+// IP 被封禁时的强制全屏遮罩（无法关闭）
+// info: { reason, expiresAt, term, ip, username, clientId }；expiresAt 为空表示永久封禁；否则显示到期时间与剩余时长
+function showIPBannedModal(info) {
     if (document.getElementById('ipBannedOverlay')) return;
+    info = info || {};
     const overlay = document.createElement('div');
     overlay.id = 'ipBannedOverlay';
-    // 最高层级、阻断一切交互、不可关闭
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,10,16,0.97);z-index:60000;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:24px;';
+    // 最高层级、阻断一切交互、不可关闭；overflow:auto 以便申诉表单可滚动
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,10,16,0.97);z-index:60000;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:24px;overflow:auto;';
     const emoji = document.createElement('div');
     emoji.style.cssText = 'font-size:64px;margin-bottom:16px;';
     emoji.textContent = '🚫';
     const title = document.createElement('h2');
     title.style.cssText = 'color:#ff5252;margin:0 0 12px;font-size:26px;letter-spacing:1px;';
-    title.textContent = '你的IP已被封禁（永久）';
+    title.textContent = info.expiresAt ? '你的IP已被封禁（限时）' : '你的IP已被封禁（永久）';
     const reasonP = document.createElement('p');
     reasonP.style.cssText = 'color:#cfd8dc;margin:0 0 8px;font-size:15px;line-height:1.7;max-width:520px;';
-    reasonP.textContent = reason ? ('封禁理由：' + String(reason)) : '管理员已封禁你的 IP 地址，所有功能均不可用。';
-    const hint = document.createElement('p');
-    hint.style.cssText = 'color:#78909c;margin:8px 0 0;font-size:13px;';
-    hint.textContent = '如有疑问，请联系管理员申诉。';
+    reasonP.textContent = info.reason ? ('封禁理由：' + String(info.reason)) : '管理员已封禁你的 IP 地址，所有功能均不可用。';
     overlay.appendChild(emoji);
     overlay.appendChild(title);
     overlay.appendChild(reasonP);
+    // 限时封禁：额外显示解封时间，让玩家知道何时恢复
+    if (info.expiresAt) {
+        const untilP = document.createElement('p');
+        untilP.style.cssText = 'color:#ffca28;margin:6px 0 0;font-size:14px;font-weight:bold;';
+        let untilText = '';
+        try {
+            const d = new Date(info.expiresAt);
+            if (!isNaN(d.getTime())) {
+                untilText = '解封时间：' + d.getFullYear() + '-' +
+                    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+                    String(d.getDate()).padStart(2, '0') + ' ' +
+                    String(d.getHours()).padStart(2, '0') + ':' +
+                    String(d.getMinutes()).padStart(2, '0');
+            }
+        } catch (e) {}
+        untilP.textContent = untilText + (info.term ? '（' + info.term + '）' : '');
+        if (untilP.textContent.trim()) overlay.appendChild(untilP);
+    }
+    // 身份与封禁状态
+    const expired = info.expiresAt && (function() { try { return new Date(info.expiresAt).getTime() <= Date.now(); } catch (e) { return false; } })();
+    const statusText = expired ? '已到期' : '封禁中';
+    const statusColor = expired ? '#90a4ae' : '#ff5252';
+    const infoBox = document.createElement('div');
+    infoBox.style.cssText = 'margin:14px 0 0;max-width:520px;width:100%;text-align:left;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:10px 14px;font-size:13px;color:#cfd8dc;line-height:1.9;';
+    const uname = info.username || (gameState && gameState.playerName) || '未知';
+    const cid = info.clientId || (gameState && gameState.clientId) || '未知';
+    infoBox.innerHTML =
+        '<div>👤 用户名：' + escapeHtmlSafe(String(uname)) + '</div>' +
+        '<div>🆔 client_id：<span style="font-family:monospace;">' + escapeHtmlSafe(String(cid)) + '</span></div>' +
+        '<div>状态：<span style="color:' + statusColor + ';font-weight:bold;">' + statusText + '</span></div>';
+    overlay.appendChild(infoBox);
+    // 申诉区：内联表单，不依赖可关闭弹窗
+    const appealWrap = document.createElement('div');
+    appealWrap.id = 'ipBanAppealWrap';
+    appealWrap.style.cssText = 'margin-top:16px;width:min(440px,92%);';
+    const appealBtn = document.createElement('button');
+    appealBtn.textContent = '📨 提交申诉';
+    appealBtn.style.cssText = 'padding:10px 22px;background:#1565c0;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;';
+    appealBtn.onclick = function() { renderIPBanAppealForm(appealWrap); };
+    appealWrap.appendChild(appealBtn);
+    overlay.appendChild(appealWrap);
+    const hint = document.createElement('p');
+    hint.style.cssText = 'color:#78909c;margin:12px 0 0;font-size:13px;';
+    hint.textContent = '提交申诉后，管理员审核通过即可解封。';
     overlay.appendChild(hint);
     document.body.appendChild(overlay);
+}
+
+// IP 封禁遮罩内的申诉表单（内联展开，复用 /api/public/ban-appeal）
+function renderIPBanAppealForm(container) {
+    if (!container) return;
+    container.innerHTML = '';
+    const ta = document.createElement('textarea');
+    ta.placeholder = '请说明你的情况（至少 3 个字）…';
+    ta.style.cssText = 'width:100%;height:90px;resize:vertical;padding:8px;border:1px solid #555;border-radius:6px;box-sizing:border-box;font-size:13px;background:#1c1c28;color:#eee;';
+    const tip = document.createElement('div');
+    tip.style.cssText = 'min-height:18px;color:#ff8a80;font-size:12px;margin:6px 0;text-align:left;';
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:10px;justify-content:center;';
+    const submitBtn = document.createElement('button');
+    submitBtn.textContent = '提交申诉';
+    submitBtn.style.cssText = 'padding:9px 18px;background:#1565c0;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = '收起';
+    cancelBtn.style.cssText = 'padding:9px 18px;background:#555;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;';
+    cancelBtn.onclick = function() {
+        const wrap = document.getElementById('ipBanAppealWrap');
+        if (wrap) {
+            wrap.innerHTML = '';
+            const b = document.createElement('button');
+            b.textContent = '📨 提交申诉';
+            b.style.cssText = 'padding:10px 22px;background:#1565c0;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;';
+            b.onclick = function() { renderIPBanAppealForm(wrap); };
+            wrap.appendChild(b);
+        }
+    };
+    submitBtn.onclick = async function() {
+        const msg = ta.value.trim();
+        if (msg.length < 3) { tip.textContent = '申诉说明至少 3 个字'; return; }
+        submitBtn.disabled = true; submitBtn.textContent = '提交中...';
+        const lock = GAME_LOCK.ipBan || {};
+        const payload = {
+            banType: 'ip',
+            target: lock.ip || '',
+            clientId: lock.clientId || (gameState && gameState.clientId) || '',
+            username: lock.username || (gameState && gameState.playerName) || '',
+            message: msg
+        };
+        try {
+            const res = await fetch(`${GAME_SERVER_URL}/api/public/ban-appeal`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error((data && data.message) || '提交失败');
+            tip.style.color = '#66bb6a';
+            tip.textContent = '✅ ' + (data.message || '申诉已提交') + '，管理员审核通过后可解封';
+            submitBtn.textContent = '已提交';
+        } catch (e) {
+            tip.textContent = '提交失败: ' + (e.message || '未知错误');
+            submitBtn.disabled = false; submitBtn.textContent = '提交申诉';
+        }
+    };
+    btnRow.appendChild(submitBtn);
+    btnRow.appendChild(cancelBtn);
+    container.appendChild(ta);
+    container.appendChild(tip);
+    container.appendChild(btnRow);
 }
 function hideIPBannedModal() {
     const ex = document.getElementById('ipBannedOverlay');
@@ -6019,6 +6296,8 @@ function reportTelemetry(event, detail) {
 
 // 检查服务器连接后进入多人游戏
 async function checkServerBeforeMultiplayer() {
+    // IP 封禁 / 反调试(devtools 打开)：禁用多人联机入口
+    if (isGameModeLocked()) { showGameModeLockedModal(); return; }
     // 全局功能设定：多人联机功能被管理员禁用
     if (window.globalFunctionControl && window.globalFunctionControl.multiplayer === false) {
         showMultiplayerDisabledModal('多人联机功能已被管理员禁用，无法进入联机模式。');
@@ -7675,7 +7954,7 @@ function reportCheat(type, detail, mode) {
         fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/report-cheat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ clientId: gameState.clientId, type: type, detail: String(detail || '').slice(0, 500), mode: mode || currentPlayMode() })
+            body: JSON.stringify({ clientId: gameState.clientId, type: type, detail: String(detail || '').slice(0, 500), mode: mode || currentPlayMode(), playerName: gameState.playerName || '' })
         }).catch(() => {});
     } catch (e) {}
 }
@@ -7888,12 +8167,16 @@ gameState.puzzleMode = {
 
 // 解密游戏（主菜单入口）：显示关卡选择页面
 function startPuzzleGame() {
+    // IP 封禁 / 反调试(devtools 打开)：禁用解密游戏入口
+    if (isGameModeLocked()) { showGameModeLockedModal(); return; }
     gameState.puzzleCustomMode = false; // 默认解密关：只生成机关门，不弹机关选择
     showScreen('puzzleLevelSelect');
 }
 
 // 自定义关卡（主菜单入口）：与"现在的解密关卡"一致 —— 进入后弹窗选机关 + 5 种机制
 function startCustomPuzzleGame() {
+    // IP 封禁 / 反调试(devtools 打开)：禁用自定义关卡入口
+    if (isGameModeLocked()) { showGameModeLockedModal(); return; }
     gameState.puzzleCustomMode = true;
     showScreen('puzzleLevelSelect');
 }
@@ -9131,6 +9414,105 @@ function switchMainTab(tab) {
     panels.forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-tab') === tab); });
 }
 
+// 「调试信息」按钮：在「调试」标签页展示当前玩家身份（client_id / 平台），便于在管理后台按 client_id 检索自己
+function showClientIdInfo() {
+    const cid = (gameState && gameState.clientId) || '未知';
+    const platform = getClientPlatform();
+    const platLabel = platform === 'miniprogram' ? '微信小程序' : 'web（浏览器）';
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;';
+    overlay.onclick = function (e) { if (e.target === overlay) document.body.removeChild(overlay); };
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#fff;border-radius:10px;padding:22px 26px;max-width:420px;width:86%;box-shadow:0 8px 30px rgba(0,0,0,.3);font-family:sans-serif;';
+    box.innerHTML =
+        '<div style="font-size:17px;font-weight:bold;margin-bottom:14px;color:#333;">🐛 调试信息</div>' +
+        '<div style="font-size:13px;color:#666;margin-bottom:6px;">当前平台</div>' +
+        '<div style="font-family:monospace;font-size:14px;margin-bottom:14px;color:#1976d2;">' + platLabel + '</div>' +
+        '<div style="font-size:13px;color:#666;margin-bottom:6px;">当前 client_id（可在管理后台按此检索你）</div>' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-bottom:18px;">' +
+            '<code id="debugClientIdVal" style="flex:1;background:#f2f2f2;border:1px solid #ddd;border-radius:6px;padding:8px 10px;font-size:13px;word-break:break-all;color:#333;">' + cid + '</code>' +
+            '<button onclick="(function(){var t=document.getElementById(\'debugClientIdVal\').textContent;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){var b=event.target;b.textContent=\'已复制\';setTimeout(function(){b.textContent=\'复制\';},1200);});}else{var r=document.createRange();r.selectNode(document.getElementById(\'debugClientIdVal\'));var s=window.getSelection();s.removeAllRanges();s.addRange(r);try{document.execCommand(\'copy\');var b=event.target;b.textContent=\'已复制\';setTimeout(function(){b.textContent=\'复制\';},1200);}catch(e){}}})()" style="padding:8px 12px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;white-space:nowrap;">复制</button>' +
+        '</div>' +
+        '<div style="text-align:right;"><button onclick="this.closest(\'div\').parentElement.parentElement.remove();" style="padding:8px 16px;background:#888;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭</button></div>';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+}
+
+// ===== 反作弊标签页：加载被封禁的账户（含已到期）=====
+let __antiCheatBans = [];
+async function loadAntiCheatTab() {
+    const box = document.getElementById('antiCheatTabBox');
+    if (!box) return;
+    // 所有反作弊内容统一包在一个边框容器内
+    const outer = (html) => '<div style="border:1px solid #e0e0e0; border-radius:10px; padding:16px; background:#fff; margin:8px 0;">' + html + '</div>';
+    box.innerHTML = outer('<p style="text-align:center; color:#666;">加载中...</p>');
+    try {
+        const res = await fetch(`${GAME_SERVER_URL}/api/public/recent-bans`);
+        const data = await res.json();
+        if (!data || !data.success || !Array.isArray(data.bans)) throw new Error((data && data.message) || '数据异常');
+        const bans = data.bans;
+        __antiCheatBans = bans;
+        if (bans.length === 0) {
+            box.innerHTML = outer('<p style="text-align:center; color:#28a745;">✅ 当前没有被封禁的账户</p>');
+            return;
+        }
+        box.innerHTML = outer(
+            '<div style="font-weight:bold; margin-bottom:10px; color:#c62828; text-align:center;">🛡️ 被封禁的账户（共 ' + bans.length + ' 条，近 10 天）</div>' +
+            bans.map((b, i) => {
+                const isPerm = b.permanent;
+                const status = b.status || 'active';
+                // 状态标签：已解封（绿）/ 未解封·生效中（红）/ 未解封·已到期（橙）
+                let statusTag, statusColor;
+                if (status === 'unbanned') {
+                    statusTag = '✅ 已解封'; statusColor = '#2e7d32';
+                } else if (status === 'expired') {
+                    statusTag = '⏰ 未解封·已到期'; statusColor = '#ef6c00';
+                } else {
+                    statusTag = '🔒 未解封·生效中'; statusColor = '#c62828';
+                }
+                const exp = (status === 'expired' || status === 'active')
+                    ? (isPerm ? '永久封禁' : ('解封: ' + String(b.expiresAt || '').slice(0, 16)))
+                    : ('解封于: ' + String(b.unbannedAt || '').slice(0, 16));
+                const reason = escapeHtmlSafe(b.reason || '');
+                const date = b.bannedAt ? new Date(b.bannedAt).toLocaleString('zh-CN') : '';
+                const typeLabel = b.type === 'cloud' ? '☁️ 云账号' : '🌐 网络';
+                const identity = []
+                    .concat(b.username ? ['用户名: ' + escapeHtmlSafe(b.username)] : [])
+                    .concat(b.clientId ? ['client_id: ' + escapeHtmlSafe(b.clientId)] : [])
+                    .join(' · ');
+                const unbanNote = (status === 'unbanned' && b.unbannedBy)
+                    ? '<div style="color:#2e7d32; font-size:12px; margin-top:2px;">解封人: ' + escapeHtmlSafe(b.unbannedBy) + '</div>'
+                    : '';
+                return '<div style="border-bottom:1px solid #e0e0e0; padding:10px 0; text-align:center;">' +
+                    '<div style="color:' + statusColor + '; font-weight:bold;">' + typeLabel + ' <span style="background:' + statusColor + '22; color:' + statusColor + '; padding:2px 8px; border-radius:10px; font-size:12px;">' + statusTag + '</span></div>' +
+                    (identity ? '<div style="color:#1565c0; margin:4px 0; font-size:13px;">' + identity + '</div>' : '') +
+                    '<div style="color:#555; margin:2px 0;">' + reason + ' · ' + exp + '</div>' +
+                    '<div style="color:#999; font-size:12px;">' + date + '</div>' +
+                    unbanNote +
+                '</div>';
+            }).join('')
+        );
+    } catch (err) {
+        box.innerHTML = outer('<p style="text-align:center; color:#dc3545;">加载失败: ' + escapeHtmlSafe(err.message || '未知错误') + '</p>');
+    }
+}
+
+// 反作弊标签页可见性：由全局功能设定 showAntiCheatTab 控制（仅影响游戏客户端新UI主菜单）
+function applyAntiCheatTabVisibility(visible) {
+    const tabBtn = document.querySelector('#mainMenu .main-tab[data-tab="anticheat"]');
+    const panel = document.querySelector('#mainMenu .main-tab-panel[data-tab="anticheat"]');
+    const disp = visible ? '' : 'none';
+    if (tabBtn) tabBtn.style.display = disp;
+    if (panel) panel.style.display = disp;
+    // 若当前正停留在被隐藏的标签页，自动跳回「开始」页，避免内容消失
+    if (!visible) {
+        const activePanel = document.querySelector('#mainMenu .main-tab-panel.active');
+        if (activePanel && activePanel.getAttribute('data-tab') === 'anticheat') {
+            try { switchMainTab('start'); } catch (e) {}
+        }
+    }
+}
+
 // ===== 新旧 UI 模式切换 =====
 function getForcedUiMode() {
     const g = window.__globalUiMode || { mode: 'always', prob: 100 };
@@ -9164,6 +9546,10 @@ function applyMainMenuUiMode() {
     if (hint) hint.style.display = (forced === 'new') ? 'none' : '';
     const switchNewBtn = document.querySelector('.ui-switch-new-btn');
     if (switchNewBtn) switchNewBtn.style.display = (forced === 'old') ? 'none' : '';
+    // 切换 UI 模式后，重新应用「反作弊标签页」可见性（受全局功能设定控制）
+    if (typeof applyAntiCheatTabVisibility === 'function') {
+        applyAntiCheatTabVisibility((window.globalFunctionControl && window.globalFunctionControl.showAntiCheatTab) !== false);
+    }
 }
 function setUserUiMode(mode) {
     const forced = getForcedUiMode();
@@ -9178,6 +9564,12 @@ function switchToOldUI() { setUserUiMode('old'); }
 function switchToNewUI() { setUserUiMode('new'); }
 
 function showScreen(screenId) {
+            // IP 封禁 / 反调试(devtools 打开)：拦截全部游戏模式入口，不依赖可删除的弹窗 DOM
+            if (isGameModeLocked() &&
+                (screenId === 'singlePlayerLevelSelect' || screenId === 'multiplayerSetup' || screenId === 'puzzleLevelSelect')) {
+                showGameModeLockedModal();
+                return;
+            }
             // 单人游戏被禁用时，拦截所有进入单人模式的入口（仅调试信息可恢复）
             if (gameState.singlePlayerDisabled &&
                 (screenId === 'singlePlayerLevelSelect' || screenId === 'singlePlayerGame')) {
@@ -14048,7 +14440,21 @@ function handleMapClick(e) {
             `\n错误: 坐标(${x},${y})是墙，无法传送`;
         return;
     }
-    
+
+    // 检查是否是终点：商店道具"传送"不允许直接传送到终点（防秒通关）
+    let _exitCell = null;
+    if (gameState.currentScreen === 'singlePlayerGame') {
+        _exitCell = singlePlayerGame.exit;
+    } else if (gameState.currentScreen === 'multiplayerGame') {
+        _exitCell = gameState.multiplayer.exit;
+    }
+    if (_exitCell && x === _exitCell.x && y === _exitCell.y) {
+        document.getElementById('consoleOutput').innerHTML +=
+            `\n传送道具不能直接传送到终点，请选择其它位置`;
+        showNotification('传送道具不能直接传送到终点！');
+        return; // 不退出选择模式，允许玩家重新选择位置
+    }
+
     // 传送玩家
     const success = teleportPlayer(x, y, gameState.mapSelectionTarget);
     
@@ -19372,8 +19778,8 @@ function cloudSetMsg(t, isErr) {
     el.textContent = t || '';
     el.style.color = isErr ? '#ff8a80' : '#aed581';
 }
-// 云账号被管理员禁用时，隐藏登录/面板区并显示统一提示横幅
-function cloudShowDisabled() {
+// 云账号被管理员禁用/封禁时，隐藏登录/面板区并显示统一提示横幅（优先展示服务端下发的封禁提示，如「你的账号被管理员封禁 5 天」）
+function cloudShowDisabled(msg) {
     const area = document.getElementById('cloudStorageArea');
     if (!area) return;
     window.__cloudDisabled = true;
@@ -19388,11 +19794,11 @@ function cloudShowDisabled() {
         ban.style.cssText = 'padding:18px; background:rgba(244,67,54,0.12); border:1px solid rgba(244,67,54,0.5); border-radius:10px; color:#ff8a80; font-weight:bold; text-align:center; font-size:15px;';
         area.appendChild(ban);
     }
-    ban.textContent = '云空间功能被管理员禁用';
+    ban.textContent = (msg && String(msg).trim()) ? String(msg) : '云空间功能被管理员禁用';
 }
-// 检测响应是否为「账号被禁用」；是则展示横幅并返回 true
+// 检测响应是否为「账号被禁用/封禁」；是则展示横幅并返回 true（横幅文案使用服务端下发的 banMessage）
 function cloudDetectDisabled(r, d) {
-    if (r && r.status === 403 && d && d.disabled) { cloudShowDisabled(); return true; }
+    if (r && r.status === 403 && d && d.disabled) { cloudShowDisabled(d.banMessage); return true; }
     return false;
 }
 // 账号恢复正常后清除横幅并恢复登录/面板显隐（依据当前登录态）
