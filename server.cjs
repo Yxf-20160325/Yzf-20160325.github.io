@@ -6558,10 +6558,11 @@ app.delete('/api/admin/rooms/:roomId/players/:playerId', requireAdminAuth, (req,
 
         const playerSocket = io.sockets.sockets.get(playerToKick.socketId);
         if (playerSocket) {
-            // 通知被踢玩家
+            // 先通知被踢玩家（事件名 kicked-by-admin，客户端收到后会自行停止重连并清理多人状态）
             playerSocket.emit('kicked-by-admin', { message: '你已被管理员踢出。' });
-            // 断开连接
-            playerSocket.disconnect(true);
+            // 延迟断开，确保上面这条事件已送达客户端后再关连接；
+            // 否则 disconnect(true) 会立即销毁 socket，事件可能来不及 flush，客户端永远收不到、也就不会停止重连。
+            setTimeout(() => { try { playerSocket.disconnect(true); } catch (_) {} }, 500);
             console.log(`[Admin] 管理员强制踢出玩家 ${playerToKick.name} (Socket ID: ${playerToKick.socketId})`);
         }
 
