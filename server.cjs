@@ -5598,6 +5598,8 @@ function normalizeLinkMaze(b) {
         teleporters: Array.isArray(b.teleporters) ? b.teleporters : [],
         enemySpeed: Number(b.enemySpeed) || 5,
         showShop: b.showShop !== false,
+        // 机关配置（压力板/联动门/限时门/连锁开关/密码锁等）——若不保留，分享后机关格子会"锁死/无交互"
+        mech: (b.mech && typeof b.mech === 'object') ? b.mech : null,
         author: (b.author || '').toString().slice(0, 64)
     };
 }
