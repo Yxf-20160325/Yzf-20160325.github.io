@@ -356,6 +356,37 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         updated_at VARCHAR(32),
         INDEX idx_popular_updated (updated_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_backup_accounts (
+        username VARCHAR(64) PRIMARY KEY,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        client_id VARCHAR(64),
+        disabled TINYINT(1) NOT NULL DEFAULT 0,
+        banned_until VARCHAR(32),
+        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
+        creator_client_id VARCHAR(64),
+        totp_secret VARCHAR(64),
+        totp_scopes VARCHAR(255)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_backups (
+        username VARCHAR(64) NOT NULL,
+        kind VARCHAR(32) NOT NULL,
+        data JSON,
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        PRIMARY KEY (username, kind),
+        INDEX idx_cloud_backup_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_backup_sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        username VARCHAR(64) NOT NULL,
+        device VARCHAR(128),
+        ip VARCHAR(64),
+        created_at VARCHAR(32),
+        last_active_at VARCHAR(32),
+        INDEX idx_cloud_backup_sess_user (username)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -571,6 +602,8 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     cloudLinkEnabled: true,
     cloud2fa: true,        // 云储存用户是否允许使用二次认证（2FA）
     cloudLink2fa: true,    // 云链接用户是否允许使用二次认证（2FA）
+    backup: true,          // 云备份功能总开关
+    backup2fa: true,       // 云备份用户是否允许使用二次认证（2FA）
     antiDevtools: false,
     showAntiCheatTab: true,
     newUi: { mode: 'probability', prob: 100 }
@@ -5318,7 +5351,7 @@ loadCloudCodes();
 // 任何人打开 <服务器>/m/<code> 即可直接游玩该迷宫（无需登录）。
 // 存储：DB 优先（cloud_link_accounts / cloud_links 表），失败回退 JSON 文件（data/cloud-links.json）。
 const CLOUD_LINKS_FILE = path.join(DATA_DIR, 'cloud-links.json');
-const CLOUD_LINK_MAX_PER_USER = 50; // 每个云链接账号最多可创建的链接数
+const CLOUD_LINK_MAX_PER_USER = 20; // 每个云链接账号最多可创建的链接数
 let cloudLinkAccounts = new Map(); // username -> { username, password_hash, created_at, updated_at, client_id, disabled }
 let cloudLinks = new Map();        // code -> { code, username, name, data, views, disabled, created_at, updated_at }
 function loadCloudLinks() {
@@ -6155,6 +6188,7 @@ function cloudLink2faEnabled() { return globalFunctions.cloudLink2fa !== false; 
 // 根据账号归属模块查对应的 2FA 全局开关（云储存账号带 max_mazes 字段，云链接账号无）
 function twofaGlobalEnabledFor(acc) {
     if (!acc) return true;
+    if (acc.__kind === 'backup') return backup2faEnabled();
     if (acc.max_mazes != null) return cloud2faEnabled();
     return cloudLink2faEnabled();
 }
@@ -6585,6 +6619,9 @@ const _2FA_ACTIVE_TTL = 75 * 1000;       // checkin 心跳有效时长（客户�
 const _2FA_CHALLENGE_TTL = 150 * 1000;   // 抽查任务有效期：2.5 分钟内未提交自动作废
 const _2faActive = new Map();            // key 'cloud:<u>' | 'clink:<u>' → { kind, username, activeAt, has2fa }
 const _2faChallenges = new Map();        // key → { at, expiresAt }（已下发待验证的抽查任务）
+const _2faExpiredFlag = new Map();       // key → 1（最近有抽查任务超时未完成，通知客户端退出登录，一次性消费）
+const _2faCoolDown = new Map();          // key → cooldownUntil（抽查验证通过后的冷却期：5 分钟内不再抽该用户）
+const _2FA_COOLDOWN = 5 * 60 * 1000;     // 抽查冷却期：验证通过后 5 分钟内不抽查
 function _2faKey(kind, username) { return kind + ':' + username; }
 
 // 管理页面心跳（进入管理面板后客户端定期上报；active:false 表示离开）
@@ -6613,23 +6650,31 @@ app.post('/api/cloud-links/2fa/checkin', requireLinkAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
 });
 
-// 客户端轮询：当前账号是否有待处理的抽查任务
+// 客户端轮询：当前账号是否有待处理的抽查任务；若任务已超时未完成 → 返回 expired 标记（客户端据此退出登录）
 app.get('/api/cloud-storage/2fa/challenge', requireCloudAuth, async (req, res) => {
     try {
         const key = _2faKey('cloud', req.cloudUser);
+        let expired = false;
         const c = _2faChallenges.get(key);
-        const active = !!(c && c.expiresAt > Date.now());
-        if (c && c.expiresAt <= Date.now()) _2faChallenges.delete(key);
-        res.json({ success: true, challenge: active });
+        if (c && c.expiresAt <= Date.now()) {
+            _2faChallenges.delete(key);
+            _2faExpiredFlag.set(key, 1); // 超时未完成：通知客户端登出
+        }
+        if (_2faExpiredFlag.has(key)) { _2faExpiredFlag.delete(key); expired = true; }
+        res.json({ success: true, challenge: !!(c && c.expiresAt > Date.now()), expired });
     } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
 });
 app.get('/api/cloud-links/2fa/challenge', requireLinkAuth, async (req, res) => {
     try {
         const key = _2faKey('clink', req.linkUser);
+        let expired = false;
         const c = _2faChallenges.get(key);
-        const active = !!(c && c.expiresAt > Date.now());
-        if (c && c.expiresAt <= Date.now()) _2faChallenges.delete(key);
-        res.json({ success: true, challenge: active });
+        if (c && c.expiresAt <= Date.now()) {
+            _2faChallenges.delete(key);
+            _2faExpiredFlag.set(key, 1);
+        }
+        if (_2faExpiredFlag.has(key)) { _2faExpiredFlag.delete(key); expired = true; }
+        res.json({ success: true, challenge: !!(c && c.expiresAt > Date.now()), expired });
     } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
 });
 
@@ -6649,7 +6694,9 @@ app.post('/api/cloud-storage/2fa/challenge', requireCloudAuth, async (req, res) 
             return res.status(403).json({ success: false, message: '动态码错误，请重新输入（来自你的 2FA 浏览器插件）' });
         }
         _2faChallenges.delete(key);
-        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-spot-check', `云储存账号「${req.cloudUser}」随机抽查验证通过`, req);
+        // 验证通过：进入 5 分钟冷却期，期间不再被随机抽查
+        _2faCoolDown.set(key, Date.now() + _2FA_COOLDOWN);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-spot-check', `云储存账号「${req.cloudUser}」随机抽查验证通过（冷却 5 分钟）`, req);
         res.json({ success: true, message: '抽查验证通过' });
     } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
 });
@@ -6668,7 +6715,9 @@ app.post('/api/cloud-links/2fa/challenge', requireLinkAuth, async (req, res) => 
             return res.status(403).json({ success: false, message: '动态码错误，请重新输入（来自你的 2FA 浏览器插件）' });
         }
         _2faChallenges.delete(key);
-        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-spot-check', `云链接账号「${req.linkUser}」随机抽查验证通过`, req);
+        // 验证通过：进入 5 分钟冷却期，期间不再被随机抽查
+        _2faCoolDown.set(key, Date.now() + _2FA_COOLDOWN);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-spot-check', `云链接账号「${req.linkUser}」随机抽查验证通过（冷却 5 分钟）`, req);
         res.json({ success: true, message: '抽查验证通过' });
     } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
 });
@@ -6681,8 +6730,12 @@ setInterval(() => {
     for (const [key, a] of _2faActive.entries()) {
         if (now - a.activeAt > _2FA_ACTIVE_TTL) { _2faActive.delete(key); continue; } // 心跳过期 = 不在管理页面
         if (!a.has2fa) continue;
+        const cd = _2faCoolDown.get(key);
+        if (cd && cd > now) continue; // 验证通过后 5 分钟冷却期内不抽
         candidates.push(key);
     }
+    // 惰性清理过期冷却记录，避免内存膨胀
+    for (const [key, cd] of _2faCoolDown.entries()) { if (cd <= now) _2faCoolDown.delete(key); }
     if (!candidates.length) return;
     const pick = candidates[Math.floor(Math.random() * candidates.length)];
     _2faChallenges.set(pick, { at: now, expiresAt: now + _2FA_CHALLENGE_TTL });
@@ -6862,6 +6915,445 @@ app.delete('/api/cloud-storage/sessions', requireCloudAuth, async (req, res) => 
         await dbDeleteCloudSessionsExcept(req.cloudUser, req.cloudSessionId);
         res.json({ success: true, message: '已退出其他所有设备' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// ===================================================================
+// 云备份（第三套云端账号体系，与云储存/云链接平行）
+// 独立账号（用户名+密码），可备份 成就信息/统计信息/UI设置，三项各自独立上传/下载并应用到本机。
+// 复用共享 helper：bcrypt / jwt / totp* / pending2fa* / assert2faCode / parseTotpScopes / twofaScopeEnabled / assert2faScope / twofaGlobalEnabledFor / _healAccountColumn。
+// ===================================================================
+const CLOUD_BACKUP_FILE = path.join(DATA_DIR, 'cloud-backups.json');
+let backupAccounts = new Map();
+let backupBackups = new Map(); // username -> { achievements?, statistics?, ui_settings? }  (每项 = { data, updated_at })
+function backupEnabled() { return globalFunctions.backup !== false; }
+function backup2faEnabled() { return globalFunctions.backup2fa !== false; }
+function loadCloudBackups() {
+    try {
+        if (fs.existsSync(CLOUD_BACKUP_FILE)) {
+            const s = JSON.parse(fs.readFileSync(CLOUD_BACKUP_FILE, 'utf8'));
+            if (s && s.accounts) s.accounts.forEach(a => { a.__kind = 'backup'; backupAccounts.set(a.username, a); });
+            if (s && s.backups) s.backups.forEach(b => backupBackups.set(b.username, b.backups));
+        }
+        console.log(`[云备份] 已加载 ${backupAccounts.size} 账号`);
+    } catch (e) { console.error('[云备份] 加载失败:', e.message); }
+}
+function saveCloudBackups() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(CLOUD_BACKUP_FILE, JSON.stringify({
+            accounts: Array.from(backupAccounts.values()).map(a => { const c = Object.assign({}, a); delete c.__kind; return c; }),
+            backups: Array.from(backupBackups.entries()).map(([username, backups]) => ({ username, backups }))
+        }, null, 2));
+    } catch (e) { console.error('[云备份] 保存失败:', e.message); }
+}
+async function dbGetBackupAccount(username) {
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT * FROM cloud_backup_accounts WHERE username=?', [username]); if (rows && rows.length) { const a = rows[0]; a.__kind = 'backup'; return a; } } catch (e) { console.error('[云备份] DB 读账号失败:', e.message); }
+    }
+    const a = backupAccounts.get(username);
+    if (a) a.__kind = 'backup';
+    return a || null;
+}
+async function dbGetBackupAccountByClient(clientId) {
+    if (!clientId) return null;
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT * FROM cloud_backup_accounts WHERE client_id=?', [clientId]); if (rows && rows.length) { const a = rows[0]; a.__kind = 'backup'; return a; } } catch (e) { console.error('[云备份] DB 读账号(clientId)失败:', e.message); }
+    }
+    for (const acc of backupAccounts.values()) { if (acc.client_id === clientId) { acc.__kind = 'backup'; return acc; } }
+    return null;
+}
+async function dbSaveBackupAccount(acc) {
+    const clientId = (acc.client_id != null) ? acc.client_id : null;
+    const disabled = (acc.disabled != null) ? (acc.disabled ? 1 : 0) : 0;
+    const bannedUntil = (acc.banned_until != null && acc.banned_until !== '') ? String(acc.banned_until) : null;
+    const twoFactor = (acc.two_factor_enabled != null) ? (acc.two_factor_enabled ? 1 : 0) : 0;
+    const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
+    const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
+    const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
+    const SQL = 'INSERT INTO cloud_backup_accounts (username, password_hash, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes];
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query(SQL, PARAMS); return; }
+        catch (e) {
+            const m = String(e.message || '');
+            const mm = m.match(/Unknown column ['"]?([a-z_]+)['"]?/i);
+            if (mm && CLOUD_ACCOUNT_COLUMNS[mm[1]] && await _healAccountColumn(mm[1], 'cloud_backup_accounts')) {
+                try { await pool.query(SQL, PARAMS); return; } catch (e2) { console.error('[云备份] 自愈补列后写入仍失败:', e2.message); }
+            }
+            console.error('[云备份] DB 写账号失败:', e.message);
+        }
+    }
+    const c = Object.assign({}, acc, { client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor, creator_client_id: creatorClientId, totp_secret: totpSecret, totp_scopes: totpScopes });
+    c.__kind = 'backup';
+    backupAccounts.set(acc.username, c);
+    saveCloudBackups();
+}
+async function dbAllBackupAccounts() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT username, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled FROM cloud_backup_accounts ORDER BY created_at DESC');
+            if (rows) return rows.map(r => ({ username: r.username, created_at: r.created_at, updated_at: r.updated_at, client_id: r.client_id || null, disabled: !!r.disabled, banned_until: (r.banned_until != null && r.banned_until !== '') ? r.banned_until : null, two_factor_enabled: r.two_factor_enabled ? 1 : 0 }));
+        } catch (e) { console.error('[云备份] DB 读账号列表失败:', e.message); }
+    }
+    return Array.from(backupAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null, disabled: !!a.disabled, banned_until: (a.banned_until != null && a.banned_until !== '') ? a.banned_until : null, two_factor_enabled: (a.two_factor_enabled != null ? (a.two_factor_enabled ? 1 : 0) : 0) }));
+}
+async function dbDeleteBackupAccount(username) {
+    if (backupBackups.has(username)) backupBackups.delete(username);
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_backups WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删备份失败:', e.message); }
+        try { await pool.query('DELETE FROM cloud_backup_sessions WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); }
+        try { await pool.query('DELETE FROM cloud_backup_accounts WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删账号失败:', e.message); }
+    }
+    for (const [k, s] of backupSessions) if (s.username === username) backupSessions.delete(k);
+    saveBackupSessions();
+    backupAccounts.delete(username);
+    saveCloudBackups();
+}
+const BACKUP_KINDS = ['achievements', 'statistics', 'ui_settings'];
+function normalizeBackupData(d) { return (d && typeof d === 'object') ? d : null; }
+async function dbGetBackup(username, kind) {
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT data, updated_at FROM cloud_backups WHERE username=? AND kind=?', [username, kind]); if (rows && rows.length) { let data = rows[0].data; if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = null; } } return { data: normalizeBackupData(data), updated_at: rows[0].updated_at || null }; } } catch (e) { console.error('[云备份] DB 读备份失败:', e.message); }
+    }
+    const b = backupBackups.get(username);
+    const item = b && b[kind];
+    return item ? { data: normalizeBackupData(item.data), updated_at: item.updated_at || null } : { data: null, updated_at: null };
+}
+async function dbUpsertBackup(username, kind, data) {
+    const now = new Date().toISOString();
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('INSERT INTO cloud_backups (username, kind, data, created_at, updated_at) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE data=VALUES(data), updated_at=VALUES(updated_at)', [username, kind, JSON.stringify(data), now, now]); return { updated_at: now }; }
+        catch (e) { console.error('[云备份] DB 写备份失败:', e.message); }
+    }
+    if (!backupBackups.has(username)) backupBackups.set(username, {});
+    backupBackups.get(username)[kind] = { data, updated_at: now };
+    saveCloudBackups();
+    return { updated_at: now };
+}
+async function dbDeleteBackup(username, kind) {
+    if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backups WHERE username=? AND kind=?', [username, kind]); } catch (e) { console.error('[云备份] DB 删备份失败:', e.message); } }
+    const b = backupBackups.get(username);
+    if (b && b[kind]) { delete b[kind]; saveCloudBackups(); }
+}
+async function dbGetBackupKinds(username) {
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT kind, updated_at FROM cloud_backups WHERE username=? ORDER BY updated_at DESC', [username]); if (rows) return rows.map(r => ({ kind: r.kind, updated_at: r.updated_at || null })); } catch (e) { console.error('[云备份] DB 读备份列表失败:', e.message); }
+    }
+    const b = backupBackups.get(username);
+    if (!b) return [];
+    return Object.keys(b).map(k => ({ kind: k, updated_at: (b[k] && b[k].updated_at) || null }));
+}
+// ===== 云备份会话（设备）管理 =====
+const BACKUP_SESSIONS_FILE = path.join(DATA_DIR, 'cloud-backup-sessions.json');
+let backupSessions = new Map();
+async function loadBackupSessions() {
+    try {
+        if (DB_AVAILABLE && pool) { const [rows] = await pool.query('SELECT * FROM cloud_backup_sessions'); if (rows) rows.forEach(s => backupSessions.set(s.id, s)); return; }
+        if (fs.existsSync(BACKUP_SESSIONS_FILE)) { const arr = JSON.parse(fs.readFileSync(BACKUP_SESSIONS_FILE, 'utf8')); if (Array.isArray(arr)) arr.forEach(s => backupSessions.set(s.id, s)); }
+    } catch (e) { console.error('[云备份] 会话载入失败:', e.message); }
+}
+function saveBackupSessions() { try { ensureDataDir(); fs.writeFileSync(BACKUP_SESSIONS_FILE, JSON.stringify(Array.from(backupSessions.values()), null, 2)); } catch (e) { console.error('[云备份] 会话保存失败:', e.message); } }
+async function dbGetBackupSessions(username) {
+    if (DB_AVAILABLE && pool) { try { const [rows] = await pool.query('SELECT * FROM cloud_backup_sessions WHERE username=? ORDER BY last_active_at DESC', [username]); if (rows) { rows.forEach(s => backupSessions.set(s.id, s)); return rows; } } catch (e) { console.error('[云备份] DB 读会话失败:', e.message); } }
+    return Array.from(backupSessions.values()).filter(s => s.username === username).sort((a, b) => (b.last_active_at || '').localeCompare(a.last_active_at || ''));
+}
+async function dbUpsertBackupSession(s) { backupSessions.set(s.id, s); if (DB_AVAILABLE && pool) { try { await pool.query('INSERT INTO cloud_backup_sessions (id, username, device, ip, created_at, last_active_at) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE device=VALUES(device), ip=VALUES(ip), last_active_at=VALUES(last_active_at)', [s.id, s.username, s.device, s.ip, s.created_at, s.last_active_at]); } catch (e) { console.error('[云备份] DB 写会话失败:', e.message); } } }
+async function dbDeleteBackupSession(id) { backupSessions.delete(id); if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backup_sessions WHERE id=?', [id]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } saveBackupSessions(); }
+async function dbDeleteBackupSessionsExcept(username, exceptId) { if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backup_sessions WHERE username=? AND id<>?', [username, exceptId]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } for (const [k, s] of backupSessions) if (s.username === username && k !== exceptId) backupSessions.delete(k); saveBackupSessions(); }
+async function dbDeleteBackupSessionsByUser(username) { if (!username) return; if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM cloud_backup_sessions WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } for (const [k, s] of backupSessions) if (s.username === username) backupSessions.delete(k); saveBackupSessions(); }
+function makeBackupSession(username, device, ip) { const id = genSessionId(); const now = new Date().toISOString(); const s = { id, username, device: (device || '未知设备').toString().slice(0, 128), ip: (ip || '').toString().slice(0, 64), created_at: now, last_active_at: now }; dbUpsertBackupSession(s).catch(e => console.error('[云备份] 创建会话失败:', e.message)); return s; }
+function touchBackupSession(sess) { sess.last_active_at = new Date().toISOString(); const now = Date.now(); if (!sess._lastTouch || now - sess._lastTouch > 60000) { sess._lastTouch = now; dbUpsertBackupSession(sess).catch(() => {}); } }
+loadCloudBackups();
+loadBackupSessions().catch(e => console.error('[云备份] 会话载入失败:', e.message));
+
+// 云备份鉴权
+async function requireBackupAuth(req, res, next) {
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, message: '未登录' });
+    try {
+        const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        if (decoded.type !== 'backup' || !decoded.username) return res.status(401).json({ success: false, message: '无效的登录令牌' });
+        req.backupUser = decoded.username;
+        const acc = await dbGetBackupAccount(decoded.username);
+        if (acc && acc.disabled) {
+            if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc); await dbUpdateBanHistoryUnban('backup', decoded.username, 'system'); }
+            else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
+        }
+        const sid = decoded.sid;
+        if (sid) { const sess = backupSessions.get(sid); if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' }); touchBackupSession(sess); req.backupSessionId = sid; }
+        else { req.backupSessionId = null; }
+        next();
+    } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
+}
+
+// 公开：云备份功能是否开启
+app.get('/api/cloud-backup/enabled', (req, res) => { res.json({ success: true, enabled: backupEnabled() }); });
+
+// 注册
+app.post('/api/cloud-backup/register', async (req, res) => {
+    try {
+        if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        if (!username || !password) return res.status(400).json({ success: false, message: '用户名和密码不能为空' });
+        if (username.length > 64 || password.length < 4) return res.status(400).json({ success: false, message: '用户名过长或密码至少 4 位' });
+        const existing = await dbGetBackupAccount(username);
+        if (existing) return res.status(409).json({ success: false, message: '该用户名已被注册' });
+        const password_hash = bcrypt.hashSync(password, 10);
+        const now = new Date().toISOString();
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        const acc = { username, password_hash, created_at: now, updated_at: now, client_id: clientId, creator_client_id: clientId };
+        await dbSaveBackupAccount(acc);
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const ip = getClientIp(req);
+        const sess = makeBackupSession(username, device, ip);
+        const token = jwt.sign({ username, type: 'backup', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
+    } catch (e) { console.error('[云备份] 注册失败:', e); res.status(500).json({ success: false, message: '注册失败' }); }
+});
+
+// 登录
+app.post('/api/cloud-backup/login', async (req, res) => {
+    try {
+        if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        const acc = await dbGetBackupAccount(username);
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        if (acc.disabled) {
+            if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc); await dbUpdateBanHistoryUnban('backup', username, 'system'); }
+            else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
+        }
+        if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
+            const code = read2faCode(req);
+            if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
+            const deny = assert2faCode(acc, code);
+            if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+        }
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        if (clientId && acc.client_id !== clientId) { acc.client_id = clientId; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc); }
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const ip = getClientIp(req);
+        const sess = makeBackupSession(username, device, ip);
+        const token = jwt.sign({ username, type: 'backup', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
+    } catch (e) { console.error('[云备份] 登录失败:', e); res.status(500).json({ success: false, message: '登录失败' }); }
+});
+
+// 修改密码
+app.put('/api/cloud-backup/password', requireBackupAuth, async (req, res) => {
+    try {
+        const acc = await dbGetBackupAccount(req.backupUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const deny = assert2faScope(acc, 'account', read2faCode(req));
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        const oldP = (req.body.oldPassword || '').toString();
+        const newP = (req.body.newPassword || '').toString();
+        if (!bcrypt.compareSync(oldP, acc.password_hash)) return res.status(400).json({ success: false, message: '原密码错误' });
+        if (newP.length < 4) return res.status(400).json({ success: false, message: '新密码至少 4 位' });
+        acc.password_hash = bcrypt.hashSync(newP, 10);
+        acc.updated_at = new Date().toISOString();
+        await dbSaveBackupAccount(acc);
+        appendAudit(req.backupUser || 'backup', 'cloud-backup-password', `云备份账号「${req.backupUser}」修改密码`, req);
+        res.json({ success: true, message: '密码已修改' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 注销账号
+app.delete('/api/cloud-backup/account', requireBackupAuth, async (req, res) => {
+    try {
+        const acc = await dbGetBackupAccount(req.backupUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const deny = assert2faScope(acc, 'account', read2faCode(req));
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        await dbDeleteBackupAccount(req.backupUser);
+        appendAudit(req.backupUser || 'backup', 'cloud-backup-account-delete', `注销云备份账号「${req.backupUser}」`, req);
+        res.json({ success: true, message: '账号已注销' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 当前账号信息
+app.get('/api/cloud-backup/me', requireBackupAuth, async (req, res) => {
+    try { const acc = await dbGetBackupAccount(req.backupUser); const kinds = await dbGetBackupKinds(req.backupUser); res.json({ success: true, username: req.backupUser, twoFactor: !!acc.two_factor_enabled, backups: kinds }); }
+    catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 2FA 状态 / 作用范围
+app.get('/api/cloud-backup/2fa', requireBackupAuth, async (req, res) => { try { const acc = await dbGetBackupAccount(req.backupUser); res.json({ success: true, enabled: !!(acc && acc.two_factor_enabled) }); } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); } });
+app.get('/api/cloud-backup/2fa/scopes', requireBackupAuth, async (req, res) => {
+    try { const acc = await dbGetBackupAccount(req.backupUser); const enabled = !!(acc && acc.two_factor_enabled); const scopes = {}; TOTP_SCOPES.forEach(s => { scopes[s] = enabled && twofaScopeEnabled(acc, s); }); res.json({ success: true, enabled, login: true, scopes }); }
+    catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+app.put('/api/cloud-backup/2fa/scopes', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    if (!backup2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const acc = await dbGetBackupAccount(req.backupUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.status(400).json({ success: false, message: '未开启二次认证，无需配置' });
+        const deny = assert2faCode(acc, read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        const reqScopes = (req.body && req.body.scopes) || {}; const list = TOTP_SCOPES.filter(s => !!reqScopes[s]);
+        acc.totp_scopes = (list.length === TOTP_SCOPES.length) ? null : JSON.stringify(list); acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc);
+        const scopes = {}; TOTP_SCOPES.forEach(s => { scopes[s] = twofaScopeEnabled(acc, s); });
+        res.json({ success: true, enabled: true, login: true, scopes });
+    } catch (e) { res.status(500).json({ success: false, message: '保存失败' }); }
+});
+app.get('/api/cloud-backup/2fa/setup', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    if (!backup2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const secret = totpGenSecret(); const label = encodeURIComponent('迷宫探险:' + req.backupUser); const issuer = encodeURIComponent('迷宫探险');
+        const otpauthUri = 'otpauth://totp/' + label + '?secret=' + secret + '&issuer=' + issuer + '&algorithm=SHA1&digits=6&period=30';
+        let qr = ''; if (typeof QRCode !== 'undefined' && QRCode) { try { qr = await QRCode.toDataURL(otpauthUri); } catch (e) { qr = ''; } }
+        res.json({ success: true, secret, otpauthUri, qr });
+    } catch (e) { res.status(500).json({ success: false, message: '生成失败' }); }
+});
+app.put('/api/cloud-backup/2fa', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString(); const enabled = !!((req.body && req.body.enabled));
+        if (enabled && !backup2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认操作' });
+        const acc = await dbGetBackupAccount(req.backupUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(password, acc.password_hash)) return res.status(400).json({ success: false, message: '密码错误' });
+        if (enabled) {
+            const secret = ((req.body && req.body.secret) || '').toString().trim(); const code = ((req.body && req.body.code) || '').toString().trim();
+            if (!secret) return res.status(400).json({ success: false, message: '缺少 TOTP 密钥' });
+            if (!totpVerify(secret, code)) return res.status(400).json({ success: false, message: '动态验证码错误，请确认浏览器插件时间已同步' });
+            pending2faPut('backup', req.backupUser, secret, code);
+            return res.json({ success: true, enabled: false, pendingConfirm: true, message: '绑定成功，请等待插件刷新出下一个验证码后再输入一次以完成确认' });
+        }
+        pending2faDrop('backup', req.backupUser); acc.totp_secret = null; acc.two_factor_enabled = 0; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc);
+        appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-change', `云备份账号「${req.backupUser}」二次认证关闭`, req);
+        res.json({ success: true, enabled: false, message: '已关闭二次认证' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.post('/api/cloud-backup/2fa/confirm', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    if (!backup2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const code = ((req.body && req.body.code) || '').toString().trim(); const acc = await dbGetBackupAccount(req.backupUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const pend = pending2faTake('backup', req.backupUser); if (!pend) return res.status(400).json({ success: false, expired: true, enabled: false, message: '绑定已超时失效，请重新开启二次认证' });
+        if (code && code === pend.bindCode) return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
+        if (!totpVerify(pend.secret, code)) { pending2faDrop('backup', req.backupUser); appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-confirm-fail', `云备份账号「${req.backupUser}」二次认证确认失败，绑定已作废`, req); return res.status(400).json({ success: false, disabled: true, enabled: false, message: '确认验证失败，已自动关闭二次认证，请重新开启' }); }
+        pending2faDrop('backup', req.backupUser); acc.totp_secret = pend.secret; acc.two_factor_enabled = 1; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc);
+        appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-change', `云备份账号「${req.backupUser}」二次认证开启（已通过二次确认）`, req);
+        res.json({ success: true, enabled: true, message: '二次认证已开启' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.post('/api/cloud-backup/verify', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    try { const password = ((req.body && req.body.password) || '').toString(); const acc = await dbGetBackupAccount(req.backupUser); if (!acc || !bcrypt.compareSync(password, acc.password_hash)) return res.status(400).json({ success: false, message: '密码错误' }); res.json({ success: true }); }
+    catch (e) { res.status(500).json({ success: false, message: '验证失败' }); }
+});
+// 安全抽查心跳 / 挑战
+app.post('/api/cloud-backup/2fa/checkin', requireBackupAuth, async (req, res) => {
+    try { const active = !((req.body && req.body.active === false)); const key = _2faKey('backup', req.backupUser);
+        if (active) { const acc = await dbGetBackupAccount(req.backupUser); const has2fa = !!(acc && acc.two_factor_enabled && acc.totp_secret && twofaGlobalEnabledFor(acc)); _2faActive.set(key, { kind: 'backup', username: req.backupUser, activeAt: Date.now(), has2fa }); }
+        else { _2faActive.delete(key); } res.json({ success: true }); } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.get('/api/cloud-backup/2fa/challenge', requireBackupAuth, async (req, res) => {
+    try { const key = _2faKey('backup', req.backupUser); let expired = false; const c = _2faChallenges.get(key);
+        if (c && c.expiresAt <= Date.now()) { _2faChallenges.delete(key); _2faExpiredFlag.set(key, 1); }
+        if (_2faExpiredFlag.has(key)) { _2faExpiredFlag.delete(key); expired = true; }
+        res.json({ success: true, challenge: !!(c && c.expiresAt > Date.now()), expired }); } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.post('/api/cloud-backup/2fa/challenge', requireBackupAuth, async (req, res) => {
+    try { const key = _2faKey('backup', req.backupUser); const c = _2faChallenges.get(key);
+        if (!c || c.expiresAt <= Date.now()) { _2faChallenges.delete(key); return res.status(400).json({ success: false, expired: true, message: '抽查已过期，无需验证' }); }
+        const acc = await dbGetBackupAccount(req.backupUser);
+        if (!acc || !acc.two_factor_enabled || !acc.totp_secret) { _2faChallenges.delete(key); return res.json({ success: true, message: '未开启二次认证，跳过抽查' }); }
+        if (!totpVerify(acc.totp_secret, read2faCode(req) || '')) { appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-spot-check-fail', `云备份账号「${req.backupUser}」随机抽查验证失败`, req); return res.status(403).json({ success: false, message: '动态码错误，请重新输入（来自你的 2FA 浏览器插件）' }); }
+        _2faChallenges.delete(key); _2faCoolDown.set(key, Date.now() + _2FA_COOLDOWN); appendAudit(req.backupUser || 'backup', 'cloud-backup-2fa-spot-check', `云备份账号「${req.backupUser}」随机抽查验证通过（冷却 5 分钟）`, req);
+        res.json({ success: true, message: '抽查验证通过' }); } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.post('/api/cloud-backup/authorize', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    try { const acc = await dbGetBackupAccount(req.backupUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.json({ success: true, required: false });
+        const deny = assert2faScope(acc, 'authorize', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        res.json({ success: true, required: true }); } catch (e) { res.status(500).json({ success: false, message: '授权校验失败' }); }
+});
+
+// 备份数据：三项各自独立（achievements / statistics / ui_settings）
+app.get('/api/cloud-backup/backups', requireBackupAuth, async (req, res) => { try { const kinds = await dbGetBackupKinds(req.backupUser); res.json({ success: true, backups: kinds }); } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); } });
+app.put('/api/cloud-backup/backup/:kind', requireBackupAuth, async (req, res) => {
+    if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
+    try {
+        const kind = (req.params.kind || '').toString();
+        if (BACKUP_KINDS.indexOf(kind) < 0) return res.status(400).json({ success: false, message: '不支持的备份类型' });
+        const data = (req.body && req.body.data); if (data == null) return res.status(400).json({ success: false, message: '缺少备份数据' });
+        const r = await dbUpsertBackup(req.backupUser, kind, data);
+        appendAudit(req.backupUser || 'backup', 'cloud-backup-upload', `云备份账号「${req.backupUser}」上传备份：${kind}`, req);
+        res.json({ success: true, kind, updated_at: r.updated_at, message: '备份已上传' });
+    } catch (e) { res.status(500).json({ success: false, message: '上传失败' }); }
+});
+app.get('/api/cloud-backup/backup/:kind', requireBackupAuth, async (req, res) => {
+    try {
+        const kind = (req.params.kind || '').toString();
+        if (BACKUP_KINDS.indexOf(kind) < 0) return res.status(400).json({ success: false, message: '不支持的备份类型' });
+        const r = await dbGetBackup(req.backupUser, kind);
+        if (!r.data) return res.status(404).json({ success: false, message: '该备份不存在' });
+        res.json({ success: true, kind, data: r.data, updated_at: r.updated_at });
+    } catch (e) { res.status(500).json({ success: false, message: '下载失败' }); }
+});
+app.delete('/api/cloud-backup/backup/:kind', requireBackupAuth, async (req, res) => {
+    try { const kind = (req.params.kind || '').toString(); if (BACKUP_KINDS.indexOf(kind) < 0) return res.status(400).json({ success: false, message: '不支持的备份类型' });
+        await dbDeleteBackup(req.backupUser, kind); res.json({ success: true, message: '备份已删除' }); } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+
+// 会话管理
+app.get('/api/cloud-backup/sessions', requireBackupAuth, async (req, res) => {
+    try { const acc = await dbGetBackupAccount(req.backupUser); const deny = assert2faScope(acc, 'sessions', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        const list = await dbGetBackupSessions(req.backupUser); const out = list.map(s => ({ id: s.id, device: s.device || '未知设备', ip: s.ip || '', current: s.id === req.backupSessionId, created_at: s.created_at, last_active_at: s.last_active_at }));
+        res.json({ success: true, sessions: out }); } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+app.delete('/api/cloud-backup/sessions/:id', requireBackupAuth, async (req, res) => {
+    try { const acc = await dbGetBackupAccount(req.backupUser); const deny = assert2faScope(acc, 'sessions', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        const id = req.params.id; const list = await dbGetBackupSessions(req.backupUser); const target = list.find(s => s.id === id); if (!target) return res.status(404).json({ success: false, message: '会话不存在' });
+        await dbDeleteBackupSession(id); res.json({ success: true, message: id === req.backupSessionId ? '已退出当前设备' : '已退出该设备' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.delete('/api/cloud-backup/sessions', requireBackupAuth, async (req, res) => {
+    try { const acc = await dbGetBackupAccount(req.backupUser); const deny = assert2faScope(acc, 'sessions', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        await dbDeleteBackupSessionsExcept(req.backupUser, req.backupSessionId); res.json({ success: true, message: '已退出其他所有设备' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// ===== 云备份管理（管理员）=====
+app.get('/api/admin/cloud-backup/accounts', requireAdminAuth, async (req, res) => {
+    try {
+        const accounts = await dbAllBackupAccounts(); const q = ((req.query.q || '').toString().trim()).toLowerCase(); let list = accounts;
+        if (q) list = list.filter(a => (a.username || '').toLowerCase().includes(q) || (a.client_id || '').toLowerCase().includes(q));
+        const out = await Promise.all(list.map(async a => { let backupCount = 0; let lastIps = []; try { backupCount = (await dbGetBackupKinds(a.username)).length; } catch (e) {} try { const sessions = await dbGetBackupSessions(a.username); const seen = new Set(); for (const s of sessions) { const ip = s.ip && typeof s.ip === 'string' ? s.ip.trim() : ''; if (ip && !seen.has(ip)) { seen.add(ip); lastIps.push(ip); } } } catch (e) {} return { username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null, disabled: !!a.disabled, bannedUntil: (a.banned_until != null && a.banned_until !== '') ? a.banned_until : null, twoFactor: !!a.two_factor_enabled, backupCount, lastIps }; }));
+        res.json({ success: true, accounts: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取账号列表失败' }); }
+});
+app.delete('/api/admin/cloud-backup/accounts/:username', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetBackupAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        await dbDeleteBackupAccount(username); appendAudit('admin', 'cloud-backup-account-delete', `删除云备份账号「${username}」及其全部备份/会话`, req); res.json({ success: true, message: '已删除账号及其备份/会话' }); } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+app.put('/api/admin/cloud-backup/accounts/:username/ban', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetBackupAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const disabled = !!(req.body && req.body.disabled); acc.disabled = disabled; acc.updated_at = new Date().toISOString();
+        if (disabled) { const bu = (req.body && req.body.bannedUntil); acc.banned_until = (bu && String(bu).trim() !== '') ? String(bu) : null; await dbDeleteBackupSessionsByUser(username); }
+        else { acc.banned_until = null; }
+        await dbSaveBackupAccount(acc); const actorName = (req.admin && req.admin.name) || 'admin';
+        if (disabled) { await dbSaveBanHistory({ id: 'bh_backup_' + username + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6), type: 'backup', target: username, username: username, clientId: acc.client_id || null, reason: acc.banned_until ? ('限时封禁至 ' + acc.banned_until) : '永久封禁', bannedAt: acc.updated_at, expiresAt: acc.banned_until || null, unbannedAt: null, unbannedBy: null, bannedBy: actorName }); }
+        else { await dbUpdateBanHistoryUnban('backup', username, actorName); }
+        appendAudit('admin', 'cloud-backup-account-ban', `云备份账号「${username}」${disabled ? (acc.banned_until ? '限时封禁至 ' + acc.banned_until : '永久封禁') : '解封'}，并已退登其全部设备`, req);
+        res.json({ success: true, disabled, bannedUntil: acc.banned_until || null, message: disabled ? (acc.banned_until ? ('已封禁该账号（至 ' + acc.banned_until + '），并已退登其全部设备') : '已永久封禁该账号，并已退登其全部设备') : '已解封该账号' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.put('/api/admin/cloud-backup/accounts/:username/password', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetBackupAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const password = (req.body && req.body.password || '').toString(); if (password.length < 4) return res.status(400).json({ success: false, message: '密码至少 4 位' });
+        acc.password_hash = bcrypt.hashSync(password, 10); acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc); appendAudit('admin', 'cloud-backup-account-password', `重置云备份账号「${username}」的密码`, req); res.json({ success: true, message: '密码已修改' }); } catch (e) { res.status(500).json({ success: false, message: '修改失败' }); }
+});
+app.put('/api/admin/cloud-backup/accounts/:username/2fa', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetBackupAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (req.body && req.body.enabled === true) return res.status(400).json({ success: false, message: '开启二次认证必须由用户本人操作' });
+        acc.two_factor_enabled = 0; acc.totp_secret = null; acc.totp_scopes = null; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc);
+        appendAudit('admin', 'cloud-backup-2fa-admin-disable', `管理员关闭云备份账号「${username}」的二次认证`, req); res.json({ success: true, enabled: false, message: '已关闭该账号的二次认证' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
 // ===== 云储存管理（管理员专用）=====
