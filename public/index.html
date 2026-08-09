@@ -7,7 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>迷宫冒险 - 1.15.5</title>
+    <title>迷宫冒险 - 1.15.7</title>
     <link rel="icon" href="favicon.ico" type="image/x-icon">
     <style>
         html {
@@ -3397,12 +3397,12 @@
                     <button class="menu-button" onclick="startPuzzleGame()">🔐 解密游戏</button>
                     <button class="menu-button" onclick="startCustomPuzzleGame()">🧩 自定义关卡</button>
                     <button class="menu-button" onclick="showScreen('dailyChallengeScreen')">📅 每日挑战</button>
-                    <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
                 </div>
                 <div class="main-tab-panel" data-tab="mine">
                     <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
                     <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
                     <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
+                    <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
                     <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
                 </div>
                 <div class="main-tab-panel" data-tab="cloud">
@@ -3543,11 +3543,11 @@
                 <div class="achievement-status" id="status3">未完成</div>
             </div>
             
-            <!-- 隐藏成就：伟大的国家，勿忘国耻 -->
+            <!-- 隐藏成就：伟大的国家 -->
             <div class="achievement-item hidden" id="achievement4">
                 <div class="achievement-icon">🇨🇳</div>
                 <div class="achievement-info">
-                    <h3>伟大的国家，勿忘国耻</h3>
+                    <h3>伟大的国家</h3>
                     <p>使用中国国旗表情包</p>
                     <div class="achievement-progress">
                         <div class="progress-bar">
@@ -3573,6 +3573,22 @@
                     </div>
                 </div>
                 <div class="achievement-status" id="status5">未完成</div>
+            </div>
+            
+            <!-- 成就6：云储存 -->
+            <div class="achievement-item" id="achievement6">
+                <div class="achievement-icon">☁️</div>
+                <div class="achievement-info">
+                    <h3>云储存</h3>
+                    <p>登录云储存账号</p>
+                    <div class="achievement-progress">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress6"></div>
+                        </div>
+                        <span id="progressText6">0/1</span>
+                    </div>
+                </div>
+                <div class="achievement-status" id="status6">未完成</div>
             </div>
         </div>
     </div>
@@ -5130,7 +5146,10 @@ function connectNotificationSocket() {
                     if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('迷宫大师', '管理员已为你解锁此成就！');
                 }
                 if (data.achievements.chineseEmojiUsed && gameState.achievements && gameState.achievements.chineseEmojiUsed) {
-                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('伟大的国家，勿忘国耻', '管理员已为你解锁此成就！');
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('伟大的国家', '管理员已为你解锁此成就！');
+                }
+                if (data.achievements.cloudStorageLoggedIn && gameState.achievements && gameState.achievements.cloudStorageLoggedIn) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('云储存', '管理员已为你解锁此成就！');
                 }
                 if (data.achievements.multiplayerWins >= 10) {
                     if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('社交达人', '管理员已为你解锁此成就！');
@@ -5805,7 +5824,7 @@ async function reportMyCoins() {
                 completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
                 puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
                 customCompletedLevels: Array.isArray(gameState.customCompletedLevels) ? gameState.customCompletedLevels : [],
-                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false }
+                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false }
             })
         });
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
@@ -5837,7 +5856,7 @@ async function fetchMyAchievements() {
 // revoked：被管理员撤销的成就键数组，需将本地对应值强制清零
 function applyServerAchievements(serverAch, revoked) {
     if (!serverAch || typeof serverAch !== 'object') return;
-    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false };
     let changed = false;
     // 布尔型成就：取并集（任一端为 true 即 true）
     if (serverAch.allLevelsCompleted && !gameState.achievements.allLevelsCompleted) {
@@ -5852,6 +5871,10 @@ function applyServerAchievements(serverAch, revoked) {
         gameState.achievements.puzzleMaster = true;
         changed = true;
     }
+    if (serverAch.cloudStorageLoggedIn && !gameState.achievements.cloudStorageLoggedIn) {
+        gameState.achievements.cloudStorageLoggedIn = true;
+        changed = true;
+    }
     // 计数型成就：取较大值
     if (typeof serverAch.multiplayerWins === 'number' && serverAch.multiplayerWins > (gameState.achievements.multiplayerWins || 0)) {
         gameState.achievements.multiplayerWins = serverAch.multiplayerWins;
@@ -5864,7 +5887,7 @@ function applyServerAchievements(serverAch, revoked) {
     // 管理员撤销：将对应成就强制清零
     if (Array.isArray(revoked) && revoked.length) {
         revoked.forEach(k => {
-            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed' || k === 'puzzleMaster') {
+            if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed' || k === 'puzzleMaster' || k === 'cloudStorageLoggedIn') {
                 if (gameState.achievements[k]) { gameState.achievements[k] = false; changed = true; }
             } else if (k === 'multiplayerWins' || k === 'trapHits') {
                 if ((gameState.achievements[k] || 0) !== 0) { gameState.achievements[k] = 0; changed = true; }
@@ -6762,8 +6785,8 @@ function showMyInfoModal() {
     nameLine.style.cssText = 'color:#4fc3f7;font-weight:bold;';
     nameLine.textContent = gameState.playerName;
     const bioLine = document.createElement('div');
-    bioLine.style.cssText = 'color:#cfd8dc;white-space:pre-wrap;word-break:break-word;';
-    bioLine.textContent = (hp.bio && hp.bio.trim()) ? ('简介：' + hp.bio) : '（未设置简介）';
+    bioLine.style.cssText = 'color:#90a4ae;white-space:pre-wrap;word-break:break-word;';
+    bioLine.textContent = '（主页简介已隐藏，仅在编辑主页时可见）';
     infoSpan.appendChild(nameLine);
     infoSpan.appendChild(bioLine);
     homePreview.appendChild(avatarSpan);
@@ -11726,7 +11749,7 @@ function showScreen(screenId) {
                 gameState.coins += 50;
                 saveGameData();
                 updateAchievementProgress();
-                showAchievementUnlocked('伟大的国家，勿忘国耻', '使用中国国旗表情包，获得50金币奖励');
+                showAchievementUnlocked('伟大的国家', '使用中国国旗表情包，获得50金币奖励');
             }
             
             toggleEmojiPicker();
@@ -15869,10 +15892,10 @@ function ensureExitPath(maze, random) {
     }
 }
 
-// 找到关键路径（从起点到终点的最短路径）
-function findCriticalPath(maze) {
+// 找到关键路径（从起点到终点的最短路径）；customExit 可选：指定终点（联机配合门用它保证与游戏出口一致）
+function findCriticalPath(maze, customExit) {
     const start = {x: 1, y: 1};
-    const exit = findExitPosition(maze);
+    const exit = customExit || findExitPosition(maze);
     
     // BFS寻找最短路径
     const visited = Array(maze.length).fill().map(() => Array(maze[0].length).fill(false));
@@ -15898,7 +15921,7 @@ function findCriticalPath(maze) {
             
             if (nx >= 0 && nx < maze[0].length && 
                 ny >= 0 && ny < maze.length && 
-                !visited[ny][nx] && maze[ny][nx] !== 1) {
+                !visited[ny][nx] && maze[ny][nx] !== 1 && maze[ny][nx] !== 2) {
                 visited[ny][nx] = true;
                 queue.push({x: nx, y: ny, path: newPath});
             }
@@ -16444,7 +16467,7 @@ function drawSinglePlayerMaze() {
 function saveGameData() {
     try {
         // 确保gameState对象及其属性存在
-        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false };
+        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false };
         if (!gameState.gameStats) gameState.gameStats = { timeChallengeBest: 0, puzzleLevelsCompleted: 0, totalLevelsCompleted: 0, totalPlayTime: 0, totalMoves: 0, totalTrapsTriggered: 0, totalCoinsCollected: 0 };
         if (!gameState.settings) gameState.settings = { autoSave: true };
         
@@ -19961,6 +19984,16 @@ function cloudClearDisabled() {
     if (lb) lb.classList.toggle('hidden', !!token);
     if (pb) pb.classList.toggle('hidden', !token);
 }
+// 成就：登录云储存账号（普通登录 / 2FA 登录 / 注册并登录 均可触发）
+function unlockCloudStorageAchievement() {
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false };
+    if (!gameState.achievements.cloudStorageLoggedIn) {
+        gameState.achievements.cloudStorageLoggedIn = true;
+        try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch (e) {}
+        if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
+        if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('云储存', '登录云储存账号！');
+    }
+}
 async function cloudRegister() {
     const username = (document.getElementById('cloudUser').value || '').trim();
     const password = document.getElementById('cloudPass').value || '';
@@ -19975,6 +20008,7 @@ async function cloudRegister() {
         localStorage.setItem(CLOUD_USER_KEY, d.username);
         if (d.sid) localStorage.setItem(CLOUD_SID_KEY, d.sid);
         initCloudStorageUI();
+        unlockCloudStorageAchievement();
         showNotification('☁️ 注册并登录成功');
     } catch (e) { cloudSetMsg(e.message, true); }
 }
@@ -19995,6 +20029,7 @@ async function cloudDoLogin(username, password, code) {
     localStorage.setItem(CLOUD_USER_KEY, d.username);
     if (d.sid) localStorage.setItem(CLOUD_SID_KEY, d.sid);
     initCloudStorageUI();
+    unlockCloudStorageAchievement();
     showNotification('☁️ 登录成功');
     return { ok: true };
 }
@@ -21322,6 +21357,9 @@ document.addEventListener('DOMContentLoaded', () => {
 // =============== 多人游戏P2P功能 ===============
 function connectToMultiplayerGame() {
             console.log("触发连接至多人联机游戏函数");
+            // 点击后立即禁用「开始游戏」按钮，防止重复点击/重复连接；进入联机游戏或失败时解除
+            const sb0 = document.getElementById('multiplayerStartBtn');
+            if (sb0) sb0.disabled = true;
 
             (async () => {
                 if (!await checkServerBeforeConnect()) {
@@ -21878,6 +21916,16 @@ function updateAchievementProgress() {
     if (gameState.achievements.puzzleMaster) {
         document.getElementById('achievement5').classList.add('completed');
         document.getElementById('status5').textContent = '已完成';
+    }
+    
+    // 更新成就6：登录云储存账号
+    const progress6 = gameState.achievements.cloudStorageLoggedIn ? 100 : 0;
+    document.getElementById('progress6').style.width = progress6 + '%';
+    document.getElementById('progressText6').textContent = gameState.achievements.cloudStorageLoggedIn ? '1/1' : '0/1';
+    
+    if (gameState.achievements.cloudStorageLoggedIn) {
+        document.getElementById('achievement6').classList.add('completed');
+        document.getElementById('status6').textContent = '已完成';
     }
 }
 
@@ -22503,6 +22551,7 @@ function handleMultiplayerData(data, peerId) {
                             movingEnemies: gameState.multiplayer.movingEnemies || [],
                             keyPosition: gameState.multiplayer.keyPosition || null,
                             doorPosition: gameState.multiplayer.doorPosition || null,
+                            mech: gameState.multiplayer.mech || null,
                             maxPlayers: gameState.multiplayer.maxPlayers,
                             protectedPlayers: gameState.multiplayer.protectedPlayers
                         });
@@ -22518,6 +22567,7 @@ function handleMultiplayerData(data, peerId) {
                         gameState.multiplayer.movingEnemies = data.movingEnemies || [];
                         gameState.multiplayer.keyPosition = data.keyPosition || null;
                         gameState.multiplayer.doorPosition = data.doorPosition || null;
+                        gameState.multiplayer.mech = data.mech || null;
                         gameState.multiplayer.maxPlayers = data.maxPlayers;
                         gameState.multiplayer.protectedPlayers = data.protectedPlayers || {};
                         
@@ -22559,6 +22609,8 @@ function handleMultiplayerData(data, peerId) {
                             });
                         }
                         
+                        // 其他玩家位置变化可能踩/离压力板：本地重算联动门状态（位置驱动，减少对 mech-update 广播的依赖）
+                        mpRecomputeMech();
                         drawMultiplayerMaze();
                         updatePlayerList();
                     }
@@ -22576,6 +22628,16 @@ function handleMultiplayerData(data, peerId) {
                         const _ut = document.getElementById('unlockTimer');
                         if (_ut) _ut.classList.add('hidden');
                         gameState.multiplayer.isUnlocking = false;
+                        drawMultiplayerMaze();
+                    break;
+                        
+                case 'mech-update':
+                        // 压力板/联动门状态同步（任一玩家踩板后广播，全员应用）
+                        gameState.multiplayer.mech = data.mech || null;
+                        // 房主中转：星型拓扑下确保房间内其他玩家也能收到（重复接收幂等，无副作用）
+                        if (gameState.multiplayer.isHost) {
+                            broadcast({ type: 'mech-update', mech: gameState.multiplayer.mech }, peerId);
+                        }
                         drawMultiplayerMaze();
                     break;
                         
@@ -22617,6 +22679,7 @@ function handleMultiplayerData(data, peerId) {
                     if (gameState.multiplayer.players[data.playerId]) {
                         gameState.multiplayer.players[data.playerId].x = data.x;
                         gameState.multiplayer.players[data.playerId].y = data.y;
+                        mpRecomputeMech(); // 传送落点可能踩/离压力板
                         drawMultiplayerMaze();
                         updatePlayerList();
                     }
@@ -22888,6 +22951,9 @@ function broadcast(data, excludePlayerId = null) {
 
         function startMultiplayerGame() {
             gameState.multiplayer.connected = true;
+            // 已成功进入联机游戏：解除「开始游戏」按钮禁用
+            const sb0 = document.getElementById('multiplayerStartBtn');
+            if (sb0) sb0.disabled = false;
             gameState.multiplayer.moveCount = 0;
             gameState.multiplayer.hasKey = false;
             gameState.multiplayer.isUnlocking = false;
@@ -23000,6 +23066,18 @@ function handleMultiplayerMoveLogic(dx, dy) {
     // 4.1 墙
     if (cellValue === 1) return;
 
+    // 4.1b 联动门(16)：未开启时不可通行（开启后视为通路）
+    if (cellValue === 16) {
+        if (!mpMechDoorOpen(newX, newY)) {
+            showNotification('🟦 联动门紧闭：先踩下对应的压力板');
+            return;
+        }
+    }
+    // 4.1c 压力板(15)：实时联动——踩住则联动门开，离开则关（门状态在移动落地后统一同步）
+    if (cellValue === 15) {
+        showNotification('🟦 踩住压力板，联动门开启（离开即关闭）');
+    }
+
     // 4.2 陷阱
     if (cellValue === 2) {
         // 如果玩家是主机且受保护（无敌），则忽略陷阱
@@ -23027,6 +23105,7 @@ function handleMultiplayerMoveLogic(dx, dy) {
                 drawMultiplayerMaze();
                 updatePlayerList();
             }
+            mpSyncMech(); // 回起点可能踩/离板，同步门状态
             return; // 陷阱处理结束，不再执行后续逻辑
         }
     }
@@ -23057,6 +23136,7 @@ function handleMultiplayerMoveLogic(dx, dy) {
             updatePlayerList();
             // 传送后检查是否到达出口
             checkPlayerAtExit(currentPlayer);
+            mpSyncMech(); // 传送后可能踩/离板，同步门状态
             return; // 传送逻辑结束
         }
     }
@@ -23119,6 +23199,7 @@ function handleMultiplayerMoveLogic(dx, dy) {
     console.log('移动!');
 
     // 6. 绘制UI和检查出口
+    mpSyncMech(); // 落地后统一重算联动门状态（踩板/离板都会改变门开合），有变化则广播
     drawMultiplayerMaze();
     updatePlayerList();
 }
@@ -23325,6 +23406,18 @@ function checkPlayerAtExit(player) {
                 // 检查是否是墙
                 if (cellValue === 1) return;
 
+                // 压力板联动门(16)：未开启时不可通行（开启后视为通路）
+                if (cellValue === 16) {
+                    if (!mpMechDoorOpen(newX, newY)) {
+                        showNotification('🟦 联动门紧闭：先踩下对应的压力板');
+                        return;
+                    }
+                }
+                // 压力板(15)：实时联动——踩住则门开，离开则关（落地后统一同步）
+                if (cellValue === 15) {
+                    showNotification('🟦 踩住压力板，联动门开启（离开即关闭）');
+                }
+
                 // 检查是否是门：必须先用钥匙开门，玩家停在门外等待倒计时，不能穿过
                 // （修复：原逻辑只拦截"无钥匙"，导致持钥匙时玩家直接走进门格=穿墙）
                 if (cellValue === 9) {
@@ -23364,6 +23457,7 @@ function checkPlayerAtExit(player) {
                         });
                         
                         drawMultiplayerMaze();
+                        mpSyncMech(); // 回起点可能踩/离压力板，同步门状态
                         return; // 陷阱处理后立即返回，避免继续执行移动逻辑
                     }
                 }
@@ -23391,6 +23485,7 @@ function checkPlayerAtExit(player) {
                                 y: newY
                             });
                             drawMultiplayerMaze();
+                            mpSyncMech(); // 传送落点可能踩/离压力板，同步门状态
                         } else {
                             // 如果是客户端，向主机发送传送请求
                             const conn = Object.values(gameState.multiplayer.connections)[0];
@@ -23423,6 +23518,7 @@ function checkPlayerAtExit(player) {
                     x: player.x,
                     y: player.y
                 });
+                mpSyncMech(); // 落地后统一重算联动门状态（踩板/离板都会改变门开合），有变化则广播
                 drawMultiplayerMaze();
                 // 检查是否到达出口（带门校验：螺旋迷宫需先拿钥匙开门才能通关）
                 checkPlayerAtExit(player);
@@ -23975,6 +24071,158 @@ function addKeyAndDoormultiplayer(size, maze) {
     gameState.multiplayer.doorPosition = {x: doorX, y: doorY};
 }
 
+// ===== 联机压力板联动门 =====
+// 压力板(15)+联动门(16)：**实时联动**——每扇门两侧各放一块压力板（门前/门后），任一块被玩家踩住即开门，离开就关。
+// 配合流程：A 踩门前板 → B 过门 → B 踩门后板 → A 离板过门，全员可过（单人无法通过这种门，需队友配合）。
+// 每局生成 5 组配合门（5 门 + 10 板，分布在关键路径 20%~80%）；生成配合门后本局不再生成任何传送门。
+function addMultiplayerPlateDoors(maze, size) {
+    const mech = { pressurePlates: [], linkedDoors: [], openDoors: {} };
+    gameState.multiplayer.mech = mech;
+    // 用游戏真实出口计算关键路径（保证门组挡在玩家必经之路上，且与可解性校验的出口一致）
+    const criticalPath = findCriticalPath(maze, gameState.multiplayer.exit);
+    if (!criticalPath || criticalPath.length < 12) return;
+    // 5 组门位：关键路径 20% / 35% / 50% / 65% / 80%（各组独立放置，位置被占则跳过该组）
+    const fracs = [0.2, 0.35, 0.5, 0.65, 0.8];
+    for (let g = 0; g < 5; g++) {
+        const dIdx = Math.max(3, Math.min(Math.floor(fracs[g] * criticalPath.length), criticalPath.length - 4));
+        const dp = criticalPath[dIdx];
+        if (!dp || maze[dp.y][dp.x] !== 0) continue;
+        // 板1：门前必经路径，且**不紧挨门**（距门至少 2 格，踩板后需走几步再到门）
+        let ap1 = null;
+        for (let off = 2; off < dIdx && !ap1; off++) {
+            const ti = dIdx - off;
+            const c = criticalPath[ti];
+            if (c && ti > 0 && maze[c.y][c.x] === 0) { ap1 = c; break; }
+        }
+        if (!ap1) continue;
+        // 先放板1，再找板2（避免板2 选到板1 所在格）
+        maze[ap1.y][ap1.x] = 15;
+        // 板2：门后必经路径，同样不紧挨门（距门至少 2 格）
+        let ap2 = null;
+        for (let off = 2; off < (criticalPath.length - dIdx) && !ap2; off++) {
+            const ti = dIdx + off;
+            const c = criticalPath[ti];
+            if (c && ti < criticalPath.length - 1 && maze[c.y][c.x] === 0) { ap2 = c; break; }
+        }
+        if (!ap2) { maze[ap1.y][ap1.x] = 0; continue; } // 板2 找不到则回滚板1，跳过该组
+        maze[dp.y][dp.x] = 16;
+        maze[ap2.y][ap2.x] = 15;
+        const plateIdx = mech.pressurePlates.length;
+        mech.pressurePlates.push({ x: ap1.x, y: ap1.y });
+        mech.pressurePlates.push({ x: ap2.x, y: ap2.y });
+        mech.linkedDoors.push({ x: dp.x, y: dp.y, plateIdxs: [plateIdx, plateIdx + 1] }); // 任一块被踩即开门
+    }
+    // 双人可解性兜底：BFS 验证 2 人能否配合到达出口；不可解则从后往前移除门组，
+    // 直到可解或清空（移除门只会放宽通行，可解性单调改善），保证生成的迷宫一定有解。
+    while (mech.linkedDoors.length > 0 && !mpTwoPlayerSolvable(maze, mech, size)) {
+        const d = mech.linkedDoors.pop();
+        maze[d.y][d.x] = 0;
+        const pis = Array.isArray(d.plateIdxs) ? d.plateIdxs : [d.plateIdx];
+        pis.forEach(pi => { const pl = mech.pressurePlates[pi]; if (pl) maze[pl.y][pl.x] = 0; });
+        const keepPlates = [];
+        const newDoors = [];
+        mech.linkedDoors.forEach(dd => {
+            const newIdxs = [];
+            const oldPis = Array.isArray(dd.plateIdxs) ? dd.plateIdxs : [dd.plateIdx];
+            oldPis.forEach(pi => { keepPlates.push(mech.pressurePlates[pi]); newIdxs.push(keepPlates.length - 1); });
+            newDoors.push({ x: dd.x, y: dd.y, plateIdxs: newIdxs });
+        });
+        mech.pressurePlates = keepPlates;
+        mech.linkedDoors = newDoors;
+        mech.openDoors = {};
+    }
+}
+// 联机：双人可解性校验 —— BFS 遍历"两人位置"状态空间（门开闭由两人实时站位决定，与游戏逻辑一致）。
+// 若两人能交替配合、全部到达出口则返回 true；返回 false 表示当前门组配置无解（生成方会移除门组兜底）。
+function mpTwoPlayerSolvable(maze, mech, size) {
+    const exit = gameState.multiplayer.exit;
+    if (!exit) return true;
+    const doors = mech.linkedDoors || [];
+    const plates = mech.pressurePlates || [];
+    const dirs = [{dx:1,dy:0},{dx:-1,dy:0},{dx:0,dy:1},{dx:0,dy:-1}];
+    // 判断能否走入 (x,y)：墙/陷阱不可过；联动门需"移动前"任一玩家正踩着它的板（与 mpPlatePressed 一致）
+    const canPass = (x, y, ax, ay, bx, by) => {
+        if (x < 0 || y < 0 || x >= size || y >= size) return false;
+        const v = maze[y][x];
+        if (v === 1 || v === 2) return false;
+        if (v === 16) {
+            const d = doors.find(dd => dd.x === x && dd.y === y);
+            if (!d) return false;
+            const pis = Array.isArray(d.plateIdxs) ? d.plateIdxs : [d.plateIdx];
+            return pis.some(pi => {
+                const pl = plates[pi];
+                return pl && ((pl.x === ax && pl.y === ay) || (pl.x === bx && pl.y === by));
+            });
+        }
+        return true; // 0 路 / 15 压力板 均可通行
+    };
+    const sx = 1, sy = 1;
+    const key = (ax, ay, bx, by) => ax + ',' + ay + '|' + bx + ',' + by;
+    const visited = new Set([key(sx, sy, sx, sy)]);
+    const queue = [[sx, sy, sx, sy]];
+    while (queue.length) {
+        const [ax, ay, bx, by] = queue.shift();
+        if (ax === exit.x && ay === exit.y && bx === exit.x && by === exit.y) return true;
+        const next = [];
+        for (const d of dirs) { // A 移动一步
+            const nx = ax + d.dx, ny = ay + d.dy;
+            if (canPass(nx, ny, ax, ay, bx, by)) next.push([nx, ny, bx, by]);
+        }
+        for (const d of dirs) { // B 移动一步
+            const nx = bx + d.dx, ny = by + d.dy;
+            if (canPass(nx, ny, ax, ay, bx, by)) next.push([ax, ay, nx, ny]);
+        }
+        next.push([ax, ay, bx, by]); // 两人原地保持踩板（等价等待，状态不变，visited 自动去重）
+        for (const s of next) {
+            const k = key(s[0], s[1], s[2], s[3]);
+            if (!visited.has(k)) { visited.add(k); queue.push(s); }
+        }
+    }
+    return false;
+}
+// 联机联动门是否开启
+function mpMechDoorOpen(x, y) {
+    const mp = gameState.multiplayer;
+    const mech = mp && mp.mech;
+    if (!mech) return false;
+    // 单人局（≤1名玩家）联动门自动全开：配合门需队友踩板，单人必卡死，兜底为常开（双人局保持严格踩板配合）
+    if (mp && mp.players && Object.keys(mp.players).length <= 1) return true;
+    return !!(mech.openDoors && mech.openDoors[x + ',' + y]);
+}
+// 联机：压力板是否被玩家踩住（实时检测所有玩家位置）
+function mpPlatePressed(plate) {
+    const mp = gameState.multiplayer;
+    if (!plate || !mp || !mp.players) return false;
+    for (const id in mp.players) {
+        const p = mp.players[id];
+        if (p && p.x === plate.x && p.y === plate.y) return true;
+    }
+    return false;
+}
+// 联机：按"任一块压力板被踩住"实时重算联动门开关（必须一直有人踩着板，离开即关）
+function mpRecomputeMech() {
+    const mech = gameState.multiplayer.mech;
+    if (!mech) return;
+    if (!mech.openDoors) mech.openDoors = {};
+    mech.linkedDoors.forEach(d => {
+        const key = d.x + ',' + d.y;
+        const idxs = Array.isArray(d.plateIdxs) ? d.plateIdxs : [d.plateIdx];
+        const open = idxs.some(pi => { const pl = mech.pressurePlates[pi]; return pl ? mpPlatePressed(pl) : false; });
+        if (open) mech.openDoors[key] = true; else delete mech.openDoors[key];
+    });
+}
+// 联机：重算后若门状态有变化，广播 mech-update（全员应用+房主中转已在接收端处理）
+function mpSyncMech() {
+    const mech = gameState.multiplayer.mech;
+    if (!mech) return;
+    const before = JSON.stringify(mech.openDoors || {});
+    mpRecomputeMech();
+    const after = JSON.stringify(mech.openDoors || {});
+    if (before !== after) {
+        broadcast({ type: 'mech-update', mech });
+    }
+}
+
 function generateMultiplayerMaze() {
     const size = 21; // 放大迷宫尺寸（21x21），比原来的 15x15 更大、更复杂
     let maze;
@@ -24031,10 +24279,19 @@ function generateMultiplayerMaze() {
         // 设置出口
         maze[size-2][size-1] = 0;
         gameState.multiplayer.exit = {x: size-1, y: size-2};
+        
+        // 压力板联动门机关：30% 概率出现（双人及以上才生成，配合门需队友踩板；
+        // 单人开房不生成；若双人局中途掉线变单人，mpMechDoorOpen 会兜底把门全开）
+        const mpCountAtGen = Object.keys(gameState.multiplayer.players || {}).length;
+        if (Math.random() < 0.3 && mpCountAtGen > 1) addMultiplayerPlateDoors(maze, size);
     }
     
-    // 添加传送门
-    addMultiplayerTeleporters(maze, size);
+    // 正常迷宫复杂化：本局无配合门时生成陷阱 + 传送门（配合门局不再叠加，保持机关密度合理）
+    const hasPlateDoor = !!(gameState.multiplayer.mech && gameState.multiplayer.mech.linkedDoors && gameState.multiplayer.mech.linkedDoors.length > 0);
+    if (!hasPlateDoor) {
+        addMultiplayerTraps(maze, size);
+        addMultiplayerTeleporters(maze, size);
+    }
     
     return maze;
 }
@@ -24068,7 +24325,7 @@ function tryGenerateValidMaze(maze, size) {
 
 function addMultiplayerTraps(maze, size) {
     // 添加陷阱（避开关键路径）；数量随迷宫面积增长，越大越复杂
-    const criticalPath = findCriticalPath(maze);
+    const criticalPath = findCriticalPath(maze, gameState.multiplayer.exit);
     const trapCount = Math.min(30, Math.floor(size * size / 25));
     for (let i = 0; i < trapCount; i++) {
         let x, y;
@@ -24089,6 +24346,11 @@ function addMultiplayerTraps(maze, size) {
 
 function addMultiplayerTeleporters(maze, size) {
     gameState.multiplayer.teleporters = [];
+    // 传送门不放关键路径（必经之路）：联机传送门"踩上即强制传送"，
+    // 若放在必经路径上，玩家路过就被传走，配对门在支路时会来回弹，导致迷宫看似无解。
+    // 只放支路/非必经格，主路径全程畅通，传送门成为可选探索物，保证迷宫一定有解。
+    const criticalPath = findCriticalPath(maze, gameState.multiplayer.exit);
+    const onPath = (x, y) => criticalPath.some(p => p.x === x && p.y === y);
     for (let i = 0; i < 6; i++) {
         let x1, y1, x2, y2;
         let attempts = 0;
@@ -24099,6 +24361,7 @@ function addMultiplayerTeleporters(maze, size) {
             y2 = Math.floor(Math.random() * (size-2)) + 1;
             attempts++;
         } while ((maze[y1][x1] !== 0 || maze[y2][x2] !== 0 || 
+                 onPath(x1, y1) || onPath(x2, y2) ||
                  (x1 === 1 && y1 === 1) || (x2 === 1 && y2 === 1)) && attempts < 50);
         
         if (attempts < 50) {
@@ -24179,6 +24442,12 @@ function getCellWalls(x, y, maze) {
                         case 3: // 传送门
                             ctx.fillStyle = '#0FF';
                             break;
+                        case 15: // 压力板
+                            ctx.fillStyle = '#3D5AFE';
+                            break;
+                        case 16: // 联动门（开/关不同底色）
+                            ctx.fillStyle = mpMechDoorOpen(x, y) ? '#5D4037' : '#3E2723';
+                            break;
                         default: // 路
                             ctx.fillStyle = '#000000';
                     }
@@ -24197,6 +24466,28 @@ function getCellWalls(x, y, maze) {
                             Math.PI * 2
                         );
                         ctx.fill();
+                    }
+                    // 绘制压力板（有玩家踩住时亮起）
+                    if (cellValue === 15) {
+                        const pl = gameState.multiplayer.mech && gameState.multiplayer.mech.pressurePlates.find(p => p.x === x && p.y === y);
+                        const lit = pl ? mpPlatePressed(pl) : false;
+                        ctx.fillStyle = '#FFF';
+                        ctx.font = 'bold ' + Math.max(10, cellSize * 0.5) + 'px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(lit ? '💠' : '🟦',
+                            x * cellSize + cellSize / 2,
+                            y * cellSize + cellSize / 2);
+                    }
+                    // 绘制联动门（开=🚪 关=🔒）
+                    if (cellValue === 16) {
+                        ctx.fillStyle = '#FFF';
+                        ctx.font = 'bold ' + Math.max(10, cellSize * 0.5) + 'px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(mpMechDoorOpen(x, y) ? '🚪' : '🔒',
+                            x * cellSize + cellSize / 2,
+                            y * cellSize + cellSize / 2);
                     }
                 } // 内层 x 循环结束
             } // 外层 y 循环结束
@@ -26523,6 +26814,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                       <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
                         <button onclick="clinkCopy('${l.code}')" style="padding:4px 10px; background:#455a64; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">复制</button>
                         <button onclick="clinkPlay('${l.code}')" style="padding:4px 10px; background:#2196F3; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">试玩</button>
+                        <button onclick="clinkShowVisits('${l.code}')" style="padding:4px 10px; background:#00897B; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">👀 访问</button>
                         <button onclick="clinkDelete('${l.code}')" style="padding:4px 10px; background:#c62828; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">删除</button>
                       </div>
                     </div>
@@ -26552,6 +26844,47 @@ function drawPlayerWithSkin(ctx, x, y, size) {
     window.clinkPlay = function(code) {
         closeCloudLinkModal();
         loadMazeFromLink(code);
+    };
+    // 查看某条链接的访问者名单（仅属主可见；服务端校验链接属于当前账号）
+    window.clinkShowVisits = async function(code) {
+        let m = document.getElementById('clinkVisitsModal');
+        if (m) m.remove();
+        m = document.createElement('div');
+        m.id = 'clinkVisitsModal';
+        m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:36500;';
+        m.innerHTML = '<div style="background:#16161f;color:#fff;width:min(560px,94vw);max-height:80vh;border-radius:14px;padding:20px;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,0.5);">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+            '<h3 style="margin:0;">👀 链接访问者</h3>' +
+            '<button onclick="closeClinkVisitsModal()" style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;">✕</button></div>' +
+            '<div id="clinkVisitsBody" style="overflow:auto;font-size:13px;min-height:120px;">加载中...</div></div>';
+        m.onclick = (e) => { if (e.target === m) closeClinkVisitsModal(); };
+        document.body.appendChild(m);
+        const box = document.getElementById('clinkVisitsBody');
+        const setBody = (html) => { if (box) box.innerHTML = html; };
+        try {
+            const r = await clinkApi('/' + encodeURIComponent(code) + '/visits');
+            const d = await r.json().catch(() => ({}));
+            if (r.status === 401 || r.status === 403) { setBody('<p style="color:#ff8a80;">' + escapeHtmlSafe(d.message || '登录已失效，请重新登录') + '</p>'); return; }
+            if (!r.ok || !d.success) { setBody('<p style="color:#ff8a80;">' + escapeHtmlSafe(d.message || '获取失败') + '</p>'); return; }
+            const visits = d.visits || [];
+            if (visits.length === 0) { setBody('<p style="color:#888; text-align:center; padding:20px;">还没有人访问过这条链接。</p>'); return; }
+            const rows = visits.map(v => {
+                const who = v.username ? escapeHtmlSafe(v.username) : '<span style="color:#777;">匿名（' + escapeHtmlSafe(v.client_id || '未知') + '）</span>';
+                const tag = v.source === 'account'
+                    ? '<span style="color:#80cbc4; font-size:11px; border:1px solid #80cbc4; border-radius:4px; padding:0 4px; margin-left:6px;">云链接账号</span>'
+                    : '<span style="color:#ffcc80; font-size:11px; border:1px solid #ffcc80; border-radius:4px; padding:0 4px; margin-left:6px;">玩家</span>';
+                return '<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:rgba(255,255,255,0.05); border-radius:6px; margin-bottom:6px;">' +
+                    '<span>' + who + tag + '</span>' +
+                    '<span style="color:#9e9e9e; font-size:12px; white-space:nowrap; margin-left:8px;">' + (typeof formatCloudTime === 'function' ? formatCloudTime(v.created_at) : escapeHtmlSafe(v.created_at || '')) + '</span></div>';
+            }).join('');
+            setBody('<div style="margin-bottom:10px; color:#b39ddb; font-size:12px;">链接「' + escapeHtmlSafe(d.name || code) + '」共 <b>' + visits.length + '</b> 次访问记录</div>' + rows);
+        } catch (e) {
+            setBody('<p style="color:#ff8a80;">加载失败：' + escapeHtmlSafe(e.message) + '</p>');
+        }
+    };
+    window.closeClinkVisitsModal = function() {
+        const m = document.getElementById('clinkVisitsModal');
+        if (m) m.remove();
     };
 
     // 在「查看/分享迷宫」弹窗中，把当前选中的迷宫发布为云链接
@@ -26620,7 +26953,20 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         if (!code) return;
         try {
             showNotification('🔗 正在加载云链接迷宫...');
-            const r = await fetch(clinkBase() + '/api/maze-link/' + encodeURIComponent(code));
+            // 带上访问者身份（玩家名/clientId + 云链接账号令牌），服务端记录"谁访问过此链接"供管理端查看
+            let visitUrl = clinkBase() + '/api/maze-link/' + encodeURIComponent(code);
+            const qs = [];
+            const pname = (typeof gameState !== 'undefined' && gameState.playerName) ? String(gameState.playerName).slice(0, 64) : '';
+            const clid = (typeof gameState !== 'undefined' && gameState.clientId) ? String(gameState.clientId).slice(0, 64) : '';
+            if (pname) qs.push('name=' + encodeURIComponent(pname));
+            if (clid) qs.push('clientId=' + encodeURIComponent(clid));
+            if (qs.length) visitUrl += '?' + qs.join('&');
+            const visitHeaders = {};
+            try {
+                const lt = localStorage.getItem(CLINK_TOKEN_KEY);
+                if (lt) visitHeaders['Authorization'] = 'Bearer ' + lt;
+            } catch (e) {}
+            const r = await fetch(visitUrl, { headers: visitHeaders });
             const d = await r.json();
             if (!r.ok || !d.success) throw new Error(d.message || '链接无效');
             const m = d.maze || {};
@@ -26683,8 +27029,65 @@ const BACKUP_KINDS = [
     { kind: 'statistics', label: '统计信息', desc: '📊 统计信息（时长/步数/金币等）' },
     { kind: 'ui_settings', label: 'UI设置', desc: '🎨 UI 设置（控制/音乐等）' }
 ];
-const BACKUP_DEFAULT_ACH = { allLevelsCompleted:false, multiplayerWins:0, trapHits:0, chineseEmojiUsed:false, puzzleMaster:false };
+const BACKUP_DEFAULT_ACH = { allLevelsCompleted:false, multiplayerWins:0, trapHits:0, chineseEmojiUsed:false, puzzleMaster:false, cloudStorageLoggedIn:false };
 const BACKUP_DEFAULT_STATS = { timeChallengeBest:0, puzzleLevelsCompleted:0, totalLevelsCompleted:0, totalPlayTime:0, totalMoves:0, totalTrapsTriggered:0, totalCoinsCollected:0, averageMovesPerLevel:0, completionRate:0 };
+// 成就备份摘要：字段 → 成就名 / 解锁判定 / 进度展示（与 updateAchievementProgress 阈值一致）
+const BACKUP_ACH_META = [
+    { key:'allLevelsCompleted',  name:'迷宫大师', done:d=>d.allLevelsCompleted===true,  val:d=>d.allLevelsCompleted?'✅ 已解锁':'⬜ 未解锁' },
+    { key:'multiplayerWins',     name:'社交达人', done:d=>(d.multiplayerWins||0)>=10,  val:d=>'进度 '+(d.multiplayerWins||0)+'/10' },
+    { key:'trapHits',            name:'陷阱专家', done:d=>(d.trapHits||0)>=30,         val:d=>'进度 '+(d.trapHits||0)+'/30' },
+    { key:'chineseEmojiUsed',    name:'伟大的国家', done:d=>d.chineseEmojiUsed===true, val:d=>d.chineseEmojiUsed?'✅ 已解锁':'⬜ 未解锁' },
+    { key:'puzzleMaster',        name:'解密高手', done:d=>d.puzzleMaster===true,       val:d=>d.puzzleMaster?'✅ 已解锁':'⬜ 未解锁' },
+    { key:'cloudStorageLoggedIn',name:'云储存',   done:d=>d.cloudStorageLoggedIn===true,val:d=>d.cloudStorageLoggedIn?'✅ 已解锁':'⬜ 未解锁' }
+];
+// UI 设置备份摘要：字段 → 中文名
+const BACKUP_UI_KEY_NAMES = {
+    showControls:'显示操作盘', controlsPosition:'操作盘位置', controlsSize:'操作盘大小', controlsOpacity:'操作盘透明度',
+    showGameInfo:'显示游戏信息', showLevelInfo:'显示关卡信息', showTimeInfo:'显示时间', showMoveInfo:'显示步数', showKeyInfo:'显示按键',
+    customMusic:'自定义音乐', showTimer:'显示计时器', showHint:'显示提示', soundEnabled:'音效', musicEnabled:'音乐'
+};
+// 生成某类备份的详细摘要文本（云端数据 → 可读详情）
+function backupKindSummary(kind, data) {
+    if (!data || typeof data !== 'object') return '云端暂无备份';
+    try {
+        if (kind === 'achievements') {
+            const unlocked = BACKUP_ACH_META.filter(m => m.done(data)).map(m => m.name);
+            const head = '已解锁 <b>' + unlocked.length + '/' + BACKUP_ACH_META.length + '</b> 项：' + (unlocked.length ? unlocked.join('、') : '无');
+            const lines = BACKUP_ACH_META.map(m => (m.done(data) ? '✅' : '⬜') + ' ' + m.name + '（' + m.val(data) + '）');
+            return head + '<br>' + lines.join('　');
+        }
+        if (kind === 'statistics') {
+            const ms = data.totalPlayTime || 0;
+            const hh = Math.floor(ms / 3600000), mm = Math.floor((ms % 3600000) / 60000);
+            const timeStr = (hh > 0 ? hh + '小时' : '') + (mm > 0 ? mm + '分' : '') + (hh === 0 && mm === 0 ? '不足1分' : '');
+            const parts = [
+                '🕒 总时长 <b>' + timeStr + '</b>',
+                '🪙 金币 <b>' + (data.totalCoinsCollected||0) + '</b>',
+                '👣 总步数 <b>' + (data.totalMoves||0) + '</b>',
+                '🏁 通关 <b>' + (data.totalLevelsCompleted||0) + '</b> 关',
+                '🧩 解密 <b>' + (data.puzzleLevelsCompleted||0) + '</b> 关',
+                '⏱️ 限时最佳 <b>' + (data.timeChallengeBest||0) + '</b>s',
+                '💥 触发陷阱 <b>' + (data.totalTrapsTriggered||0) + '</b> 次',
+                '📈 完成率 <b>' + (data.completionRate||0) + '</b>%',
+                '🎯 平均步数 <b>' + (data.averageMovesPerLevel||0) + '</b>'
+            ];
+            return parts.join('　');
+        }
+        if (kind === 'ui_settings') {
+            const nameOf = (k) => BACKUP_UI_KEY_NAMES[k] || (typeof escapeHtmlLocal === 'function' ? escapeHtmlLocal(k) : k);
+            const keys = Object.keys(data).filter(k => k !== 'customMusic');
+            const on = keys.filter(k => data[k] === true).map(nameOf);
+            const off = keys.filter(k => data[k] === false);
+            const numeric = keys.filter(k => data[k] !== true && data[k] !== false && data[k] !== undefined && data[k] !== null);
+            let s = '已保存 <b>' + keys.length + '</b> 项界面设置';
+            if (on.length) s += '<br>✅ 开启：' + on.join('、');
+            if (off.length) s += '<br>⬜ 关闭：' + off.map(nameOf).join('、');
+            if (numeric.length) s += '<br>⚙️ 数值项：' + numeric.map(k => nameOf(k) + '=' + String(data[k])).join('、');
+            return s;
+        }
+        return '云端已备份';
+    } catch (e) { return '云端已备份（内容摘要生成失败）'; }
+}
 
 function backupIsEnabled() { return !window.globalFunctionControl || window.globalFunctionControl.backup !== false; }
 function backup2faDisabled() { return !!(window.globalFunctionControl && window.globalFunctionControl.backup2fa === false); }
@@ -27415,9 +27818,16 @@ async function backupLoadKinds() {
         (list||[]).forEach(b => { map[b.kind] = b; });
         BACKUP_KINDS.forEach(k => {
             const info = document.getElementById('backupKindInfo_'+k.kind);
-            if (info) {
-                const b = map[k.kind];
-                info.textContent = b ? (k.label+'：云端已备份（更新于 '+formatCloudTime(b.updatedAt)+'）') : (k.label+'：云端暂无备份');
+            if (!info) return;
+            const b = map[k.kind];
+            if (b && b.data) {
+                info.innerHTML = '<div style="color:#80deea;font-weight:bold;">' + k.label + '：云端已备份（更新于 ' + formatCloudTime(b.updatedAt) + '）</div>' +
+                    '<div style="margin-top:5px;line-height:1.75;font-size:12px;color:#dcdcdc;">' + backupKindSummary(k.kind, b.data) + '</div>';
+            } else if (b) {
+                info.innerHTML = '<div style="color:#80deea;font-weight:bold;">' + k.label + '：云端已备份（更新于 ' + formatCloudTime(b.updatedAt) + '）</div>' +
+                    '<div style="margin-top:5px;color:#bbb;">（该备份无内容数据，可重新上传本机数据覆盖）</div>';
+            } else {
+                info.innerHTML = '<div style="color:#bbb;">' + k.label + '：云端暂无备份</div>';
             }
         });
     } catch(e){}
