@@ -6097,29 +6097,34 @@ app.get('/api/maze-link/:code', async (req, res) => {
         const data = parseLinkData(l.data);
         if (!data) return res.status(500).json({ success: false, message: '迷宫数据损坏' });
         dbBumpLinkViews(l.code).catch(() => {});
-        // —— 记录访问者（失败不影响正常读取）——
-        try {
-            let visitUser = '', visitSource = 'player';
-            const ah = req.headers.authorization || '';
-            if (ah.startsWith('Bearer ')) {
-                try {
-                    const dec = jwt.verify(ah.substring(7), JWT_SECRET);
-                    if (dec && dec.type === 'clink' && dec.username) { visitUser = String(dec.username).slice(0, 64); visitSource = 'account'; }
-                } catch (e) { /* 令牌无效则按匿名处理 */ }
-            }
-            if (!visitUser) visitUser = (req.query.name || '').toString().trim().slice(0, 64);
-            const clid = (req.query.clientId || '').toString().trim().slice(0, 64);
-            if (!visitUser && clid) { visitUser = 'player:' + clid; }
-            if (visitUser) {
-                await dbAddLinkVisit({
-                    id: 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-                    code: l.code, link_name: l.name || '未命名迷宫',
-                    username: visitUser, source: visitSource,
-                    client_id: clid || null, ip: getClientIp(req),
-                    created_at: new Date().toISOString()
-                });
-            }
-        } catch (e) { /* 记录失败忽略 */ }
+            // —— 记录访问者（失败不影响正常读取）——
+            // 名字优先取「游戏内玩家名」（?name=，非云账号名）；无玩家名时兜底云链接账号名 / clientId。
+            // client_id 始终记录，供前端展示"谁 + ID"。
+            try {
+                let visitUser = '', visitSource = 'player';
+                const ah = req.headers.authorization || '';
+                let accountName = '';
+                if (ah.startsWith('Bearer ')) {
+                    try {
+                        const dec = jwt.verify(ah.substring(7), JWT_SECRET);
+                        if (dec && dec.type === 'clink' && dec.username) accountName = String(dec.username).slice(0, 64);
+                    } catch (e) { /* 令牌无效则忽略 */ }
+                }
+                const pname = (req.query.name || '').toString().trim().slice(0, 64);
+                const clid = (req.query.clientId || '').toString().trim().slice(0, 64);
+                visitUser = pname || accountName;
+                visitSource = pname ? 'player' : (accountName ? 'account' : 'player');
+                if (!visitUser && clid) { visitUser = 'player:' + clid; }
+                if (visitUser) {
+                    await dbAddLinkVisit({
+                        id: 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+                        code: l.code, link_name: l.name || '未命名迷宫',
+                        username: visitUser, source: visitSource,
+                        client_id: clid || null, ip: getClientIp(req),
+                        created_at: new Date().toISOString()
+                    });
+                }
+            } catch (e) { /* 记录失败忽略 */ }
         res.json({ success: true, code: l.code, name: l.name, author: l.username, views: Number(l.views || 0) + 1, maze: data });
     } catch (e) {
         console.error('[云链接] 读取失败:', e);
