@@ -1712,6 +1712,7 @@ async function countDevtoolsBans(clientId) {
 }
 const roomChats = new Map();       // roomId -> [{messageId, sender, clientId, message, image, isAdmin, time}]，房间聊天记录（客户端镜像上报，供管理员监管），每房间上限 200 条
 const onlineSockets = new Map();   // playerId(peer id) -> socket.id，供远程控制精准投递
+const notificationSockets = new Map(); // clientId -> 通知 socket 的 id（好友/好友请求/私聊等统一推到通知 socket）
 const onlinePlayers = new Map();   // clientId -> {id,name,socketId,roomId,joinedAt}，进入游戏即上线的玩家（含未进房的）
 const mazes = new Map();           // mazeId -> 迷宫对象 {id,name,description,difficulty,size,data}
 // 玩家关卡进度（客户端上报，供管理员查看过关历史）：clientId -> { unlockedLevel, completedLevels, puzzleCompletedLevels }
@@ -2433,6 +2434,12 @@ function pushToClientSocket(clientId, event, data) {
     const sid = onlineSockets.get(clientId);
     if (sid && sid !== 'rest') { try { io.to(sid).emit(event, data); } catch (_) {} }
 }
+// 好友相关推送专用：定向到通知 socket（前端只在 notificationSocket 上监听 friend-* 事件；
+// onlineSockets 会被 mp-register / REST 上线覆盖成游戏 socket / 'rest'，不能复用它推好友消息）
+function pushToNotificationSocket(clientId, event, data) {
+    const sid = notificationSockets.get(clientId);
+    if (sid) { try { io.to(sid).emit(event, data); } catch (_) {} }
+}
 
 // 归一化并限制大小，防止滥用
 function sanitizeHomeProfile(input) {
@@ -2508,7 +2515,8 @@ app.get('/api/players/search', (req, res) => {
         for (const [clientId, p] of onlinePlayers.entries()) {
             if (!p) continue;
             const name = (p.name || '').toString();
-            if (name.toLowerCase().indexOf(q) !== -1) {
+            // 按显示名 或 clientId 匹配（同名玩家可贴 ID 精确查找）
+            if (name.toLowerCase().indexOf(q) !== -1 || clientId.toLowerCase().indexOf(q) !== -1) {
                 const prof = homeProfiles.get(clientId) || {};
                 out.push({
                     clientId: clientId,
@@ -2548,7 +2556,7 @@ app.post('/api/friends/request', (req, res) => {
         };
         friendRequests.set(id, reqObj);
         saveFriends();
-        pushToClientSocket(toClientId, 'friend-request-received', {
+        pushToNotificationSocket(toClientId, 'friend-request-received', {
             requestId: id, fromClientId, fromName: reqObj.fromName, toClientId, toName: reqObj.toName, createdAt: now
         });
         console.log(`[Friends] ${reqObj.fromName}(${fromClientId}) 请求添加 ${reqObj.toName}(${toClientId}) 为好友`);
@@ -2589,7 +2597,7 @@ app.post('/api/friends/respond', (req, res) => {
             const key = friendshipKey(r.fromClientId, r.toClientId);
             if (!friendships.has(key)) friendships.set(key, { userA: r.fromClientId, userB: r.toClientId, createdAt: r.updatedAt });
             saveFriends();
-            pushToClientSocket(r.fromClientId, 'friend-accepted', {
+            pushToNotificationSocket(r.fromClientId, 'friend-accepted', {
                 friendClientId: r.toClientId, friendName: r.toName, requestId
             });
             console.log(`[Friends] ${r.toName}(${clientId}) 通过了 ${r.fromName}(${r.fromClientId}) 的好友请求`);
@@ -2671,7 +2679,7 @@ app.post('/api/friends/message', (req, res) => {
         const arr = friendMessages.get(k);
         if (arr.length > 500) friendMessages.set(k, arr.slice(-500));
         saveFriends();
-        pushToClientSocket(toClientId, 'friend-message-received', {
+        pushToNotificationSocket(toClientId, 'friend-message-received', {
             fromClientId, fromName: (onlinePlayers.get(fromClientId) || {}).name || (homeProfiles.get(fromClientId) || {}).name || '玩家',
             toClientId, message: msg.message, createdAt: msg.createdAt, id: msg.id
         });
@@ -4350,6 +4358,10 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
+        // 清理通知 socket 映射：该连接若是某玩家的通知 socket，则移除
+        for (const [cid, sid] of notificationSockets) {
+            if (sid === socket.id) { notificationSockets.delete(cid); break; }
+        }
         handleDisconnect(socket.id);
     });
 
@@ -4394,6 +4406,7 @@ io.on('connection', (socket) => {
             username: (name && String(name).trim()) || '玩家'
         });
             onlineSockets.set(id, socket.id);
+            notificationSockets.set(id, socket.id);
             // 若客户端 IP 已被封禁，则对该用户启用全部功能封禁，并立即推送全屏封禁框
             if (isIPBanned(ip)) {
                 const ban = userBans.get(id) || { multiplayer: false, single: false, puzzle: false, chat: false, reasons: {} };
