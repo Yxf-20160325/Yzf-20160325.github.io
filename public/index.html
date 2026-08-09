@@ -3496,6 +3496,10 @@
     <div id="achievementsScreen" class="hidden">
         <button class="back-button" onclick="showScreen('mainMenu')">返回</button>
         <h2 class="level-select-title">成就系统</h2>
+        <div style="text-align:center; margin:6px 0 12px;">
+            <button onclick="recheckAchievements()" style="padding:8px 20px; background:linear-gradient(135deg,#7c4dff,#5e35b1); color:#fff; border:none; border-radius:8px; cursor:pointer; font-size:14px; font-weight:bold;">🔄 重新判定</button>
+            <div style="font-size:12px; color:#888; margin-top:4px;">按当前游戏状态重新核验所有成就获取条件（条件满足即补解锁）</div>
+        </div>
         
         <div class="achievements-container">
             <div class="achievement-item" id="achievement1">
@@ -3589,6 +3593,22 @@
                     </div>
                 </div>
                 <div class="achievement-status" id="status6">未完成</div>
+            </div>
+            
+            <!-- 成就7：云地图 -->
+            <div class="achievement-item" id="achievement7">
+                <div class="achievement-icon">🗺️</div>
+                <div class="achievement-info">
+                    <h3>云地图</h3>
+                    <p>往云储存账号内存入4张地图</p>
+                    <div class="achievement-progress">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress7"></div>
+                        </div>
+                        <span id="progressText7">0/4</span>
+                    </div>
+                </div>
+                <div class="achievement-status" id="status7">未完成</div>
             </div>
         </div>
     </div>
@@ -4253,7 +4273,7 @@
     </div>
     
     <script>
-const CLIENT_VERSION = "1.15.5";
+const CLIENT_VERSION = "1.15.7";
 const GAME_SERVER_URL = 'https://maze-game-apiserver.onrender.com/'.replace(/\/+$/, ''); // 服务器URL，根据实际情况修改（自动去除结尾斜杠，避免拼接出 //api）
 async function checkServerVersion() {
     // 服务器URL未配置时直接返回
@@ -5151,6 +5171,9 @@ function connectNotificationSocket() {
                 if (data.achievements.cloudStorageLoggedIn && gameState.achievements && gameState.achievements.cloudStorageLoggedIn) {
                     if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('云储存', '管理员已为你解锁此成就！');
                 }
+                if ((data.achievements.cloudMapsStored || 0) >= 4) {
+                    if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('云地图', '管理员已为你解锁此成就！');
+                }
                 if (data.achievements.multiplayerWins >= 10) {
                     if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('社交达人', '管理员已为你解锁此成就！');
                 }
@@ -5824,7 +5847,7 @@ async function reportMyCoins() {
                 completedLevels: Array.isArray(gameState.completedLevels) ? gameState.completedLevels : [],
                 puzzleCompletedLevels: Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels : [],
                 customCompletedLevels: Array.isArray(gameState.customCompletedLevels) ? gameState.customCompletedLevels : [],
-                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false }
+                achievements: gameState.achievements || { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false, cloudMapsStored: 0 }
             })
         });
     } catch (e) { /* 网络失败可忽略，下次轮询重试 */ }
@@ -5856,7 +5879,7 @@ async function fetchMyAchievements() {
 // revoked：被管理员撤销的成就键数组，需将本地对应值强制清零
 function applyServerAchievements(serverAch, revoked) {
     if (!serverAch || typeof serverAch !== 'object') return;
-    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false };
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false, cloudMapsStored: 0 };
     let changed = false;
     // 布尔型成就：取并集（任一端为 true 即 true）
     if (serverAch.allLevelsCompleted && !gameState.achievements.allLevelsCompleted) {
@@ -5884,12 +5907,16 @@ function applyServerAchievements(serverAch, revoked) {
         gameState.achievements.trapHits = serverAch.trapHits;
         changed = true;
     }
+    if (typeof serverAch.cloudMapsStored === 'number' && serverAch.cloudMapsStored > (gameState.achievements.cloudMapsStored || 0)) {
+        gameState.achievements.cloudMapsStored = serverAch.cloudMapsStored;
+        changed = true;
+    }
     // 管理员撤销：将对应成就强制清零
     if (Array.isArray(revoked) && revoked.length) {
         revoked.forEach(k => {
             if (k === 'allLevelsCompleted' || k === 'chineseEmojiUsed' || k === 'puzzleMaster' || k === 'cloudStorageLoggedIn') {
                 if (gameState.achievements[k]) { gameState.achievements[k] = false; changed = true; }
-            } else if (k === 'multiplayerWins' || k === 'trapHits') {
+            } else if (k === 'multiplayerWins' || k === 'trapHits' || k === 'cloudMapsStored') {
                 if ((gameState.achievements[k] || 0) !== 0) { gameState.achievements[k] = 0; changed = true; }
             }
         });
@@ -16467,7 +16494,7 @@ function drawSinglePlayerMaze() {
 function saveGameData() {
     try {
         // 确保gameState对象及其属性存在
-        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false };
+        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false, cloudMapsStored: 0 };
         if (!gameState.gameStats) gameState.gameStats = { timeChallengeBest: 0, puzzleLevelsCompleted: 0, totalLevelsCompleted: 0, totalPlayTime: 0, totalMoves: 0, totalTrapsTriggered: 0, totalCoinsCollected: 0 };
         if (!gameState.settings) gameState.settings = { autoSave: true };
         
@@ -19986,13 +20013,33 @@ function cloudClearDisabled() {
 }
 // 成就：登录云储存账号（普通登录 / 2FA 登录 / 注册并登录 均可触发）
 function unlockCloudStorageAchievement() {
-    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false };
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false, cloudMapsStored: 0 };
     if (!gameState.achievements.cloudStorageLoggedIn) {
         gameState.achievements.cloudStorageLoggedIn = true;
         try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch (e) {}
         if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
         if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('云储存', '登录云储存账号！');
     }
+}
+// 成就：云地图 —— 往云储存账号内存入 4 张地图。上传成功后调用，拉取云端地图数，达到 4 张即解锁。
+async function unlockCloudMapsAchievement() {
+    try {
+        if (!localStorage.getItem(CLOUD_TOKEN_KEY)) return; // 未登录云储存
+        const r = await cloudApi('/mazes');
+        const d = await r.json();
+        if (!r.ok || !d.success) return;
+        const count = Array.isArray(d.mazes) ? d.mazes.length : 0;
+        if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false, cloudMapsStored: 0 };
+        const before = gameState.achievements.cloudMapsStored || 0;
+        if (count > before) {
+            gameState.achievements.cloudMapsStored = count;
+            try { localStorage.setItem('achievements', JSON.stringify(gameState.achievements)); } catch (e) {}
+            if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
+        }
+        if (count >= 4 && before < 4) {
+            if (typeof showAchievementUnlocked === 'function') showAchievementUnlocked('云地图', '往云储存账号内存入4张地图！');
+        }
+    } catch (e) { /* 解锁失败静默 */ }
 }
 async function cloudRegister() {
     const username = (document.getElementById('cloudUser').value || '').trim();
@@ -20120,11 +20167,6 @@ function cloudStartSpotCheck() {
             const r = await cloudApi('/2fa/challenge');
             const d = await r.json();
             if (r.ok && d && d.challenge) cloudSpotCheckModal();
-            else if (r.ok && d && d.expired) {
-                // 抽查任务已超时未完成（如弹窗未弹出/用户切走未响应）→ 退出登录
-                showNotification('⚠️ 安全抽查超时未完成，已退出云储存账号');
-                cloudLogout();
-            }
         } catch (e) {}
     };
     beat();
@@ -20154,8 +20196,7 @@ function cloudSpotCheckModal() {
     const uname = localStorage.getItem(CLOUD_USER_KEY) || '';
     m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
         '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
-        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。<br><span style="color:#ff8a80;">超时未完成将自动退出登录。</span></div>' +
-        '<div id="cloudSpotCountdown" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
         '<input id="cloudSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
         '<div id="cloudSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
         '<div style="display:flex;gap:8px;">' +
@@ -20166,15 +20207,6 @@ function cloudSpotCheckModal() {
     document.body.appendChild(m);
     const okBtn = document.getElementById('cloudSpotOk');
     const codeEl = document.getElementById('cloudSpotCode');
-    // 超时兜底：与服务端抽查任务 TTL（2.5 分钟）一致，超时未完成 → 退出登录
-    const deadline = Date.now() + 150000;
-    window.__cloudSpotTimer = setTimeout(() => { cloudSpotCheckCancel(); }, 150000);
-    const cntEl = document.getElementById('cloudSpotCountdown');
-    window.__cloudSpotCountdown = setInterval(() => {
-        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-        if (cntEl) cntEl.textContent = '⏱️ 剩余 ' + left + ' 秒完成验证，超时将退出登录';
-        if (left <= 0) { if (window.__cloudSpotCountdown) clearInterval(window.__cloudSpotCountdown); }
-    }, 500);
     const submit = async () => {
         const code = (codeEl.value || '').trim();
         if (!/^\d{4,8}$/.test(code)) { document.getElementById('cloudSpotMsg').textContent = '请输入 6 位动态码'; return; }
@@ -20187,8 +20219,6 @@ function cloudSpotCheckModal() {
                 showNotification('🛡️ 抽查验证通过');
                 return;
             }
-            // 任务已超时：本次抽查未在期限内完成 → 退出登录
-            if (d && d.expired) { closeCloudSpotCheckModal(); showNotification('⚠️ 抽查已超时未完成，已退出云储存账号'); cloudLogout(); return; }
             const msg = document.getElementById('cloudSpotMsg');
             if (msg) msg.textContent = '❌ ' + (d.message || '验证失败');
             okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
@@ -21067,6 +21097,7 @@ async function cloudUploadCurrent() {
         if (!r.ok || !d.success) throw new Error(d.message || '上传失败');
         showNotification('☁️ 已上传到云（' + (d.maze && d.maze.name) + '）');
         loadCloudMazeList();
+        if (typeof unlockCloudMapsAchievement === 'function') unlockCloudMapsAchievement();
     } catch (e) { showNotification('上传失败：' + e.message); }
 }
 
@@ -21127,6 +21158,7 @@ async function cloudUploadByIndex(index) {
             savedMazes[index].cloudId = d.maze && d.maze.id;
             localStorage.setItem('savedMazes', JSON.stringify(savedMazes));
         }
+        if (typeof unlockCloudMapsAchievement === 'function') unlockCloudMapsAchievement();
     } catch (e) { showNotification('上传失败：' + e.message); }
 }
 
@@ -21927,6 +21959,17 @@ function updateAchievementProgress() {
         document.getElementById('achievement6').classList.add('completed');
         document.getElementById('status6').textContent = '已完成';
     }
+    
+    // 更新成就7：往云储存账号内存入4张地图（进度 = 当前云地图数，上限按 4 显示）
+    const cloudMapsCount = Math.min(gameState.achievements.cloudMapsStored || 0, 4);
+    const progress7 = Math.min(100, ((gameState.achievements.cloudMapsStored || 0) / 4) * 100);
+    document.getElementById('progress7').style.width = progress7 + '%';
+    document.getElementById('progressText7').textContent = cloudMapsCount + '/4';
+    
+    if ((gameState.achievements.cloudMapsStored || 0) >= 4) {
+        document.getElementById('achievement7').classList.add('completed');
+        document.getElementById('status7').textContent = '已完成';
+    }
 }
 
 // 更新统计数据面板
@@ -22075,6 +22118,55 @@ function recordAchievement(type, value = 1) {
     }, 1000);
     
     updateAchievementProgress();
+}
+
+// ===== 成就「重新判定」：按当前游戏状态重新核验所有成就获取条件 =====
+// 条件满足但未解锁的补解锁（已解锁不撤销）；计数型成就（社交达人/陷阱专家）数值实时维护，达标即视为完成。
+async function recheckAchievements() {
+    if (!gameState.achievements) gameState.achievements = { allLevelsCompleted: false, multiplayerWins: 0, trapHits: 0, chineseEmojiUsed: false, puzzleMaster: false, cloudStorageLoggedIn: false, cloudMapsStored: 0 };
+    const ach = gameState.achievements;
+    const newly = [];
+    let changed = false;
+    // 1. 迷宫大师：通关 80 关
+    const totalLv = (gameState.gameStats && gameState.gameStats.totalLevelsCompleted) || 0;
+    if (!ach.allLevelsCompleted && totalLv >= 80) { ach.allLevelsCompleted = true; newly.push('迷宫大师'); changed = true; }
+    // 2. 社交达人：多人联机通关 10 次（计数实时维护，>=10 即完成，此处仅确认数值存在）
+    ach.multiplayerWins = ach.multiplayerWins || 0;
+    // 3. 陷阱专家：踩中陷阱 30 次（计数实时维护）
+    ach.trapHits = ach.trapHits || 0;
+    // 4. 伟大的国家：无独立数据源可重新核验（触发即记录），保持现状
+    // 5. 解密高手：解密游戏 1-60 关全部通关
+    const puzzleDone = Array.isArray(gameState.puzzleCompletedLevels) ? gameState.puzzleCompletedLevels.filter(l => l >= 1 && l <= 60).length : 0;
+    if (!ach.puzzleMaster && puzzleDone >= 60) { ach.puzzleMaster = true; newly.push('解密高手'); changed = true; }
+    // 6. 云储存：当前已登录云储存账号
+    let cloudToken = '';
+    try { cloudToken = localStorage.getItem(CLOUD_TOKEN_KEY) || ''; } catch (e) {}
+    if (!ach.cloudStorageLoggedIn && cloudToken) { ach.cloudStorageLoggedIn = true; newly.push('云储存'); changed = true; }
+    // 7. 云地图：云端地图数 >= 4（异步拉取真实数量）
+    let cloudMapsCount = ach.cloudMapsStored || 0;
+    if (cloudToken) {
+        try {
+            const r = await cloudApi('/mazes');
+            const d = await r.json();
+            if (r.ok && d.success && Array.isArray(d.mazes)) cloudMapsCount = d.mazes.length;
+        } catch (e) {}
+    }
+    if (cloudMapsCount > (ach.cloudMapsStored || 0)) {
+        const wasUnlocked = (ach.cloudMapsStored || 0) >= 4;
+        ach.cloudMapsStored = cloudMapsCount;
+        changed = true;
+        if (!wasUnlocked && cloudMapsCount >= 4) newly.push('云地图');
+    }
+    if (changed) {
+        try { localStorage.setItem('achievements', JSON.stringify(ach)); } catch (e) {}
+        if (typeof updateAchievementProgress === 'function') updateAchievementProgress();
+    }
+    if (newly.length > 0) {
+        if (typeof showAchievementUnlocked === 'function') newly.forEach(n => showAchievementUnlocked(n, '重新判定：条件已满足！'));
+        if (typeof showNotification === 'function') showNotification('✅ 成就重新判定完成，解锁：' + newly.join('、'));
+    } else {
+        if (typeof showNotification === 'function') showNotification('🔍 成就重新判定完成，暂无新成就解锁');
+    }
 }
 
 // 显示成就解锁提示
@@ -26144,11 +26236,6 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                 const r = await clinkApi('/2fa/challenge');
                 const d = await r.json();
                 if (r.ok && d && d.challenge) clinkSpotCheckModal();
-                else if (r.ok && d && d.expired) {
-                    // 抽查任务已超时未完成（如弹窗未弹出/用户切走未响应）→ 退出登录
-                    showNotification('⚠️ 安全抽查超时未完成，已退出云链接账号');
-                    window.clinkLogout();
-                }
             } catch (e) {}
         };
         beat();
@@ -26178,8 +26265,7 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         const uname = localStorage.getItem(CLINK_USER_KEY) || '';
         m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
             '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
-            '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。<br><span style="color:#ff8a80;">超时未完成将自动退出登录。</span></div>' +
-            '<div id="clinkSpotCountdown" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
+            '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
             '<input id="clinkSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
             '<div id="clinkSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
             '<div style="display:flex;gap:8px;">' +
@@ -26190,15 +26276,6 @@ function drawPlayerWithSkin(ctx, x, y, size) {
         document.body.appendChild(m);
         const okBtn = document.getElementById('clinkSpotOk');
         const codeEl = document.getElementById('clinkSpotCode');
-        // 超时兜底：与服务端抽查任务 TTL（2.5 分钟）一致，超时未完成 → 退出登录
-        const deadline = Date.now() + 150000;
-        window.__clinkSpotTimer = setTimeout(() => { clinkSpotCheckCancel(); }, 150000);
-        const cntEl = document.getElementById('clinkSpotCountdown');
-        window.__clinkSpotCountdown = setInterval(() => {
-            const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-            if (cntEl) cntEl.textContent = '⏱️ 剩余 ' + left + ' 秒完成验证，超时将退出登录';
-            if (left <= 0) { if (window.__clinkSpotCountdown) clearInterval(window.__clinkSpotCountdown); }
-        }, 500);
         const submit = async () => {
             const code = (codeEl.value || '').trim();
             if (!/^\d{4,8}$/.test(code)) { document.getElementById('clinkSpotMsg').textContent = '请输入 6 位动态码'; return; }
@@ -26211,8 +26288,6 @@ function drawPlayerWithSkin(ctx, x, y, size) {
                     showNotification('🛡️ 抽查验证通过');
                     return;
                 }
-                // 任务已超时：本次抽查未在期限内完成 → 退出登录
-                if (d && d.expired) { closeClinkSpotCheckModal(); showNotification('⚠️ 抽查已超时未完成，已退出云链接账号'); window.clinkLogout(); return; }
                 const msg = document.getElementById('clinkSpotMsg');
                 if (msg) msg.textContent = '❌ ' + (d.message || '验证失败');
                 okBtn.disabled = false; okBtn.textContent = '✅ 提交验证';
@@ -26869,13 +26944,14 @@ function drawPlayerWithSkin(ctx, x, y, size) {
             const visits = d.visits || [];
             if (visits.length === 0) { setBody('<p style="color:#888; text-align:center; padding:20px;">还没有人访问过这条链接。</p>'); return; }
             const rows = visits.map(v => {
-                const who = v.username ? escapeHtmlSafe(v.username) : '<span style="color:#777;">匿名（' + escapeHtmlSafe(v.client_id || '未知') + '）</span>';
+                const who = v.username ? escapeHtmlSafe(v.username) : '<span style="color:#777;">匿名</span>';
+                const clid = v.client_id ? '<span style="color:#90a4ae; font-size:11px;">ID: ' + escapeHtmlSafe(v.client_id) + '</span>' : '';
                 const tag = v.source === 'account'
-                    ? '<span style="color:#80cbc4; font-size:11px; border:1px solid #80cbc4; border-radius:4px; padding:0 4px; margin-left:6px;">云链接账号</span>'
+                    ? '<span style="color:#80cbc4; font-size:11px; border:1px solid #80cbc4; border-radius:4px; padding:0 4px; margin-left:6px;">账号</span>'
                     : '<span style="color:#ffcc80; font-size:11px; border:1px solid #ffcc80; border-radius:4px; padding:0 4px; margin-left:6px;">玩家</span>';
-                return '<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:rgba(255,255,255,0.05); border-radius:6px; margin-bottom:6px;">' +
-                    '<span>' + who + tag + '</span>' +
-                    '<span style="color:#9e9e9e; font-size:12px; white-space:nowrap; margin-left:8px;">' + (typeof formatCloudTime === 'function' ? formatCloudTime(v.created_at) : escapeHtmlSafe(v.created_at || '')) + '</span></div>';
+                return '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 10px; background:rgba(255,255,255,0.05); border-radius:6px; margin-bottom:6px;">' +
+                    '<span style="min-width:0; overflow:hidden; text-overflow:ellipsis;">' + who + tag + (clid ? '　' + clid : '') + '</span>' +
+                    '<span style="color:#9e9e9e; font-size:12px; white-space:nowrap;">' + (typeof formatCloudTime === 'function' ? formatCloudTime(v.created_at) : escapeHtmlSafe(v.created_at || '')) + '</span></div>';
             }).join('');
             setBody('<div style="margin-bottom:10px; color:#b39ddb; font-size:12px;">链接「' + escapeHtmlSafe(d.name || code) + '」共 <b>' + visits.length + '</b> 次访问记录</div>' + rows);
         } catch (e) {
@@ -27029,7 +27105,7 @@ const BACKUP_KINDS = [
     { kind: 'statistics', label: '统计信息', desc: '📊 统计信息（时长/步数/金币等）' },
     { kind: 'ui_settings', label: 'UI设置', desc: '🎨 UI 设置（控制/音乐等）' }
 ];
-const BACKUP_DEFAULT_ACH = { allLevelsCompleted:false, multiplayerWins:0, trapHits:0, chineseEmojiUsed:false, puzzleMaster:false, cloudStorageLoggedIn:false };
+const BACKUP_DEFAULT_ACH = { allLevelsCompleted:false, multiplayerWins:0, trapHits:0, chineseEmojiUsed:false, puzzleMaster:false, cloudStorageLoggedIn:false, cloudMapsStored:0 };
 const BACKUP_DEFAULT_STATS = { timeChallengeBest:0, puzzleLevelsCompleted:0, totalLevelsCompleted:0, totalPlayTime:0, totalMoves:0, totalTrapsTriggered:0, totalCoinsCollected:0, averageMovesPerLevel:0, completionRate:0 };
 // 成就备份摘要：字段 → 成就名 / 解锁判定 / 进度展示（与 updateAchievementProgress 阈值一致）
 const BACKUP_ACH_META = [
@@ -27038,13 +27114,16 @@ const BACKUP_ACH_META = [
     { key:'trapHits',            name:'陷阱专家', done:d=>(d.trapHits||0)>=30,         val:d=>'进度 '+(d.trapHits||0)+'/30' },
     { key:'chineseEmojiUsed',    name:'伟大的国家', done:d=>d.chineseEmojiUsed===true, val:d=>d.chineseEmojiUsed?'✅ 已解锁':'⬜ 未解锁' },
     { key:'puzzleMaster',        name:'解密高手', done:d=>d.puzzleMaster===true,       val:d=>d.puzzleMaster?'✅ 已解锁':'⬜ 未解锁' },
-    { key:'cloudStorageLoggedIn',name:'云储存',   done:d=>d.cloudStorageLoggedIn===true,val:d=>d.cloudStorageLoggedIn?'✅ 已解锁':'⬜ 未解锁' }
+    { key:'cloudStorageLoggedIn',name:'云储存',   done:d=>d.cloudStorageLoggedIn===true,val:d=>d.cloudStorageLoggedIn?'✅ 已解锁':'⬜ 未解锁' },
+    { key:'cloudMapsStored',     name:'云地图',   done:d=>(d.cloudMapsStored||0)>=4,      val:d=>'进度 '+Math.min(d.cloudMapsStored||0,4)+'/4' }
 ];
 // UI 设置备份摘要：字段 → 中文名
 const BACKUP_UI_KEY_NAMES = {
     showControls:'显示操作盘', controlsPosition:'操作盘位置', controlsSize:'操作盘大小', controlsOpacity:'操作盘透明度',
     showGameInfo:'显示游戏信息', showLevelInfo:'显示关卡信息', showTimeInfo:'显示时间', showMoveInfo:'显示步数', showKeyInfo:'显示按键',
-    customMusic:'自定义音乐', showTimer:'显示计时器', showHint:'显示提示', soundEnabled:'音效', musicEnabled:'音乐'
+    showRoomInfo:'显示房间信息', showPlayerList:'显示玩家列表', joystickEnabled:'启用摇杆', joystickSensitivity:'摇杆灵敏度',
+    showTimer:'显示计时器', showHint:'显示提示', soundEnabled:'音效', musicEnabled:'音乐', musicVolume:'音乐音量', musicSelected:'所选音乐',
+    customMusic:'自定义音乐', customX:'自定义位置X', customY:'自定义位置Y', uiMode:'界面模式'
 };
 // 生成某类备份的详细摘要文本（云端数据 → 可读详情）
 function backupKindSummary(kind, data) {
@@ -27075,14 +27154,13 @@ function backupKindSummary(kind, data) {
         }
         if (kind === 'ui_settings') {
             const nameOf = (k) => BACKUP_UI_KEY_NAMES[k] || (typeof escapeHtmlLocal === 'function' ? escapeHtmlLocal(k) : k);
-            const keys = Object.keys(data).filter(k => k !== 'customMusic');
+            // 只统计布尔开关项（数值项在备份时已剔除，旧备份里的数值项也不展示、不计入）
+            const keys = Object.keys(data).filter(k => k !== 'customMusic' && (data[k] === true || data[k] === false));
             const on = keys.filter(k => data[k] === true).map(nameOf);
             const off = keys.filter(k => data[k] === false);
-            const numeric = keys.filter(k => data[k] !== true && data[k] !== false && data[k] !== undefined && data[k] !== null);
-            let s = '已保存 <b>' + keys.length + '</b> 项界面设置';
+            let s = '已保存 <b>' + keys.length + '</b> 项界面设置（仅开关项）';
             if (on.length) s += '<br>✅ 开启：' + on.join('、');
             if (off.length) s += '<br>⬜ 关闭：' + off.map(nameOf).join('、');
-            if (numeric.length) s += '<br>⚙️ 数值项：' + numeric.map(k => nameOf(k) + '=' + String(data[k])).join('、');
             return s;
         }
         return '云端已备份';
@@ -27338,7 +27416,6 @@ function backupStartSpotCheck() {
             const r = await backupApi('/2fa/challenge');
             const d = await r.json();
             if (r.ok && d && d.challenge) backupSpotCheckModal();
-            else if (r.ok && d && d.expired) { showNotification('⚠️ 安全抽查超时未完成，已退出云备份账号'); backupLogout(); }
         } catch(e){}
     };
     beat();
@@ -27357,8 +27434,7 @@ function backupSpotCheckModal() {
     const uname = localStorage.getItem(BACKUP_USER_KEY)||'';
     m.innerHTML = '<div style="background:#1e1e2e;color:#fff;width:min(420px,92vw);padding:22px;border-radius:12px;">' +
         '<div style="font-weight:bold;margin-bottom:8px;font-size:16px;">🛡️ 安全抽查</div>' +
-        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请立即输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。<br><span style="color:#ff8a80;">超时未完成将自动退出登录。</span></div>' +
-        '<div id="backupSpotCountdown" style="font-size:12px;color:#aed581;text-align:center;margin-bottom:8px;"></div>' +
+        '<div style="font-size:13px;color:#ffb74d;margin-bottom:12px;line-height:1.6;">服务端随机安全抽查：账号 <b>' + escapeHtmlLocal(uname) + '</b> 请输入你的 2FA 浏览器插件当前显示的 <b>6 位动态验证码</b> 以确认是你本人。</div>' +
         '<input id="backupSpotCode" inputmode="numeric" maxlength="6" placeholder="6 位动态码" style="width:100%;box-sizing:border-box;padding:11px;border-radius:6px;border:1px solid #555;background:#222;color:#fff;font-size:18px;letter-spacing:4px;text-align:center;margin-bottom:10px;">' +
         '<div id="backupSpotMsg" style="font-size:12px;color:#ff8a80;min-height:16px;margin-bottom:8px;"></div>' +
         '<div style="display:flex;gap:8px;">' +
@@ -27370,15 +27446,6 @@ function backupSpotCheckModal() {
     const okBtn = document.getElementById('backupSpotOk');
     const codeEl = document.getElementById('backupSpotCode');
     const setMsg = (t)=>{ const el=document.getElementById('backupSpotMsg'); if(el) el.textContent=t; };
-    // 超时兜底：与服务端抽查任务 TTL（2.5 分钟）一致，超时未完成 → 退出登录
-    const deadline = Date.now() + 150000;
-    window.__backupSpotTimer = setTimeout(() => { backupSpotCheckCancel(); }, 150000);
-    const cntEl = document.getElementById('backupSpotCountdown');
-    window.__backupSpotCountdown = setInterval(() => {
-        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-        if (cntEl) cntEl.textContent = '⏱️ 剩余 ' + left + ' 秒完成验证，超时将退出登录';
-        if (left <= 0) { if (window.__backupSpotCountdown) clearInterval(window.__backupSpotCountdown); }
-    }, 500);
     const submit = async () => {
         const code = (codeEl.value||'').trim();
         if (!/^\d{4,8}$/.test(code)) { setMsg('请输入 6 位动态码'); return; }
@@ -27387,7 +27454,6 @@ function backupSpotCheckModal() {
             const r = await backupApi('/2fa/challenge', { method:'POST', body: JSON.stringify({ code }) });
             const d = await r.json();
             if (r.ok && d.success) { closeBackupSpotCheckModal(); showNotification('✅ 安全抽查通过'); return; }
-            if (d && d.expired) { closeBackupSpotCheckModal(); showNotification('⚠️ 抽查已超时未完成，已退出云备份账号'); backupLogout(); return; }
             setMsg('❌ '+(d.message||'验证失败')); okBtn.disabled=false; okBtn.textContent='✅ 提交验证';
         } catch(e){ setMsg('❌ '+e.message); okBtn.disabled=false; okBtn.textContent='✅ 提交验证'; }
     };
@@ -27787,8 +27853,31 @@ function closeBackupAccountSettings(){ const m=document.getElementById('backupAc
 // ===== 云备份 三项数据（成就/统计/UI设置）上传 / 下载应用 / 删除 =====
 function backupCollectLocal(kind) {
     if (kind==='achievements') return JSON.parse(JSON.stringify(Object.assign({}, BACKUP_DEFAULT_ACH, gameState.achievements||{})));
-    if (kind==='statistics') return JSON.parse(JSON.stringify(Object.assign({}, BACKUP_DEFAULT_STATS, gameState.gameStats||{})));
-    if (kind==='ui_settings') return JSON.parse(JSON.stringify(gameState.uiSettings||{}));
+    if (kind==='statistics') {
+        // 修复：游戏实际把游玩时长累计在 gameState.totalPlayTime（毫秒），gameStats.totalPlayTime 从未维护（恒 0）；
+        // 平均步数/完成率是 UI 实时计算的派生值，也从不写入 gameStats（恒 0）。
+        // 备份时统一用实时值覆盖，否则备份/恢复这些统计永远是 0。
+        const stats = gameState.gameStats || {};
+        const _totalLevels = stats.totalLevelsCompleted || 0;
+        const _totalMoves = stats.totalMoves || 0;
+        const _avgMoves = _totalLevels > 0 ? Math.round((_totalMoves / _totalLevels) * 10) / 10 : 0;
+        // 完成率与 updateStatistics 一致：仅统计 1-80 关去重完成数
+        const _officialCompleted = Array.isArray(gameState.completedLevels) ? gameState.completedLevels.filter(l => l >= 1 && l <= 80).length : 0;
+        const _denominator = Math.max(gameState.unlockedLevel || 1, _officialCompleted);
+        const _completionRate = _denominator > 0 ? Math.min((_officialCompleted / _denominator) * 100, 100) : 0;
+        return JSON.parse(JSON.stringify(Object.assign({}, BACKUP_DEFAULT_STATS, stats, {
+            totalPlayTime: (typeof gameState.totalPlayTime === 'number' && gameState.totalPlayTime > 0) ? gameState.totalPlayTime : (stats.totalPlayTime || 0),
+            averageMovesPerLevel: _avgMoves,
+            completionRate: Math.round(_completionRate * 10) / 10
+        })));
+    }
+    if (kind==='ui_settings') {
+        // 只备份开关项（布尔值），数值项（操作盘位置/大小/透明度等）不入备份
+        const src = gameState.uiSettings || {};
+        const out = {};
+        Object.keys(src).forEach(k => { if (typeof src[k] === 'boolean') out[k] = src[k]; });
+        return out;
+    }
     return {};
 }
 function backupApplyLocal(kind, data) {
@@ -27800,6 +27889,11 @@ function backupApplyLocal(kind, data) {
     } else if (kind==='statistics') {
         gameState.gameStats = Object.assign({}, BACKUP_DEFAULT_STATS, data);
         try { localStorage.setItem('gameStats', JSON.stringify(gameState.gameStats)); } catch(e){}
+        // 恢复游玩时长：同步到 gameState.totalPlayTime（UI 显示与本地存档都读它）
+        if (typeof data.totalPlayTime === 'number' && data.totalPlayTime > 0) {
+            gameState.totalPlayTime = data.totalPlayTime;
+            try { localStorage.setItem('totalPlayTime', String(data.totalPlayTime)); } catch(e){}
+        }
         if (typeof updateStatistics==='function' && document.getElementById('totalPlayTime')) { try { updateStatistics(); } catch(e){} }
     } else if (kind==='ui_settings') {
         if (typeof applyServerUISettings==='function') { try { applyServerUISettings(data); } catch(e){} }
