@@ -281,6 +281,19 @@ const DB_TABLES_SQL = [
         updated_at VARCHAR(32),
         INDEX idx_cloud_link_user (username)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS cloud_link_visits (
+        id VARCHAR(64) PRIMARY KEY,
+        code VARCHAR(32) NOT NULL,
+        link_name VARCHAR(128),
+        username VARCHAR(64) NOT NULL,
+        source VARCHAR(16) DEFAULT 'player',
+        client_id VARCHAR(64),
+        ip VARCHAR(64),
+        created_at VARCHAR(32),
+        INDEX idx_clv_code (code),
+        INDEX idx_clv_user (username),
+        INDEX idx_clv_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_link_sessions (
         id VARCHAR(64) PRIMARY KEY,
         username VARCHAR(64) NOT NULL,
@@ -1214,7 +1227,7 @@ app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.ht
 app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'superadmin.html')));
 
 // 定义服务器的版本号
-const SERVER_VERSION = "1.15.5";
+const SERVER_VERSION = "1.15.7";
 // 服务端记住“见过的最高客户端版本号”。正常情况下等于 SERVER_VERSION；
 // 一旦有更高版本的客户端连入（即发布了新客户端），会自动记录为最新，
 // 从而让仍使用旧版（缓存）的客户端在进游戏时收到“有更新”的弹窗。
@@ -5377,6 +5390,75 @@ function saveCloudLinksFile() {
 }
 loadCloudLinks();
 
+// ===== 云链接访问记录：谁访问过哪条链接（管理端可查）。DB 优先（cloud_link_visits 表），失败回退 JSON 文件。 =====
+const CLOUD_LINK_VISITS_FILE = path.join(DATA_DIR, 'cloud-link-visits.json');
+let cloudLinkVisits = []; // { id, code, link_name, username, source: 'account'|'player', client_id, ip, created_at }，新记录在前
+const CLOUD_LINK_VISITS_MAX = 5000; // 内存/JSON 最多保留条数（DB 模式不限制，仅防止 JSON 模式无限膨胀）
+function loadCloudLinkVisits() {
+    try {
+        if (fs.existsSync(CLOUD_LINK_VISITS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(CLOUD_LINK_VISITS_FILE, 'utf8'));
+            if (Array.isArray(arr)) cloudLinkVisits = arr.slice(0, CLOUD_LINK_VISITS_MAX);
+        }
+    } catch (e) { console.error('[云链接] 访问记录加载失败:', e.message); }
+}
+function saveCloudLinkVisits() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(CLOUD_LINK_VISITS_FILE, JSON.stringify(cloudLinkVisits.slice(0, CLOUD_LINK_VISITS_MAX), null, 2));
+    } catch (e) { console.error('[云链接] 访问记录保存失败:', e.message); }
+}
+async function dbAddLinkVisit(v) {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query(
+                'INSERT INTO cloud_link_visits (id, code, link_name, username, source, client_id, ip, created_at) VALUES (?,?,?,?,?,?,?,?)',
+                [v.id, v.code, v.link_name, v.username, v.source, v.client_id || null, v.ip || null, v.created_at]);
+            return;
+        } catch (e) { console.error('[云链接] DB 写访问记录失败:', e.message); }
+    }
+    cloudLinkVisits.unshift(v);
+    if (cloudLinkVisits.length > CLOUD_LINK_VISITS_MAX) cloudLinkVisits.length = CLOUD_LINK_VISITS_MAX;
+    saveCloudLinkVisits();
+}
+async function dbRemoveLinkVisits(code) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM cloud_link_visits WHERE code=?', [code]); } catch (e) { console.error('[云链接] DB 删访问记录失败:', e.message); }
+    }
+    cloudLinkVisits = cloudLinkVisits.filter(v => v.code !== code);
+    saveCloudLinkVisits();
+}
+async function dbAllLinkVisits(q, limit) {
+    q = (q || '').toString().trim();
+    limit = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+    if (DB_AVAILABLE && pool) {
+        try {
+            if (q) {
+                const like = '%' + q + '%';
+                const [rows] = await pool.query(
+                    'SELECT * FROM cloud_link_visits WHERE code LIKE ? OR username LIKE ? OR link_name LIKE ? ORDER BY created_at DESC LIMIT ?',
+                    [like, like, like, limit]);
+                if (rows) return rows;
+            } else {
+                const [rows] = await pool.query('SELECT * FROM cloud_link_visits ORDER BY created_at DESC LIMIT ?', [limit]);
+                if (rows) return rows;
+            }
+        } catch (e) { console.error('[云链接] DB 读访问记录失败:', e.message); }
+    }
+    let list = cloudLinkVisits.slice(0, limit);
+    if (q) list = list.filter(v => (v.code || '').includes(q) || (v.username || '').includes(q) || (v.link_name || '').includes(q));
+    return list;
+}
+// 玩家端：按短链码精确查该链接的访问记录（仅属主可见；DB 优先，失败回退内存/JSON）
+async function dbLinkVisitsByCode(code, limit) {
+    limit = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT * FROM cloud_link_visits WHERE code=? ORDER BY created_at DESC LIMIT ?', [code, limit]); if (rows) return rows; } catch (e) { console.error('[云链接] DB 读链接访问记录失败:', e.message); }
+    }
+    return cloudLinkVisits.filter(v => v.code === code).slice(0, limit);
+}
+loadCloudLinkVisits();
+
 // 生成短链码：8 位去混淆字符（无 I O 0 1），冲突则重试
 function genLinkCode() {
     const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -5479,9 +5561,12 @@ async function dbUpsertLink(l) {
 async function dbDeleteLink(code) {
     if (DB_AVAILABLE && pool) {
         try { await pool.query('DELETE FROM cloud_links WHERE code=?', [code]); } catch (e) { console.error('[云链接] DB 删链接失败:', e.message); }
+        try { await pool.query('DELETE FROM cloud_link_visits WHERE code=?', [code]); } catch (e) { console.error('[云链接] DB 删访问记录失败:', e.message); }
     }
     cloudLinks.delete(code);
+    cloudLinkVisits = cloudLinkVisits.filter(v => v.code !== code);
     saveCloudLinksFile();
+    saveCloudLinkVisits();
 }
 async function dbDeleteLinkAccount(username) {
     if (DB_AVAILABLE && pool) {
@@ -6002,6 +6087,7 @@ app.delete('/api/cloud-links/:code', requireLinkAuth, async (req, res) => {
 });
 
 // 公开：按短链码读取迷宫数据（游戏客户端凭 ?mazeLink=code 拉取后直接开玩）
+// 同时记录访问者：优先取云链接账号（Authorization Bearer），其次玩家名（?name=），兜底 clientId
 app.get('/api/maze-link/:code', async (req, res) => {
     try {
         if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
@@ -6011,6 +6097,29 @@ app.get('/api/maze-link/:code', async (req, res) => {
         const data = parseLinkData(l.data);
         if (!data) return res.status(500).json({ success: false, message: '迷宫数据损坏' });
         dbBumpLinkViews(l.code).catch(() => {});
+        // —— 记录访问者（失败不影响正常读取）——
+        try {
+            let visitUser = '', visitSource = 'player';
+            const ah = req.headers.authorization || '';
+            if (ah.startsWith('Bearer ')) {
+                try {
+                    const dec = jwt.verify(ah.substring(7), JWT_SECRET);
+                    if (dec && dec.type === 'clink' && dec.username) { visitUser = String(dec.username).slice(0, 64); visitSource = 'account'; }
+                } catch (e) { /* 令牌无效则按匿名处理 */ }
+            }
+            if (!visitUser) visitUser = (req.query.name || '').toString().trim().slice(0, 64);
+            const clid = (req.query.clientId || '').toString().trim().slice(0, 64);
+            if (!visitUser && clid) { visitUser = 'player:' + clid; }
+            if (visitUser) {
+                await dbAddLinkVisit({
+                    id: 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+                    code: l.code, link_name: l.name || '未命名迷宫',
+                    username: visitUser, source: visitSource,
+                    client_id: clid || null, ip: getClientIp(req),
+                    created_at: new Date().toISOString()
+                });
+            }
+        } catch (e) { /* 记录失败忽略 */ }
         res.json({ success: true, code: l.code, name: l.name, author: l.username, views: Number(l.views || 0) + 1, maze: data });
     } catch (e) {
         console.error('[云链接] 读取失败:', e);
@@ -6079,6 +6188,48 @@ app.get('/api/admin/cloud-links', requireAdminAuth, async (req, res) => {
         });
     } catch (e) {
         console.error('[云链接] 管理端读链接失败:', e);
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 链接访问记录：所有访问过链接的用户（可筛链接码/用户名/链接名）
+app.get('/api/admin/cloud-links/visits', requireAdminAuth, async (req, res) => {
+    try {
+        const q = (req.query.q || '').toString().trim();
+        const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 2000);
+        const rows = await dbAllLinkVisits(q, limit);
+        res.json({
+            success: true,
+            visits: (rows || []).map(v => ({
+                id: v.id, code: v.code, link_name: v.link_name || '',
+                username: v.username, source: v.source === 'account' ? 'account' : 'player',
+                client_id: v.client_id || null, ip: v.ip || null, created_at: v.created_at
+            }))
+        });
+    } catch (e) {
+        console.error('[云链接] 管理端读访问记录失败:', e);
+        res.status(500).json({ success: false, message: '获取失败' });
+    }
+});
+
+// 玩家：查看自己某条链接的访问者名单（仅链接属主可见，校验 username）
+app.get('/api/cloud-links/:code/visits', requireLinkAuth, async (req, res) => {
+    try {
+        const l = await dbGetLink(req.params.code);
+        if (!l || l.username !== req.linkUser) return res.status(404).json({ success: false, message: '链接不存在' });
+        const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+        const rows = await dbLinkVisitsByCode(l.code, limit);
+        res.json({
+            success: true,
+            code: l.code,
+            name: l.name || '',
+            visits: (rows || []).map(v => ({
+                username: v.username, source: v.source === 'account' ? 'account' : 'player',
+                client_id: v.client_id || null, created_at: v.created_at
+            }))
+        });
+    } catch (e) {
+        console.error('[云链接] 玩家读访问记录失败:', e);
         res.status(500).json({ success: false, message: '获取失败' });
     }
 });
@@ -7040,11 +7191,11 @@ async function dbDeleteBackup(username, kind) {
 }
 async function dbGetBackupKinds(username) {
     if (DB_AVAILABLE && pool) {
-        try { const [rows] = await pool.query('SELECT kind, updated_at FROM cloud_backups WHERE username=? ORDER BY updated_at DESC', [username]); if (rows) return rows.map(r => ({ kind: r.kind, updated_at: r.updated_at || null })); } catch (e) { console.error('[云备份] DB 读备份列表失败:', e.message); }
+        try { const [rows] = await pool.query('SELECT kind, data, updated_at FROM cloud_backups WHERE username=? ORDER BY updated_at DESC', [username]); if (rows) return rows.map(r => { let data = r.data; if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = null; } } return { kind: r.kind, updated_at: r.updated_at || null, data: normalizeBackupData(data) }; }); } catch (e) { console.error('[云备份] DB 读备份列表失败:', e.message); }
     }
     const b = backupBackups.get(username);
     if (!b) return [];
-    return Object.keys(b).map(k => ({ kind: k, updated_at: (b[k] && b[k].updated_at) || null }));
+    return Object.keys(b).map(k => ({ kind: k, updated_at: (b[k] && b[k].updated_at) || null, data: normalizeBackupData(b[k] && b[k].data) }));
 }
 // ===== 云备份会话（设备）管理 =====
 const BACKUP_SESSIONS_FILE = path.join(DATA_DIR, 'cloud-backup-sessions.json');
