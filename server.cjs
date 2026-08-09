@@ -2371,6 +2371,69 @@ async function saveHomeProfiles() {
         } catch (e) { console.error('[Home] DB 保存失败:', e.message); }
     }
 }
+// ===== 好友系统：好友请求 / 好友关系 / 好友私聊 =====
+// 持久化到 data/friends.json（内存 Map + JSON 文件）。本项目“优先 MySQL、未配 DB 回退 JSON”，
+// 好友属新增自包含关系数据，且私聊消息高频，为避免在共享 filess.io 库上频繁建表/写库触发连接上限，
+// 此处采用 JSON 文件存储（即回退路径），稳定且零迁移风险；后续如需可补 MySQL 表。
+const FRIENDS_FILE = path.join(DATA_DIR, 'friends.json');
+// friendRequests: Map requestId -> {id, fromClientId, fromName, toClientId, toName, status, createdAt, updatedAt}
+// friendships:   Map `${a}|${b}`(a<b) -> {userA, userB, createdAt}
+// friendMessages: Map chatId `${a}|${b}`(a<b) -> [{id, fromClientId, toClientId, message, createdAt}]
+let friendRequests = new Map();
+let friendships = new Map();
+let friendMessages = new Map();
+let _friendReqSeq = 1;
+
+function friendshipKey(a, b) { return [String(a), String(b)].sort().join('|'); }
+
+function loadFriends() {
+    try {
+        if (fs.existsSync(FRIENDS_FILE)) {
+            const d = JSON.parse(fs.readFileSync(FRIENDS_FILE, 'utf8')) || {};
+            (d.requests || []).forEach(r => { if (r && r.id) friendRequests.set(r.id, r); });
+            (d.friendships || []).forEach(f => { if (f && f.userA && f.userB) friendships.set(friendshipKey(f.userA, f.userB), f); });
+            (d.messages || []).forEach(m => {
+                if (m && m.fromClientId && m.toClientId) {
+                    const k = friendshipKey(m.fromClientId, m.toClientId);
+                    if (!friendMessages.has(k)) friendMessages.set(k, []);
+                    friendMessages.get(k).push(m);
+                }
+            });
+        }
+    } catch (e) { console.error('[Friends] 加载失败:', e.message); }
+    for (const r of friendRequests.keys()) {
+        const n = parseInt(String(r).replace(/[^0-9]/g, ''), 10);
+        if (!isNaN(n) && n >= _friendReqSeq) _friendReqSeq = n + 1;
+    }
+}
+function saveFriends() {
+    ensureDataDir();
+    try {
+        const msgs = [];
+        for (const arr of friendMessages.values()) arr.forEach(m => msgs.push(m));
+        const data = {
+            requests: Array.from(friendRequests.values()),
+            friendships: Array.from(friendships.values()),
+            messages: msgs
+        };
+        fs.writeFileSync(FRIENDS_FILE, JSON.stringify(data, null, 2));
+    } catch (e) { console.error('[Friends] 保存失败:', e.message); }
+}
+function areFriends(a, b) { return friendships.has(friendshipKey(a, b)); }
+// 找到 a、b 之间处于 pending 的请求（任意方向），返回该请求或 null
+function findPendingRequest(a, b) {
+    for (const r of friendRequests.values()) {
+        if (r.status !== 'pending') continue;
+        if ((r.fromClientId === a && r.toClientId === b) || (r.fromClientId === b && r.toClientId === a)) return r;
+    }
+    return null;
+}
+// 向指定 clientId 推送 socket 事件（仅当其有活跃 socket 连接时；仅 REST 在线的玩家无法实时收到）
+function pushToClientSocket(clientId, event, data) {
+    const sid = onlineSockets.get(clientId);
+    if (sid && sid !== 'rest') { try { io.to(sid).emit(event, data); } catch (_) {} }
+}
+
 // 归一化并限制大小，防止滥用
 function sanitizeHomeProfile(input) {
     const p = {};
@@ -2431,6 +2494,210 @@ app.get('/api/profile/:clientId', (req, res) => {
     const p = homeProfiles.get(req.params.clientId);
     if (!p) return res.json({ success: true, profile: null });
     res.json({ success: true, profile: Object.assign({ clientId: req.params.clientId }, p) });
+});
+
+// 好友搜索：按显示名搜索当前在线玩家（公开，无鉴权）
+// 仅遍历 onlinePlayers（进入游戏即上线的玩家），匹配不区分大小写的子串；
+// 返回轻量预览（头像/颜色/简介），点击后客户端再用 showPlayerProfileModal 拉取完整主页。
+app.get('/api/players/search', (req, res) => {
+    try {
+        const q = (req.query.q || '').toString().trim().toLowerCase();
+        if (!q) return res.json({ success: true, players: [] });
+        const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+        const out = [];
+        for (const [clientId, p] of onlinePlayers.entries()) {
+            if (!p) continue;
+            const name = (p.name || '').toString();
+            if (name.toLowerCase().indexOf(q) !== -1) {
+                const prof = homeProfiles.get(clientId) || {};
+                out.push({
+                    clientId: clientId,
+                    name: name,
+                    avatar: prof.avatar || '😀',
+                    color: prof.color || '#4CAF50',
+                    bio: (prof.bio || '').toString().slice(0, 60),
+                    online: true,
+                    roomId: p.roomId || null
+                });
+                if (out.length >= limit) break;
+            }
+        }
+        res.json({ success: true, players: out });
+    } catch (e) {
+        console.error('[Search] 好友搜索失败:', e);
+        res.status(500).json({ success: false, message: '搜索失败' });
+    }
+});
+
+// ===== 好友系统 REST 接口（公开，无鉴权；与 player-online 等同属小游戏社交接口）=====
+
+// 发送好友请求
+app.post('/api/friends/request', (req, res) => {
+    try {
+        const { fromClientId, toClientId, fromName, toName } = req.body || {};
+        if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
+        if (fromClientId === toClientId) return res.json({ success: false, message: '不能添加自己为好友' });
+        if (areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们已经是好友了' });
+        if (findPendingRequest(fromClientId, toClientId)) return res.json({ success: false, message: '好友请求已存在，请等待对方通过' });
+        const id = 'fr_' + Date.now().toString(36) + '_' + (_friendReqSeq++);
+        const now = new Date().toISOString();
+        const reqObj = {
+            id, fromClientId, fromName: (fromName || '').toString().slice(0, 24),
+            toClientId, toName: (toName || '').toString().slice(0, 24),
+            status: 'pending', createdAt: now, updatedAt: now
+        };
+        friendRequests.set(id, reqObj);
+        saveFriends();
+        pushToClientSocket(toClientId, 'friend-request-received', {
+            requestId: id, fromClientId, fromName: reqObj.fromName, toClientId, toName: reqObj.toName, createdAt: now
+        });
+        console.log(`[Friends] ${reqObj.fromName}(${fromClientId}) 请求添加 ${reqObj.toName}(${toClientId}) 为好友`);
+        res.json({ success: true, requestId: id });
+    } catch (e) {
+        console.error('[Friends] 发送请求失败:', e);
+        res.status(500).json({ success: false, message: '发送失败' });
+    }
+});
+
+// 收到的好友请求列表（pending）
+app.get('/api/friends/requests', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, requests: [] });
+        const list = [];
+        for (const r of friendRequests.values()) {
+            if (r.status === 'pending' && r.toClientId === clientId) list.push(r);
+        }
+        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        res.json({ success: true, requests: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 接受 / 拒绝好友请求
+app.post('/api/friends/respond', (req, res) => {
+    try {
+        const { requestId, clientId, action } = req.body || {};
+        if (!requestId || !clientId) return res.json({ success: false, message: '缺少参数' });
+        const r = friendRequests.get(requestId);
+        if (!r) return res.json({ success: false, message: '请求不存在' });
+        if (r.toClientId !== clientId) return res.json({ success: false, message: '无权操作该请求' });
+        if (r.status !== 'pending') return res.json({ success: false, message: '该请求已处理' });
+        if (action === 'accept') {
+            r.status = 'accepted'; r.updatedAt = new Date().toISOString();
+            const key = friendshipKey(r.fromClientId, r.toClientId);
+            if (!friendships.has(key)) friendships.set(key, { userA: r.fromClientId, userB: r.toClientId, createdAt: r.updatedAt });
+            saveFriends();
+            pushToClientSocket(r.fromClientId, 'friend-accepted', {
+                friendClientId: r.toClientId, friendName: r.toName, requestId
+            });
+            console.log(`[Friends] ${r.toName}(${clientId}) 通过了 ${r.fromName}(${r.fromClientId}) 的好友请求`);
+            res.json({ success: true, action: 'accept' });
+        } else {
+            r.status = 'rejected'; r.updatedAt = new Date().toISOString();
+            saveFriends();
+            res.json({ success: true, action: 'reject' });
+        }
+    } catch (e) {
+        console.error('[Friends] 处理请求失败:', e);
+        res.status(500).json({ success: false, message: '处理失败' });
+    }
+});
+
+// 好友列表（含在线状态）
+app.get('/api/friends/list', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, friends: [] });
+        const friends = [];
+        for (const f of friendships.values()) {
+            let other = null;
+            if (f.userA === clientId) other = f.userB;
+            else if (f.userB === clientId) other = f.userA;
+            else continue;
+            const op = onlinePlayers.get(other) || {};
+            const prof = homeProfiles.get(other) || {};
+            friends.push({
+                clientId: other,
+                name: (op.name || prof.name || '玩家').toString(),
+                avatar: prof.avatar || '😀',
+                color: prof.color || '#4CAF50',
+                online: !!onlinePlayers.has(other)
+            });
+        }
+        res.json({ success: true, friends });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 查询两人关系（用于个人主页按钮状态）
+app.get('/api/friends/relation', (req, res) => {
+    try {
+        const a = (req.query.clientId || '').toString();
+        const b = (req.query.otherClientId || '').toString();
+        if (!a || !b) return res.json({ success: true, relation: 'none' });
+        if (a === b) return res.json({ success: true, relation: 'self' });
+        if (areFriends(a, b)) return res.json({ success: true, relation: 'friends' });
+        const pend = findPendingRequest(a, b);
+        if (pend) {
+            if (pend.fromClientId === a && pend.toClientId === b) return res.json({ success: true, relation: 'pending_sent', requestId: pend.id });
+            if (pend.fromClientId === b && pend.toClientId === a) return res.json({ success: true, relation: 'pending_received', requestId: pend.id });
+        }
+        res.json({ success: true, relation: 'none' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 发送好友私聊消息
+app.post('/api/friends/message', (req, res) => {
+    try {
+        const { fromClientId, toClientId, message } = req.body || {};
+        if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
+        if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '只有好友才能聊天' });
+        const text = (message || '').toString();
+        if (!text.trim()) return res.json({ success: false, message: '消息不能为空' });
+        const msg = {
+            id: 'fm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+            fromClientId, toClientId,
+            message: text.slice(0, 2000),
+            createdAt: new Date().toISOString()
+        };
+        const k = friendshipKey(fromClientId, toClientId);
+        if (!friendMessages.has(k)) friendMessages.set(k, []);
+        friendMessages.get(k).push(msg);
+        const arr = friendMessages.get(k);
+        if (arr.length > 500) friendMessages.set(k, arr.slice(-500));
+        saveFriends();
+        pushToClientSocket(toClientId, 'friend-message-received', {
+            fromClientId, fromName: (onlinePlayers.get(fromClientId) || {}).name || (homeProfiles.get(fromClientId) || {}).name || '玩家',
+            toClientId, message: msg.message, createdAt: msg.createdAt, id: msg.id
+        });
+        res.json({ success: true, message: msg });
+    } catch (e) {
+        console.error('[Friends] 发送消息失败:', e);
+        res.status(500).json({ success: false, message: '发送失败' });
+    }
+});
+
+// 获取与某好友的聊天记录
+app.get('/api/friends/messages', (req, res) => {
+    try {
+        const a = (req.query.clientId || '').toString();
+        const b = (req.query.friendClientId || '').toString();
+        if (!a || !b) return res.json({ success: true, messages: [] });
+        const k = friendshipKey(a, b);
+        const arr = friendMessages.get(k) || [];
+        const out = arr.slice(-200).map(m => ({
+            id: m.id, fromClientId: m.fromClientId, toClientId: m.toClientId,
+            message: m.message, createdAt: m.createdAt
+        }));
+        res.json({ success: true, messages: out });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
 });
 
 // 个人主页：管理员修改 / 禁用某玩家的主页
@@ -9462,5 +9729,6 @@ server.listen(PORT, () => {
     await loadDailyChallengeConfig();
     await loadAccounts();
     await loadHomeProfiles();
+    loadFriends();             // 好友请求 / 好友关系 / 私聊记录（JSON 文件持久化）
     await loadMazes();         // DB 模式下从 popular_mazes 表载入热门迷宫到内存（与全局配置同模式）
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
