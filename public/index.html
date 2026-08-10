@@ -2902,7 +2902,7 @@
     /* ===== 虚拟摇杆样式 ===== */
     #joystickContainer {
         position: fixed;
-        z-index: 50;
+        z-index: 8000;
         display: none;
         touch-action: none;
         user-select: none;
@@ -3404,6 +3404,7 @@
                     <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
                     <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
                     <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
+                    <button class="menu-button" onclick="showFriendsModal()">👥 好友</button>
                 </div>
                 <div class="main-tab-panel" data-tab="cloud">
                     <button class="menu-button" onclick="openCloudSpaceModal()">☁️ 云空间</button>
@@ -3434,6 +3435,7 @@
             <button class="menu-button" onclick="showScreen('workshopMain')">🏗️ 玩家工坊</button>
             <button class="menu-button" onclick="openCloudLinkModal()">🔗 云链接管理</button>
             <button class="menu-button" onclick="showMyInfoModal()">📇 我的信息</button>
+            <button class="menu-button" onclick="showFriendsModal()">👥 好友</button>
             <button class="menu-button" onclick="showScreen('achievementsScreen')">🏆 成就系统</button>
             <button class="menu-button" onclick="showScreen('statisticsScreen')">📊 统计数据</button>
             <button class="menu-button" onclick="showUISettings()">🎨 UI设置</button>
@@ -5136,6 +5138,47 @@ function connectNotificationSocket() {
             if (typeof refreshOpenProfileModal === 'function') refreshOpenProfileModal(String(data.clientId), data);
         });
 
+        // 收到好友请求（实时推送）
+        notificationSocket.on('friend-request-received', (data) => {
+            if (!data) return;
+            console.log('[好友] 收到好友请求:', data);
+            const nm = (data.fromName || '某玩家').toString();
+            const privacy = getFriendReqPrivacy();
+            if (privacy === 'modal') {
+                showFriendRequestModal(data); // 弹窗询问
+            } else if (privacy === 'notification') {
+                if (typeof showNotification === 'function') showNotification('📨 ' + nm + ' 请求添加你为好友', 3000);
+            }
+            // privacy === 'none'：不显示任何提示
+            updateFriendRequestBadge();
+            refreshFriendsPanels();
+        });
+
+        // 自己的好友请求被通过（实时推送）
+        notificationSocket.on('friend-accepted', (data) => {
+            if (!data) return;
+            console.log('[好友] 好友请求被通过:', data);
+            const nm = (data.friendName || '对方').toString();
+            if (typeof showNotification === 'function') showNotification('✅ ' + nm + ' 已通过你的好友请求，去聊天吧', 3000);
+            refreshFriendsPanels();
+        });
+
+        // 收到好友私聊消息（实时推送）
+        notificationSocket.on('friend-message-received', (data) => {
+            if (!data) return;
+            console.log('[好友] 收到私聊消息:', data);
+            const peer = (window._friendChatPeer && window._friendChatPeer.clientId) ? window._friendChatPeer : null;
+            // 若当前正与该好友的聊天窗口打开，则直接追加到聊天记录
+            if (peer && data.fromClientId && String(data.fromClientId) === String(peer.clientId)) {
+                const me = gameState.clientId || '';
+                _appendFriendChatMsg({ fromClientId: data.fromClientId, toClientId: data.toClientId, message: data.message, createdAt: data.createdAt }, me);
+            } else {
+                // 不在与该好友的聊天窗口时：顶部弹出消息内容 + 聊天按钮，持续 10 秒
+                showFriendMsgToast(data.fromClientId, data.fromName || '好友', data.message);
+            }
+            // 若好友列表/请求面板打开则刷新在线状态等（好友本身不变，仅提示）
+        });
+
         // 游戏内管理员/超级管理员踢人结果反馈
         notificationSocket.on('admin-kick-result', (data) => {
             if (!data) return;
@@ -5541,10 +5584,12 @@ function showPlayerProfileModal(clientId, name) {
             <div id="ppmId" style="font-size:13px;color:#888;margin:6px 0 14px;word-break:break-all;">ID: ${esc(clientId)}</div>
             <div id="ppmBody" style="font-size:14px;color:#444;white-space:pre-wrap;text-align:left;background:#f5f5f5;border-radius:8px;padding:12px;min-height:40px;">加载中…</div>
             <div id="ppmMazes" style="margin-top:14px;text-align:left;display:none;"><div style="font-size:15px;font-weight:bold;color:#222;margin-bottom:8px;">🗺️ 公开地图</div><div id="ppmMazeList"></div></div>
+            <div id="ppmFriendArea" style="margin-top:14px;"></div>
             <div style="margin-top:16px;"><button onclick="closePlayerProfileModal()" style="padding:8px 20px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;">关闭</button></div>
         </div>
     `;
     document.body.appendChild(modal);
+    loadProfileFriendArea(clientId, modal, name);
     let p = (window.playerProfiles && window.playerProfiles[String(clientId)]) || null;
     if (p) {
         renderProfileInto(modal, p);
@@ -5616,6 +5661,805 @@ function refreshOpenProfileModal(clientId, data) {
     renderProfileInto(modal, data);
 }
 function closePlayerProfileModal() { const m = document.getElementById('playerProfileModal'); if (m) m.remove(); }
+
+// ===== 好友：搜索在线玩家 / 好友列表 / 好友请求 / 私聊 =====
+let _friendSearchTimer = null;
+let _friendCurrentTab = 'search';
+function showFriendsModal() {
+    const existing = document.getElementById('friendsModal');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'friendsModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = `
+        <div style="background:#fff;color:#222;border-radius:12px;max-width:480px;width:90%;padding:24px;text-align:center;position:relative;max-height:90vh;overflow-y:auto;">
+            <button onclick="closeFriendsModal()" style="position:absolute;top:10px;right:14px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
+            <h3 style="margin-top:0;">👥 好友</h3>
+            <div id="friendTabs" style="display:flex;gap:6px;margin:10px 0 14px;justify-content:center;">
+                <button onclick="switchFriendTab('search')" style="padding:6px 14px;border:1px solid #ddd;border-radius:8px;cursor:pointer;font-size:13px;background:#4CAF50;color:#fff;" data-tab="search">🔍 搜索</button>
+                <button onclick="switchFriendTab('friends')" style="padding:6px 14px;border:1px solid #ddd;border-radius:8px;cursor:pointer;font-size:13px;background:#f5f5f5;color:#333;" data-tab="friends">👤 我的好友</button>
+                <button onclick="switchFriendTab('requests')" style="padding:6px 14px;border:1px solid #ddd;border-radius:8px;cursor:pointer;font-size:13px;background:#f5f5f5;color:#333;position:relative;" data-tab="requests">📨 请求 <span id="friendReqBadge" style="display:none;position:absolute;top:-6px;right:-6px;background:#e53935;color:#fff;font-size:10px;border-radius:10px;padding:0 5px;min-width:16px;">0</span></button>
+            </div>
+            <div style="font-size:12px;color:#666;margin:0 0 10px;text-align:left;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span>好友申请提示：</span>
+                <select id="friendReqPrivacySel" onchange="setFriendReqPrivacy(this.value)" style="padding:4px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;background:#fff;color:#222;">
+                    <option value="modal">弹窗询问</option>
+                    <option value="notification">仅通知</option>
+                    <option value="none">不显示</option>
+                </select>
+            </div>
+            <div id="friendTabSearch" style="display:block;">
+                <div style="display:flex;gap:8px;margin-bottom:8px;">
+                    <input id="friendSearchInput" type="text" placeholder="输入玩家名搜索…" style="flex:1;padding:9px 12px;border:1px solid #ddd;border-radius:8px;font-size:14px;">
+                    <button onclick="searchFriends()" style="padding:9px 18px;background:#4CAF50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">🔍</button>
+                </div>
+                <div style="font-size:12px;color:#999;margin-bottom:8px;text-align:left;">仅显示当前在线的玩家</div>
+                <div id="friendResults" style="text-align:left;max-height:48vh;overflow-y:auto;"></div>
+            </div>
+            <div id="friendTabFriends" style="display:none;">
+                <div id="friendListBox" style="text-align:left;max-height:52vh;overflow-y:auto;"></div>
+            </div>
+            <div id="friendTabRequests" style="display:none;">
+                <div id="friendReqBox" style="text-align:left;max-height:52vh;overflow-y:auto;"></div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('#friendSearchInput');
+    if (input) {
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchFriends(); });
+        input.addEventListener('input', () => {
+            if (_friendSearchTimer) clearTimeout(_friendSearchTimer);
+            _friendSearchTimer = setTimeout(searchFriends, 350);
+        });
+    }
+    switchFriendTab(_friendCurrentTab);
+    const privSel = modal.querySelector('#friendReqPrivacySel');
+    if (privSel) privSel.value = getFriendReqPrivacy();
+    setTimeout(() => { try { if (_friendCurrentTab === 'search' && input) input.focus(); } catch (e) {} }, 50);
+}
+function switchFriendTab(tab) {
+    _friendCurrentTab = tab;
+    const modal = document.getElementById('friendsModal');
+    if (!modal) return;
+    ['search', 'friends', 'requests'].forEach(t => {
+        const p = modal.querySelector('#friendTab' + t.charAt(0).toUpperCase() + t.slice(1));
+        if (p) p.style.display = (t === tab) ? 'block' : 'none';
+        const btn = modal.querySelector('button[data-tab="' + t + '"]');
+        if (btn) { btn.style.background = (t === tab) ? '#4CAF50' : '#f5f5f5'; btn.style.color = (t === tab) ? '#fff' : '#333'; }
+    });
+    if (tab === 'friends') loadFriendList();
+    if (tab === 'requests') loadFriendRequests();
+}
+function closeFriendsModal() { const m = document.getElementById('friendsModal'); if (m) m.remove(); }
+// 刷新好友列表 / 请求（供接受/拒绝或收到推送时调用）
+function refreshFriendsPanels() {
+    const modal = document.getElementById('friendsModal');
+    if (!modal) return;
+    if (_friendCurrentTab === 'friends') loadFriendList();
+    if (_friendCurrentTab === 'requests') loadFriendRequests();
+    updateFriendRequestBadge();
+}
+// 转义用于 innerHTML 拼接的任意文本
+function _friendEsc(v) {
+    return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+// 好友申请提示方式：modal=弹窗询问 / notification=仅通知 / none=不显示（默认弹窗）
+function getFriendReqPrivacy() {
+    const v = (localStorage.getItem('friendReqPrivacy') || 'modal');
+    return (v === 'notification' || v === 'none' || v === 'modal') ? v : 'modal';
+}
+function setFriendReqPrivacy(v) {
+    try { localStorage.setItem('friendReqPrivacy', v); } catch (e) {}
+    if (typeof showNotification === 'function') showNotification('好友申请提示已设为：' + ({ modal: '弹窗询问', notification: '仅通知', none: '不显示' }[v] || v), 1800);
+}
+// 收到好友请求时的弹窗（隐私=弹窗时调用）
+function showFriendRequestModal(data) {
+    if (!data) return;
+    const nm = (data.fromName || '某玩家').toString();
+    const reqId = data.requestId || '';
+    const existing = document.getElementById('friendReqPopup');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'friendReqPopup';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000000;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = `
+        <div style="background:#fff;color:#222;border-radius:12px;max-width:340px;width:88%;padding:22px;text-align:center;position:relative;box-shadow:0 8px 30px rgba(0,0,0,0.3);">
+            <div style="font-size:42px;margin-bottom:6px;">📨</div>
+            <div style="font-size:17px;font-weight:bold;margin-bottom:8px;">好友申请</div>
+            <div style="font-size:14px;color:#444;margin-bottom:18px;">${_friendEsc(nm)} 请求添加你为好友</div>
+            <div style="display:flex;gap:10px;">
+                <button id="frmAccept" style="flex:1;padding:10px;background:#4CAF50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:bold;">✅ 接受</button>
+                <button id="frmReject" style="flex:1;padding:10px;background:#9e9e9e;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">❌ 拒绝</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    modal.querySelector('#frmAccept').addEventListener('click', () => {
+        close();
+        if (reqId) respondFriendRequest(reqId, 'accept');
+        else if (typeof showNotification === 'function') showNotification('缺少请求ID，请在「请求」中处理', 2000);
+    });
+    modal.querySelector('#frmReject').addEventListener('click', () => {
+        close();
+        if (reqId) respondFriendRequest(reqId, 'reject');
+        else if (typeof showNotification === 'function') showNotification('缺少请求ID，请在「请求」中处理', 2000);
+    });
+}
+async function searchFriends() {
+    const modal = document.getElementById('friendsModal');
+    if (!modal) return;
+    const input = modal.querySelector('#friendSearchInput');
+    const box = modal.querySelector('#friendResults');
+    if (!input || !box) return;
+    const q = input.value.trim();
+    if (!q) { box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">请输入要搜索的玩家名</div>'; return; }
+    box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">搜索中…</div>';
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) {
+        box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">无法连接服务器</div>';
+        return;
+    }
+    try {
+        const data = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/players/search?q=' + encodeURIComponent(q)).then(r => r.json());
+        if (!data || !data.success) { box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">搜索失败</div>'; return; }
+        const list = Array.isArray(data.players) ? data.players : [];
+        if (list.length === 0) {
+            box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">未找到在线玩家「' + _friendEsc(q) + '」</div>';
+            return;
+        }
+        window._friendSearchResults = list;
+        const meCid = gameState.clientId || '';
+        box.innerHTML = list.map((pl, i) => {
+            const av = pl.avatar || '😀';
+            const col = pl.color || '#4CAF50';
+            const nm = _friendEsc(pl.name || '玩家');
+            const bio = (pl.bio && pl.bio.trim()) ? _friendEsc(pl.bio) : '暂无简介';
+            const isSelf = String(pl.clientId) === String(meCid);
+            const shortId = String(pl.clientId).slice(-6); // 同名的玩家靠短 ID 区分
+            const addBtn = '<button class="friend-add-btn" data-friend-idx="' + i + '" data-cid="' + _friendEsc(pl.clientId) + '" data-name="' + _friendEsc(pl.name || '玩家') + '" data-self="' + (isSelf ? '1' : '') + '" style="padding:6px 14px;background:#FF9800;color:#fff;border:none;border-radius:8px;cursor:pointer;flex-shrink:0;">' + (isSelf ? '自己' : '加好友') + '</button>';
+            return '<div style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #eee;border-radius:10px;margin-bottom:8px;">' +
+                '<div style="width:44px;height:44px;line-height:44px;text-align:center;font-size:24px;border-radius:50%;background:' + _friendEsc(col) + ';flex-shrink:0;">' + _friendEsc(av) + '</div>' +
+                '<div style="flex:1;min-width:0;">' +
+                    '<div style="font-weight:bold;color:#222;">' + nm + (isSelf ? ' <span style="font-size:11px;color:#1565c0;background:#e3f2fd;padding:1px 6px;border-radius:6px;">我</span>' : '') + ' <span style="font-size:11px;color:#2e7d32;background:#e8f5e9;padding:1px 6px;border-radius:6px;">● 在线</span></div>' +
+                    '<div style="font-size:12px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + bio + '</div>' +
+                    '<div style="font-size:11px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">ID: …' + _friendEsc(shortId) + '</div>' +
+                '</div>' +
+                '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">' +
+                    '<button class="friend-view-btn" data-friend-idx="' + i + '" style="padding:6px 14px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;">查看主页</button>' +
+                    addBtn +
+                '</div>' +
+            '</div>';
+        }).join('');
+        box.querySelectorAll('.friend-view-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const i = parseInt(btn.getAttribute('data-friend-idx'), 10);
+                const pl = window._friendSearchResults && window._friendSearchResults[i];
+                if (pl) showPlayerProfileModal(pl.clientId, pl.name);
+            });
+        });
+        // 加好友按钮：直接在主页旁，点击发送请求并按关系刷新状态
+        box.querySelectorAll('.friend-add-btn').forEach(btn => {
+            const cid = btn.getAttribute('data-cid');
+            const nm = btn.getAttribute('data-name');
+            const setSent = () => { btn.textContent = '已发送'; btn.disabled = true; btn.style.opacity = '0.6'; btn.style.cursor = 'default'; };
+            const setFriends = () => { btn.textContent = '已是好友'; btn.disabled = true; btn.style.opacity = '0.6'; btn.style.cursor = 'default'; };
+            // 初始根据关系显示正确状态
+            if (meCid && GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
+                fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/relation?clientId=' + encodeURIComponent(meCid) + '&otherClientId=' + encodeURIComponent(cid))
+                    .then(r => r.json()).then(d => {
+                        const rel = (d && d.success) ? d.relation : 'none';
+                        if (rel === 'friends') setFriends();
+                        else if (rel === 'pending_sent' || rel === 'pending_received') setSent();
+                    }).catch(() => {});
+            }
+            btn.addEventListener('click', () => {
+                if (btn.disabled) return;
+                if (btn.getAttribute('data-self') === '1') {
+                    if (typeof showNotification === 'function') showNotification('不能添加自己为好友', 2000);
+                    return;
+                }
+                sendFriendRequest(cid, nm);
+                setSent(); // 乐观更新，真实状态下次刷新时校正
+            });
+        });
+    } catch (e) {
+        box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">搜索出错</div>';
+    }
+}
+
+// 个人主页内的好友操作区（添加好友 / 发消息 / 接受拒绝）
+function loadProfileFriendArea(clientId, modal, name) {
+    const area = modal && modal.querySelector('#ppmFriendArea');
+    if (!area) return;
+    const me = gameState.clientId || '';
+    if (!me || me === String(clientId) || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { area.innerHTML = ''; return; }
+    area.innerHTML = '<div style="font-size:13px;color:#999;">加载关系…</div>';
+    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/relation?clientId=' + encodeURIComponent(me) + '&otherClientId=' + encodeURIComponent(clientId))
+        .then(r => r.json()).then(d => {
+            const rel = (d && d.success) ? d.relation : 'none';
+            renderProfileFriendButtons(area, clientId, name, rel, d && d.requestId);
+        })
+        .catch(() => { area.innerHTML = ''; });
+}
+function renderProfileFriendButtons(area, clientId, name, rel, requestId) {
+    area.innerHTML = '';
+    if (rel === 'friends') {
+        const b = document.createElement('button');
+        b.textContent = '💬 发消息';
+        b.style.cssText = 'padding:8px 20px;background:#2196F3;color:#fff;border:none;border-radius:6px;cursor:pointer;width:100%;';
+        b.onclick = () => showFriendChatModal(clientId, name);
+        area.appendChild(b);
+    } else if (rel === 'pending_sent') {
+        const d = document.createElement('div');
+        d.style.cssText = 'font-size:13px;color:#888;padding:8px;background:#f5f5f5;border-radius:8px;';
+        d.textContent = '⏳ 好友请求已发送，等待对方通过';
+        area.appendChild(d);
+    } else if (rel === 'pending_received') {
+        const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:8px;';
+        const acc = document.createElement('button'); acc.textContent = '✅ 接受';
+        acc.style.cssText = 'flex:1;padding:8px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;';
+        acc.onclick = () => respondFriendRequest(requestId, 'accept');
+        const rej = document.createElement('button'); rej.textContent = '❌ 拒绝';
+        rej.style.cssText = 'flex:1;padding:8px;background:#999;color:#fff;border:none;border-radius:6px;cursor:pointer;';
+        rej.onclick = () => respondFriendRequest(requestId, 'reject');
+        wrap.appendChild(acc); wrap.appendChild(rej); area.appendChild(wrap);
+    } else {
+        const b = document.createElement('button'); b.textContent = '➕ 添加好友';
+        b.style.cssText = 'padding:8px 20px;background:#FF9800;color:#fff;border:none;border-radius:6px;cursor:pointer;width:100%;';
+        b.onclick = () => sendFriendRequest(clientId, name);
+        area.appendChild(b);
+    }
+}
+async function sendFriendRequest(toClientId, toName) {
+    const me = gameState.clientId || '';
+    const myName = gameState.playerName || '';
+    if (!me) { if (typeof showNotification === 'function') showNotification('请先设置昵称并进入游戏', 2000); return; }
+    if (me === String(toClientId)) { if (typeof showNotification === 'function') showNotification('不能添加自己为好友', 2000); return; }
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { if (typeof showNotification === 'function') showNotification('无法连接服务器', 2000); return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/request', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fromClientId: me, toClientId: toClientId, fromName: myName, toName: toName })
+        }).then(r => r.json());
+        if (d && d.success) {
+            if (typeof showNotification === 'function') showNotification('✅ 好友请求已发送', 2000);
+            const m = document.getElementById('playerProfileModal');
+            if (m) loadProfileFriendArea(toClientId, m, toName);
+        } else {
+            if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '发送失败'), 2500);
+        }
+    } catch (e) { if (typeof showNotification === 'function') showNotification('发送失败', 2000); }
+}
+async function respondFriendRequest(requestId, action) {
+    const me = gameState.clientId || '';
+    if (!me) return;
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/respond', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: requestId, clientId: me, action: action })
+        }).then(r => r.json());
+        if (d && d.success) {
+            if (typeof showNotification === 'function') showNotification(action === 'accept' ? '✅ 已添加为好友，可以去聊天啦' : '已拒绝该请求', 2000);
+            const m = document.getElementById('playerProfileModal');
+            if (m) { const cid = m.dataset.clientId; const nm = (m.querySelector('#ppmName') || {}).textContent || ''; loadProfileFriendArea(cid, m, nm); }
+            refreshFriendsPanels();
+        } else {
+            if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '操作失败'), 2500);
+        }
+    } catch (e) { if (typeof showNotification === 'function') showNotification('操作失败', 2000); }
+}
+
+// 我的好友列表
+async function loadFriendList() {
+    const modal = document.getElementById('friendsModal');
+    const box = modal && modal.querySelector('#friendListBox');
+    if (!box) return;
+    const me = gameState.clientId || '';
+    if (!me) { box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">请先进入游戏</div>'; return; }
+    box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">加载中…</div>';
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">无法连接服务器</div>'; return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/list?clientId=' + encodeURIComponent(me)).then(r => r.json());
+        const list = (d && d.success && Array.isArray(d.friends)) ? d.friends : [];
+        if (list.length === 0) { box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">还没有好友，去「搜索」添加吧</div>'; return; }
+        box.innerHTML = list.map(pl => {
+            const av = pl.avatar || '😀'; const col = pl.color || '#4CAF50'; const nm = _friendEsc(pl.name || '玩家');
+            const on = pl.online ? '<span style="font-size:11px;color:#2e7d32;background:#e8f5e9;padding:1px 6px;border-radius:6px;">● 在线</span>' : '<span style="font-size:11px;color:#999;background:#f0f0f0;padding:1px 6px;border-radius:6px;">离线</span>';
+            return '<div class="friend-list-item" data-cid="' + _friendEsc(pl.clientId) + '" data-nm="' + nm + '" style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #eee;border-radius:10px;margin-bottom:8px;cursor:pointer;">' +
+                '<div style="width:44px;height:44px;line-height:44px;text-align:center;font-size:24px;border-radius:50%;background:' + _friendEsc(col) + ';flex-shrink:0;">' + _friendEsc(av) + '</div>' +
+                '<div style="flex:1;min-width:0;"><div style="font-weight:bold;color:#222;">' + nm + ' ' + on + '</div></div>' +
+                '<button class="friend-chat-btn" data-cid="' + _friendEsc(pl.clientId) + '" data-nm="' + nm + '" style="padding:6px 14px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;flex-shrink:0;">💬 聊天</button>' +
+            '</div>';
+        }).join('');
+        box.querySelectorAll('.friend-chat-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => { e.stopPropagation(); showFriendChatModal(btn.getAttribute('data-cid'), btn.getAttribute('data-nm')); });
+        });
+        box.querySelectorAll('.friend-list-item').forEach(it => {
+            it.addEventListener('click', () => showPlayerProfileModal(it.getAttribute('data-cid'), it.getAttribute('data-nm')));
+        });
+    } catch (e) { box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">加载失败</div>'; }
+}
+
+// 好友请求列表（收到的）
+async function loadFriendRequests() {
+    const modal = document.getElementById('friendsModal');
+    const box = modal && modal.querySelector('#friendReqBox');
+    if (!box) return;
+    const me = gameState.clientId || '';
+    if (!me) { box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">请先进入游戏</div>'; return; }
+    box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">加载中…</div>';
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">无法连接服务器</div>'; return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/requests?clientId=' + encodeURIComponent(me)).then(r => r.json());
+        const list = (d && d.success && Array.isArray(d.requests)) ? d.requests : [];
+        if (list.length === 0) { box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">暂无新的好友请求</div>'; return; }
+        box.innerHTML = list.map(r => {
+            const nm = _friendEsc(r.fromName || '玩家');
+            return '<div class="friend-req-item" data-rid="' + _friendEsc(r.id) + '" style="padding:10px;border:1px solid #eee;border-radius:10px;margin-bottom:8px;">' +
+                '<div style="font-size:14px;color:#222;margin-bottom:8px;">' + nm + ' 请求添加你为好友</div>' +
+                '<div style="display:flex;gap:8px;">' +
+                    '<button class="friend-acc-btn" data-rid="' + _friendEsc(r.id) + '" style="flex:1;padding:7px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;">✅ 接受</button>' +
+                    '<button class="friend-rej-btn" data-rid="' + _friendEsc(r.id) + '" style="flex:1;padding:7px;background:#999;color:#fff;border:none;border-radius:6px;cursor:pointer;">❌ 拒绝</button>' +
+                '</div>' +
+            '</div>';
+        }).join('');
+        box.querySelectorAll('.friend-acc-btn').forEach(btn => btn.addEventListener('click', () => respondFriendRequest(btn.getAttribute('data-rid'), 'accept')));
+        box.querySelectorAll('.friend-rej-btn').forEach(btn => btn.addEventListener('click', () => respondFriendRequest(btn.getAttribute('data-rid'), 'reject')));
+    } catch (e) { box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">加载失败</div>'; }
+}
+// 更新请求红点数量
+async function updateFriendRequestBadge() {
+    const badge = document.getElementById('friendReqBadge');
+    if (!badge) return;
+    const me = gameState.clientId || '';
+    if (!me || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { badge.style.display = 'none'; return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/requests?clientId=' + encodeURIComponent(me)).then(r => r.json());
+        const n = (d && d.success && Array.isArray(d.requests)) ? d.requests.length : 0;
+        if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.style.display = 'inline-block'; }
+        else badge.style.display = 'none';
+    } catch (e) { badge.style.display = 'none'; }
+}
+
+// 好友私聊窗口
+let _friendChatPeer = null; // {clientId, name}
+function showFriendChatModal(friendClientId, friendName) {
+    friendClientId = friendClientId || '';
+    friendName = friendName || '玩家';
+    _friendChatPeer = { clientId: friendClientId, name: friendName };
+    const existing = document.getElementById('friendChatModal');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'friendChatModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = `
+        <div style="background:#fff;color:#222;border-radius:12px;max-width:460px;width:92%;height:80vh;max-height:80vh;display:flex;flex-direction:column;position:relative;overflow:hidden;">
+            <button onclick="closeFriendChatModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;z-index:2;">×</button>
+            <div style="padding:14px 16px;border-bottom:1px solid #eee;font-weight:bold;font-size:16px;">💬 与 ${_friendEsc(friendName)} 聊天</div>
+            <div id="friendChatLog" style="flex:1;overflow-y:auto;padding:12px;background:#f7f7f7;display:flex;flex-direction:column;gap:8px;"></div>
+            <div style="display:flex;gap:8px;padding:6px 12px 0;flex-wrap:wrap;">
+                <button onclick="openFriendSharePicker('link')" style="padding:6px 12px;background:#7e57c2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">🔗 分享云链接</button>
+                <button onclick="openFriendSharePicker('map')" style="padding:6px 12px;background:#00897b;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">☁️ 分享云地图</button>
+            </div>
+            <div style="display:flex;gap:8px;padding:10px 12px;border-top:1px solid #eee;">
+                <input id="friendChatInput" type="text" placeholder="输入消息，回车发送…" style="flex:1;padding:9px 12px;border:1px solid #ddd;border-radius:8px;font-size:14px;">
+                <button onclick="sendFriendChatMessage()" style="padding:9px 18px;background:#4CAF50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">发送</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('#friendChatInput');
+    if (input) {
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendFriendChatMessage(); });
+        setTimeout(() => { try { input.focus(); } catch (e) {} }, 50);
+    }
+    loadFriendChatHistory(friendClientId);
+    startFriendChatPolling(friendClientId);
+}
+function closeFriendChatModal() {
+    _friendChatPeer = null;
+    stopFriendChatPolling();
+    const m = document.getElementById('friendChatModal'); if (m) m.remove();
+}
+// 收到好友私聊消息时，在屏幕顶部弹出"消息内容 + 聊天按钮"，持续 10 秒；点按钮直接打开与该好友的聊天
+function showFriendMsgToast(fromClientId, fromName, message) {
+    fromClientId = fromClientId || '';
+    fromName = fromName || '好友';
+    const id = 'friendMsgToast';
+    const old = document.getElementById(id); if (old) old.remove();
+    const toast = document.createElement('div');
+    toast.id = id;
+    toast.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);max-width:90%;width:420px;background:#1565c0;color:#fff;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,0.35);z-index:2147483646;padding:12px 14px;display:flex;align-items:flex-start;gap:10px;font-size:14px;animation:fadeIn 0.25s ease-out;';
+    const left = document.createElement('div');
+    left.style.cssText = 'flex:1;min-width:0;';
+    const nm = document.createElement('div');
+    nm.style.cssText = 'font-weight:bold;font-size:13px;opacity:0.92;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    nm.textContent = '💬 ' + fromName;
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;line-height:1.35;word-break:break-word;max-height:42px;overflow:hidden;';
+    let _display = message || '';
+    if (typeof MAZE_SHARE_PREFIX !== 'undefined' && _display.indexOf(MAZE_SHARE_PREFIX) === 0) {
+        try { const c = JSON.parse(_display.slice(MAZE_SHARE_PREFIX.length)); _display = '🗺️ 分享了一张地图「' + (c.name || '未命名地图') + '」'; } catch (e) {}
+    }
+    msg.textContent = _display;
+    left.appendChild(nm); left.appendChild(msg);
+    const btn = document.createElement('button');
+    btn.textContent = '聊天';
+    btn.style.cssText = 'flex-shrink:0;padding:7px 16px;background:#fff;color:#1565c0;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:bold;';
+    btn.onclick = () => { toast.remove(); showFriendChatModal(fromClientId, fromName); };
+    const close = document.createElement('div');
+    close.textContent = '×';
+    close.style.cssText = 'flex-shrink:0;cursor:pointer;font-size:20px;line-height:1;opacity:0.8;padding-left:2px;';
+    close.onclick = () => toast.remove();
+    toast.appendChild(left); toast.appendChild(btn); toast.appendChild(close);
+    document.body.appendChild(toast);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 10000);
+}
+function _appendFriendChatMsg(msg, me) {
+    const log = document.getElementById('friendChatLog');
+    if (!log) return null;
+    const contentKey = (msg.fromClientId || '') + '|' + (msg.message || '');
+    // 按内容去重：同一发送者的同一条消息只显示一次，避免本地乐观追加 + socket/poll 回显造成重复
+    if (Array.from(log.children).some(el => el.getAttribute('data-contentkey') === contentKey)) return null;
+    const mine = msg.fromClientId === me;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;' + (mine ? 'justify-content:flex-end;' : 'justify-content:flex-start;');
+    const bubble = document.createElement('div');
+    bubble.style.cssText = 'max-width:75%;padding:8px 12px;border-radius:12px;font-size:14px;word-break:break-word;' +
+        (mine ? 'background:#4CAF50;color:#fff;border-bottom-right-radius:2px;' : 'background:#fff;color:#222;border:1px solid #eee;border-bottom-left-radius:2px;');
+    const _txt = (msg.message || '').toString();
+    bubble.textContent = '';
+    // 好友分享的"地图文件卡"：前缀 🗺️MS: 后接 JSON，点一下可导入自己的工坊并直接试玩
+    if (_txt.indexOf(MAZE_SHARE_PREFIX) === 0) {
+        let card = null;
+        try { card = JSON.parse(_txt.slice(MAZE_SHARE_PREFIX.length)); } catch (e) { card = null; }
+        if (card && card.id) {
+            _renderMazeShareCard(bubble, card, mine);
+            wrap.appendChild(bubble);
+            wrap.setAttribute('data-contentkey', contentKey);
+            wrap.setAttribute('data-msgkey', (msg.createdAt || '') + '|' + (msg.fromClientId || '') + '|' + (msg.message || ''));
+            log.appendChild(wrap);
+            log.scrollTop = log.scrollHeight;
+            return wrap;
+        }
+    }
+    // 普通文本：\n 渲染为换行
+    _txt.split('\n').forEach((line, li) => {
+        if (li > 0) bubble.appendChild(document.createElement('br'));
+        bubble.appendChild(document.createTextNode(line));
+    });
+    wrap.appendChild(bubble);
+    wrap.setAttribute('data-contentkey', contentKey);
+    const key = (msg.createdAt || '') + '|' + (msg.fromClientId || '') + '|' + (msg.message || '');
+    wrap.setAttribute('data-msgkey', key);
+    log.appendChild(wrap);
+    log.scrollTop = log.scrollHeight;
+    return wrap;
+}
+// 渲染"地图文件卡"（好友聊天里分享云地图）：像文件附件一样，点一下导入自己的工坊并直接试玩
+function _renderMazeShareCard(bubble, card, mine) {
+    const cardBox = document.createElement('div');
+    cardBox.style.cssText = 'display:flex;align-items:center;gap:10px;background:' + (mine ? 'rgba(255,255,255,0.18)' : '#f3f7ff') +
+        ';border:1px solid ' + (mine ? 'rgba(255,255,255,0.5)' : '#cfe0ff') + ';border-radius:10px;padding:10px 12px;margin:2px 0;cursor:pointer;min-width:210px;';
+    const icon = document.createElement('div');
+    icon.style.cssText = 'font-size:26px;line-height:1;';
+    icon.textContent = '🗺️';
+    const mid = document.createElement('div');
+    mid.style.cssText = 'flex:1;min-width:0;';
+    const nm = document.createElement('div');
+    nm.style.cssText = 'font-weight:bold;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:' + (mine ? '#fff' : '#1a3a6b') + ';';
+    nm.textContent = card.name || '未命名地图';
+    const sub = document.createElement('div');
+    sub.style.cssText = 'font-size:11px;opacity:0.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    sub.textContent = '地图文件 · 由 ' + (card.by || '玩家') + ' 分享';
+    mid.appendChild(nm); mid.appendChild(sub);
+    const btn = document.createElement('div');
+    btn.style.cssText = 'padding:6px 12px;background:' + (mine ? '#fff' : '#2196F3') + ';color:' + (mine ? '#2196F3' : '#fff') +
+        ';border-radius:8px;font-size:12px;font-weight:bold;white-space:nowrap;';
+    btn.textContent = '导入并游玩';
+    cardBox.appendChild(icon); cardBox.appendChild(mid); cardBox.appendChild(btn);
+    cardBox.onclick = () => _importAndPlaySharedMaze(card.id, card.name, card.by);
+    bubble.appendChild(cardBox);
+}
+// 收到"地图文件卡"被点击：取回原始地图 → 导入自己的玩家工坊（稳定 id 避免重复）→ 直接试玩
+async function _importAndPlaySharedMaze(sourceId, name, by) {
+    if (typeof showNotification === 'function') showNotification('正在获取地图…', 1500);
+    let map = null;
+    try {
+        const d = await fetch(_friendApiBase() + '/api/browse-mazes').then(r => r.json().catch(() => null));
+        const list = (d && d.success && Array.isArray(d.mazes)) ? d.mazes : [];
+        map = list.find(m => m.id === sourceId) || null;
+    } catch (e) {}
+    if (!map) { if (typeof showNotification === 'function') showNotification('⚠️ 该地图已失效或不可见', 2500); return; }
+    const cid = gameState.clientId || '';
+    if (!cid) { if (typeof showNotification === 'function') showNotification('未初始化，无法导入', 2000); return; }
+    const payload = {
+        clientId: cid,
+        accountId: gameState.accountId || null,
+        authorName: gameState.playerName || '玩家',
+        mazeId: 'import_' + cid + '_' + sourceId,
+        name: map.name || name || '未命名地图',
+        description: (map.description || '') + (by ? '\n（来自 ' + by + ' 分享）' : ''),
+        difficulty: map.difficulty || '中等',
+        size: map.size || {},
+        maze: map.maze || [],
+        teleporters: map.teleporters || [],
+        enemySpeed: map.enemySpeed || 1,
+        showShop: map.showShop !== false,
+        isShared: false
+    };
+    try {
+        const d = await fetch(_friendApiBase() + '/api/player-mazes', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-client-id': cid },
+            body: JSON.stringify(payload)
+        }).then(r => r.json().catch(() => null));
+        if (d && d.success) {
+            if (typeof showNotification === 'function') showNotification('已导入玩家工坊，开始试玩！', 1500);
+            playMazeObject(map);
+        } else {
+            if (typeof showNotification === 'function') console.warn('[工坊] 导入失败:', d && d.message);
+            if (typeof showNotification === 'function') showNotification('⚠️ 导入失败：' + ((d && d.message) || '未知错误'), 2500);
+        }
+    } catch (e) {
+        if (typeof showNotification === 'function') showNotification('导入失败：' + (e.message || '网络错误'), 2500);
+    }
+}
+async function loadFriendChatHistory(friendClientId) {
+    const log = document.getElementById('friendChatLog');
+    if (!log) return;
+    const me = gameState.clientId || '';
+    log.innerHTML = '';
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/messages?clientId=' + encodeURIComponent(me) + '&friendClientId=' + encodeURIComponent(friendClientId)).then(r => r.json());
+        const list = (d && d.success && Array.isArray(d.messages)) ? d.messages : [];
+        list.forEach(m => _appendFriendChatMsg(m, me));
+        if (list.length === 0) { const t = document.createElement('div'); t.setAttribute('data-emptytip', '1'); t.style.cssText = 'text-align:center;font-size:12px;color:#aaa;margin:auto;'; t.textContent = '还没有消息，打个招呼吧～'; log.appendChild(t); }
+    } catch (e) {}
+}
+// 每 5 秒轮询：仅追加本地尚未显示的新消息（以 createdAt|from|message 去重），避免整段重建闪烁
+let _friendChatTimer = null;
+function startFriendChatPolling(friendClientId) {
+    stopFriendChatPolling();
+    _friendChatTimer = setInterval(() => {
+        const m = document.getElementById('friendChatModal');
+        if (!m) { stopFriendChatPolling(); return; }
+        pollFriendChatMessages(friendClientId);
+    }, 5000);
+}
+function stopFriendChatPolling() {
+    if (_friendChatTimer) { clearInterval(_friendChatTimer); _friendChatTimer = null; }
+}
+async function pollFriendChatMessages(friendClientId) {
+    const me = gameState.clientId || '';
+    if (!me || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    const log = document.getElementById('friendChatLog');
+    if (!log) return;
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/messages?clientId=' + encodeURIComponent(me) + '&friendClientId=' + encodeURIComponent(friendClientId)).then(r => r.json());
+        const list = (d && d.success && Array.isArray(d.messages)) ? d.messages : [];
+        const have = new Set();
+        log.querySelectorAll('[data-msgkey]').forEach(e => have.add(e.getAttribute('data-msgkey')));
+        let appended = false;
+        list.forEach(m => {
+            const key = (m.createdAt || '') + '|' + (m.fromClientId || '') + '|' + (m.message || '');
+            if (!have.has(key)) { _appendFriendChatMsg(m, me); appended = true; }
+        });
+        if (appended) { const tip = log.querySelector('[data-emptytip]'); if (tip) tip.remove(); }
+    } catch (e) {}
+}
+async function sendFriendChatMessage() {
+    const modal = document.getElementById('friendChatModal');
+    const input = modal && modal.querySelector('#friendChatInput');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+    const peer = _friendChatPeer;
+    if (!peer) return;
+    const me = gameState.clientId || '';
+    if (!me) return;
+    input.value = '';
+    // 本地先乐观追加
+    _appendFriendChatMsg({ fromClientId: me, toClientId: peer.clientId, message: text, createdAt: new Date().toISOString() }, me);
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { if (typeof showNotification === 'function') showNotification('无法连接服务器', 2000); return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/message', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fromClientId: me, toClientId: peer.clientId, message: text })
+        }).then(r => r.json());
+        if (!d || !d.success) { if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '发送失败'), 2500); }
+    } catch (e) { if (typeof showNotification === 'function') showNotification('发送失败', 2000); }
+}
+
+// ===== 好友聊天内分享：云链接 / 云储存地图 =====
+// 这两个云模块的 fetch 辅助函数处于各自闭包内，这里自建自包含的请求（使用已知 localStorage key）
+let _friendMapLinkCache = {}; // 云地图 id -> 已创建的云链接 code（会话内复用，避免重复建链）
+let _friendMapWorkshopCache = {}; // 云地图 id -> 已分享到工坊的 mazeId（会话内复用，避免重复建）
+const MAZE_SHARE_PREFIX = '🗺️MS:'; // 好友聊天里"地图文件卡"消息前缀（后接 JSON）
+function _friendApiBase() {
+    return (typeof GAME_SERVER_URL !== 'undefined' && GAME_SERVER_URL) ? GAME_SERVER_URL.replace(/\/+$/, '') : '';
+}
+async function _friendFetchLinks() {
+    const token = localStorage.getItem('cloudLinkToken');
+    if (!token) return { needLogin: 'clink' };
+    try {
+        const r = await fetch(_friendApiBase() + '/api/cloud-links/mine', { headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } });
+        if (r.status === 401 || r.status === 403) return { needLogin: 'clink' };
+        const d = await r.json().catch(() => ({}));
+        if (!d.success) return { error: d.message || '获取失败' };
+        return { links: (d.links || []).filter(l => !l.disabled) };
+    } catch (e) { return { error: e.message || '网络错误' }; }
+}
+async function _friendFetchMaps() {
+    const token = localStorage.getItem('cloudStorageToken');
+    if (!token) return { needLogin: 'cloud' };
+    try {
+        const r = await fetch(_friendApiBase() + '/api/cloud-storage/mazes', { headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } });
+        if (r.status === 401 || r.status === 403) return { needLogin: 'cloud' };
+        const d = await r.json().catch(() => ({}));
+        if (!d.success) return { error: d.message || '获取失败' };
+        return { maps: d.mazes || [] };
+    } catch (e) { return { error: e.message || '网络错误' }; }
+}
+async function _friendCreateLinkFromMap(map) {
+    const token = localStorage.getItem('cloudLinkToken');
+    if (!token) return { needLogin: 'clink' };
+    const data = {
+        name: (map.name || '未命名迷宫').toString().slice(0, 128),
+        description: (map.description || '').toString().slice(0, 500),
+        difficulty: (map.difficulty || '中等').toString().slice(0, 32),
+        size: map.size || {}, maze: map.maze || [], teleporters: Array.isArray(map.teleporters) ? map.teleporters : [],
+        enemySpeed: Number(map.enemySpeed) || 5, showShop: map.showShop !== false,
+        mech: (map.mech && typeof map.mech === 'object') ? map.mech : null,
+        author: localStorage.getItem('cloudLinkUser') || ''
+    };
+    try {
+        const r = await fetch(_friendApiBase() + '/api/cloud-links', {
+            method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (r.status === 401) return { needLogin: 'clink' };
+        const d = await r.json().catch(() => ({}));
+        if (!d.success) return { error: d.message || '创建失败' };
+        return { code: d.code, name: d.name };
+    } catch (e) { return { error: e.message || '网络错误' }; }
+}
+// 将云储存里的地图分享到「玩家工坊」（社区池），并归属到分享者（attribution）。
+// 使用稳定 mazeId = shared_<分享者clientId>_<云地图id>，同一分享者重复分享同一张图时原地更新（幂等）。
+async function _friendShareMapToWorkshop(m) {
+    const cid = gameState.clientId || '';
+    if (!cid) return { error: '未初始化，无法归属地图' };
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return { error: '无法连接服务器' };
+    if (!m) return { error: '地图数据缺失' };
+    let name = (m.name || '未命名迷宫').toString().trim();
+    if (!name) name = '未命名迷宫';
+    const data = {
+        clientId: cid,
+        accountId: gameState.accountId || null,
+        authorName: gameState.playerName || '玩家',
+        mazeId: 'shared_' + cid + '_' + (m.id || m.name || 'unknown'),
+        name: name,
+        description: (m.description || '').toString(),
+        difficulty: (m.difficulty || '中等').toString(),
+        size: m.size || {},
+        maze: m.maze || [],
+        teleporters: Array.isArray(m.teleporters) ? m.teleporters : [],
+        enemySpeed: Number(m.enemySpeed) || 1,
+        showShop: m.showShop !== false,
+        isShared: true
+    };
+    try {
+        const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/player-mazes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-client-id': cid },
+            body: JSON.stringify(data)
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!d || !d.success) return { error: (d && d.message) || '分享失败' };
+        return { id: (d.maze && d.maze.id) || data.mazeId, name: (d.maze && d.maze.name) ? d.maze.name : name };
+    } catch (e) { return { error: e.message || '网络错误' }; }
+}
+function _friendLinkUrl(code) { return _friendApiBase() + '/m/' + code; }
+function _friendChatSendText(text) {
+    const modal = document.getElementById('friendChatModal');
+    const input = modal && modal.querySelector('#friendChatInput');
+    if (!input) return;
+    input.value = text;
+    sendFriendChatMessage();
+}
+function closeFriendShareModal() {
+    const m = document.getElementById('friendShareModal');
+    if (m) m.remove();
+}
+async function openFriendSharePicker(type) {
+    closeFriendShareModal();
+    const modal = document.createElement('div');
+    modal.id = 'friendShareModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:1000000;display:flex;align-items:center;justify-content:center;';
+    const title = type === 'link' ? '🔗 分享云链接' : '☁️ 分享云地图';
+    modal.innerHTML = `
+        <div style="background:#fff;color:#222;border-radius:12px;max-width:460px;width:92%;max-height:80vh;display:flex;flex-direction:column;position:relative;overflow:hidden;">
+            <button onclick="closeFriendShareModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;z-index:2;">×</button>
+            <div style="padding:14px 16px;border-bottom:1px solid #eee;font-weight:bold;font-size:16px;">${title}</div>
+            <div id="friendShareModalBody" style="flex:1;overflow-y:auto;padding:12px;background:#f7f7f7;display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+    `;
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeFriendShareModal(); });
+    document.body.appendChild(modal);
+    const p = modal.querySelector('#friendShareModalBody');
+    p.innerHTML = '<div style="font-size:13px;color:#999;padding:6px 0;">加载中…</div>';
+    if (type === 'link') {
+        const res = await _friendFetchLinks();
+        if (res.needLogin === 'clink') { p.innerHTML = '<div style="font-size:13px;color:#c00;padding:6px 0;">请先登录云链接账号</div>'; if (typeof openCloudLinkModal === 'function') openCloudLinkModal(); return; }
+        if (res.error) { p.innerHTML = '<div style="font-size:13px;color:#c00;padding:6px 0;">' + _friendEsc(res.error) + '</div>'; return; }
+        const links = res.links || [];
+        if (links.length === 0) { p.innerHTML = '<div style="font-size:13px;color:#999;padding:6px 0;">你还没有云链接，去「玩家工坊 → 查看/分享迷宫」创建一个吧</div>'; return; }
+        p.innerHTML = '';
+        links.forEach(l => {
+            const item = document.createElement('div');
+            item.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;background:#fff;border:1px solid #eee;border-radius:8px;margin-bottom:6px;cursor:pointer;';
+            const left = document.createElement('div');
+            left.style.cssText = 'min-width:0;overflow:hidden;';
+            const nm = document.createElement('div');
+            nm.style.cssText = 'font-weight:bold;color:#222;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            nm.textContent = '🗺️ ' + (l.name || '未命名迷宫');
+            const url = document.createElement('div');
+            url.style.cssText = 'font-size:11px;color:#64b5f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            url.textContent = _friendLinkUrl(l.code);
+            left.appendChild(nm); left.appendChild(url);
+            const btn = document.createElement('button');
+            btn.textContent = '发送';
+            btn.style.cssText = 'padding:5px 14px;background:#7e57c2;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;flex-shrink:0;';
+            item.appendChild(left); item.appendChild(btn);
+            item.onclick = () => {
+                _friendChatSendText('🔗 分享迷宫「' + (l.name || '未命名迷宫') + '」：\n' + _friendLinkUrl(l.code));
+                closeFriendShareModal();
+            };
+            p.appendChild(item);
+        });
+    } else if (type === 'map') {
+        const res = await _friendFetchMaps();
+        if (res.needLogin === 'cloud') { p.innerHTML = '<div style="font-size:13px;color:#c00;padding:6px 0;">请先登录云储存账号</div>'; return; }
+        if (res.error) { p.innerHTML = '<div style="font-size:13px;color:#c00;padding:6px 0;">' + _friendEsc(res.error) + '</div>'; return; }
+        const maps = res.maps || [];
+        if (maps.length === 0) { p.innerHTML = '<div style="font-size:13px;color:#999;padding:6px 0;">云储存里还没有地图，先上传一张吧</div>'; return; }
+        p.innerHTML = '';
+        maps.forEach(m => {
+            const item = document.createElement('div');
+            item.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;background:#fff;border:1px solid #eee;border-radius:8px;margin-bottom:6px;cursor:pointer;';
+            const left = document.createElement('div');
+            left.style.cssText = 'min-width:0;overflow:hidden;';
+            const nm = document.createElement('div');
+            nm.style.cssText = 'font-weight:bold;color:#222;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            nm.textContent = '☁️ ' + (m.name || '未命名地图');
+            const sub = document.createElement('div');
+            sub.style.cssText = 'font-size:11px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            sub.textContent = '难度:' + (m.difficulty || '中等') + (m.size ? ' ｜ ' + (m.size.width || '?') + 'x' + (m.size.height || '?') : '');
+            left.appendChild(nm); left.appendChild(sub);
+            const btn = document.createElement('button');
+            btn.textContent = '分享';
+            btn.style.cssText = 'padding:5px 14px;background:#00897b;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;flex-shrink:0;';
+            item.appendChild(left); item.appendChild(btn);
+            item.onclick = async () => {
+                if (typeof showNotification === 'function') showNotification('正在保存到玩家工坊…', 1500);
+                const mapKey = m.id || m.name || 'unknown';
+                let wid = _friendMapWorkshopCache[mapKey];
+                if (!wid) {
+                    const c = await _friendShareMapToWorkshop(m);
+                    if (c.error) { if (typeof showNotification === 'function') showNotification('⚠️ ' + c.error, 2500); return; }
+                    wid = c.id; _friendMapWorkshopCache[mapKey] = wid;
+                }
+                // 发送"地图文件卡"（前缀 + JSON），对方点一下即可导入其工坊并直接试玩
+                const card = { t: 'maze', id: wid, name: (m.name || '未命名地图'), by: gameState.playerName || '玩家' };
+                _friendChatSendText(MAZE_SHARE_PREFIX + JSON.stringify(card));
+                closeFriendShareModal();
+            };
+            p.appendChild(item);
+        });
+    }
+}
 
 // 编辑自己的个人主页
 function showMyHomeProfileModal() {
@@ -17014,7 +17858,8 @@ function movePlayer(rawKey, isFromSystem = false) {
 const joystickState = {
     activeDir: null,        // 当前激活方向（'ArrowUp'...），null 表示停止
     holdTimer: null,        // 自动重复计时器
-    lastAppliedDir: null    // 上一次已生效方向（用于避免每帧重复重置计时器）
+    lastAppliedDir: null,   // 上一次已生效方向（用于避免每帧重复重置计时器）
+    lockedDir: null         // 方向锁：离开死区时锁定首方向，回中（dir=null）才解锁，避免对角抖动导致方向每帧乱切、移动失控
 };
 let joystickInstance = null;
 
@@ -17109,7 +17954,9 @@ function positionKnob(knob, x, y) {
     knob.style.transform = 'translate(calc(-50% + ' + x + 'px), calc(-50% + ' + y + 'px))';
 }
 
-// 方向评估处理：dir 为 null 表示回到死区/松开（停止）。
+// 方向评估处理：dir 为 null 表示回到死区/松开（停止并解锁）。
+// 方向锁定（4 向 sticky）：一旦离开死区即锁定首方向，之后即使手指在对角边界抖动也保持该方向，
+// 直到回中（dir=null）才允许重新选择方向。这避免「对角抖动 → 方向每帧乱切 → 移动失控狂飙」的 bug。
 // 非 null 且与上一次生效方向不同 → 立即移动一格并启动自动重复；
 // 非 null 且与上一次相同 → 不重置计时器（保持连续重复，不要每帧重置）。
 function handleJoystickDirection(dir) {
@@ -17120,12 +17967,18 @@ function handleJoystickDirection(dir) {
         }
         joystickState.activeDir = null;
         joystickState.lastAppliedDir = null;
+        joystickState.lockedDir = null; // 回中解锁，允许下次重新定向
         return;
     }
-    if (dir === joystickState.lastAppliedDir) return; // 同一方向持续按住：不重置计时器
-    joystickState.activeDir = dir;
-    joystickState.lastAppliedDir = dir;
-    if (typeof movePlayer === 'function') movePlayer(dir); // 立即移动一格
+    // 锁定首方向：仅当尚未锁定时记录；已锁定则忽略抖动引起的小方向变化
+    if (joystickState.lockedDir === null) {
+        joystickState.lockedDir = dir;
+    }
+    const effective = joystickState.lockedDir;
+    if (effective === joystickState.lastAppliedDir) return; // 同一方向持续按住：不重置计时器
+    joystickState.activeDir = effective;
+    joystickState.lastAppliedDir = effective;
+    if (typeof movePlayer === 'function') movePlayer(effective); // 立即移动一格
     const sens = Math.max(1, Math.min(10, Number(gameState.uiSettings.joystickSensitivity) || 5));
     const interval = Math.round(8000 / sens); // sens=1→8000ms, sens=5→1600ms, sens=10→800ms
     if (joystickState.holdTimer) clearInterval(joystickState.holdTimer);
@@ -17144,6 +17997,7 @@ function teardownJoystickInstance() {
     }
     joystickState.activeDir = null;
     joystickState.lastAppliedDir = null;
+    joystickState.lockedDir = null;
     if (joystickInstance) {
         joystickInstance.destroy();
         joystickInstance = null;
@@ -19165,6 +20019,29 @@ function loadMazeFromUrl() {
             alert('加载迷宫失败，链接可能已损坏或过期。');
         }
     }
+}
+
+// 从 URL 参数 ?playerMaze=<id> 自动游玩玩家工坊/社区分享的迷宫（好友聊天分享云地图后点击链接直达）
+function loadSharedMazeFromUrl() {
+    try {
+        const p = new URLSearchParams(window.location.search);
+        const id = p.get('playerMaze');
+        if (!id) return;
+        if (typeof GAME_SERVER_URL === 'undefined' || !GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) {
+            if (typeof showNotification === 'function') showNotification('无法连接服务器，无法加载分享的地图', 2500);
+            return;
+        }
+        if (typeof showNotification === 'function') showNotification('正在加载分享的迷宫…', 1500);
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/browse-mazes')
+            .then(r => { try { return r.json(); } catch (e) { return null; } })
+            .then(d => {
+                const list = (d && d.success && Array.isArray(d.mazes)) ? d.mazes : [];
+                const m = list.find(x => x.id === id);
+                if (!m) { if (typeof showNotification === 'function') showNotification('未找到该分享地图（可能已被作者删除）', 2500); return; }
+                playMazeObject(m);
+            })
+            .catch(() => { if (typeof showNotification === 'function') showNotification('加载分享地图失败', 2500); });
+    } catch (e) {}
 }
 
 // 搜索迷宫（优先社区分享缓存，无服务器时回退本地）
@@ -21367,6 +22244,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 从URL参数加载迷宫（分享链接进入时自动跳转到编辑器）
     loadMazeFromUrl();
+    // 从URL参数 ?playerMaze=<id> 直接游玩好友分享到工坊的迷宫
+    loadSharedMazeFromUrl();
     
     // 监听编辑器屏幕显示，确保 initMazeEditor 在 canvas 重新插入 DOM 后也能正确执行
     const mazeEditorScreen = document.getElementById('mazeEditor');
