@@ -5982,7 +5982,11 @@ async function requireLinkAuth(req, res, next) {
         // 会话校验（新版令牌带 sid；旧版无 sid 向后兼容）
         const sid = decoded.sid;
         if (sid) {
-            const sess = cloudLinkSessions.get(sid);
+            let sess = cloudLinkSessions.get(sid);
+            if (!sess) {
+                // 内存会话丢失（服务端重启 / 冷启动 DB 未就绪）→ 回 DB 重hydrate，避免有效令牌被误判“已退出登录”
+                try { await dbGetCloudLinkSessions(decoded.username); sess = cloudLinkSessions.get(sid); } catch (e) {}
+            }
             if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' });
             touchCloudLinkSession(sess);
             req.linkSessionId = sid;
@@ -6660,7 +6664,11 @@ async function requireCloudAuth(req, res, next) {
         const sid = decoded.sid;
         if (sid) {
             // 新令牌带会话 id：校验会话未被远端退登
-            const sess = cloudSessions.get(sid);
+            let sess = cloudSessions.get(sid);
+            if (!sess) {
+                // 内存会话丢失（服务端重启 / 冷启动 DB 未就绪）→ 回 DB 重hydrate，避免有效令牌被误判“已退出登录”
+                try { await dbGetCloudSessions(decoded.username); sess = cloudSessions.get(sid); } catch (e) {}
+            }
             if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' });
             touchCloudSession(sess); // 更新活跃时间（节流写库）
             req.cloudSessionId = sid;
@@ -7057,7 +7065,7 @@ function assert2faScope(acc, scope, code) {
 // ===== 2FA 随机抽查（服务端安全抽查）=====
 // 每分钟按概率从「正在管理页面（已 checkin 心跳）」的云储存/云链接用户中随机抽一个，
 // 要求输入一次当前动态码；**不在管理页面的用户不参与抽查**，未开启 2FA 的用户也不抽。
-const _2FA_CHALLENGE_PROB = (process.env.TWOFA_SPOT_PROB != null && !isNaN(parseFloat(process.env.TWOFA_SPOT_PROB))) ? Math.max(0, Math.min(1, parseFloat(process.env.TWOFA_SPOT_PROB))) : 0.1; // 每分钟触发抽查的概率（默认 10%，2026-08-09 由 50% 下调：过高导致 2FA 用户停留管理页时频繁被抽超时退登）
+const _2FA_CHALLENGE_PROB = (process.env.TWOFA_SPOT_PROB != null && !isNaN(parseFloat(process.env.TWOFA_SPOT_PROB))) ? Math.max(0, Math.min(1, parseFloat(process.env.TWOFA_SPOT_PROB))) : 0.05; // 每分钟触发抽查的概率（默认 5%，2026-08-10 由 10% 下调：再降低一点被打扰频率；也可通过环境变量 TWOFA_SPOT_PROB 覆盖）
 const _2FA_SPOT_INTERVAL = (process.env.TWOFA_SPOT_INTERVAL != null && !isNaN(parseInt(process.env.TWOFA_SPOT_INTERVAL, 10))) ? Math.max(1000, parseInt(process.env.TWOFA_SPOT_INTERVAL, 10)) : 60000; // 抽查周期（默认 60s，测试可调小）
 const _2FA_ACTIVE_TTL = 75 * 1000;       // checkin 心跳有效时长（客户端每 ~30s 上报一次）
 const _2faActive = new Map();            // key 'cloud:<u>' | 'clink:<u>' → { kind, username, activeAt, has2fa }
@@ -7511,7 +7519,15 @@ async function requireBackupAuth(req, res, next) {
             else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
         }
         const sid = decoded.sid;
-        if (sid) { const sess = backupSessions.get(sid); if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' }); touchBackupSession(sess); req.backupSessionId = sid; }
+        if (sid) {
+            let sess = backupSessions.get(sid);
+            if (!sess) {
+                // 内存会话丢失（服务端重启 / 冷启动 DB 未就绪）→ 回 DB 重hydrate，避免有效令牌被误判“已退出登录”
+                try { await dbGetBackupSessions(decoded.username); sess = backupSessions.get(sid); } catch (e) {}
+            }
+            if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' });
+            touchBackupSession(sess); req.backupSessionId = sid;
+        }
         else { req.backupSessionId = null; }
         next();
     } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
