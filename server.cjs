@@ -400,6 +400,40 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         last_active_at VARCHAR(32),
         INDEX idx_cloud_backup_sess_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS savereplay_accounts (
+        username VARCHAR(64) PRIMARY KEY,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        client_id VARCHAR(64),
+        disabled TINYINT(1) NOT NULL DEFAULT 0,
+        banned_until VARCHAR(32),
+        two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0,
+        creator_client_id VARCHAR(64),
+        totp_secret VARCHAR(64),
+        totp_scopes VARCHAR(255)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS savereplay_sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        username VARCHAR(64) NOT NULL,
+        device VARCHAR(128),
+        ip VARCHAR(64),
+        created_at VARCHAR(32),
+        last_active_at VARCHAR(32),
+        INDEX idx_savereplay_sess_user (username)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS leaderboards (
+        id VARCHAR(64) PRIMARY KEY,
+        mode VARCHAR(16) NOT NULL,           -- daily | weekly
+        period VARCHAR(16) NOT NULL,         -- 挑战日期(YYYY-MM-DD) 或 周一日期(weekly)
+        client_id VARCHAR(64) NOT NULL,
+        name VARCHAR(64) NOT NULL,
+        time_ms INT NOT NULL,
+        steps INT NOT NULL,
+        created_at VARCHAR(32),
+        INDEX idx_lb_mode_period (mode, period),
+        INDEX idx_lb_client (client_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -602,6 +636,10 @@ const GLOBAL_FUNCTIONS_FILE = path.join(DATA_DIR, 'global-functions.json');
 //                      检测到浏览器开发者工具关闭后自动刷新页面。
 //                      注意：这是唯一「默认关闭」的开关（默认 false），开启才生效，
 //                      避免影响正常开发调试。
+//   gamepadEnabled  —— 手柄支持总开关。关闭后客户端停止手柄轮询，方向键与 A/B 键全部失效，
+//                      不再弹出手柄连接提示，虚拟手柄测试入口一并禁用（已启用的会被强制关闭）。
+//   showKeybindTab  —— UI设置弹窗「⌨️ 键位」标签页是否显示。关闭后玩家无法自定义键盘键位与
+//                      手柄方向映射，也看不到已连接手柄列表（已保存的自定义键位仍然生效）。
 const GLOBAL_FUNCTIONS_DEFAULT = {
     export: true,
     importClear: true,
@@ -617,8 +655,12 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     cloudLink2fa: true,    // 云链接用户是否允许使用二次认证（2FA）
     backup: true,          // 云备份功能总开关
     backup2fa: true,       // 云备份用户是否允许使用二次认证（2FA）
+    savereplay: true,      // 云存档/云录像 独立账号功能总开关
+    savereplay2fa: true,   // 云存档/云录像 账号是否允许使用二次认证（2FA）
     antiDevtools: false,
     showAntiCheatTab: true,
+    gamepadEnabled: true,  // 是否允许玩家连接/使用游戏手柄（含虚拟手柄测试）
+    showKeybindTab: true,  // 是否显示 UI设置弹窗的「⌨️ 键位」标签页
     newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
@@ -1255,11 +1297,14 @@ const players = new Map(); // 存储所有玩家信息 {socketId: playerData}
 const pendingRooms = new Map(); // 存储等待连接的房间
 const adminTokens = new Map(); // 存储管理员令牌
 const userCoins = new Map(); // 用户金币余额（按 userId 存储，管理员发放/扣除的"账本"）
+const userStars = new Map(); // 用户星星余额（按 userId 存储，管理员发放/扣除的"账本"）
 const userLevels = new Map(); // 用户等级（预留；游戏当前无升级系统，恒为 1，仅供兼容）
-// 玩家真实金币（客户端上报，供管理员查看；与 userCoins 分开，避免覆盖管理员账本语义）
+// 玩家真实金币/星星（客户端上报，供管理员查看；与 userCoins/userStars 分开，避免覆盖管理员账本语义）
 const reportedCoins = new Map();
-// 管理员是否调整过该用户金币（调整后以管理员账本为准，客户端下次上报需直接覆盖本地，否则被玩家本地值冲掉）
+const reportedStars = new Map();
+// 管理员是否调整过该用户金币/星星（调整后以管理员账本为准，客户端下次上报需直接覆盖本地，否则被玩家本地值冲掉）
 const adminCoinOverride = new Map();
+const adminStarOverride = new Map();
 // 玩家档案（客户端上报的 IP / 金币 / 时长 / 统计 / 游戏状态快照；持久保存最近一次，供管理后台离线查看）
 const playerProfiles = new Map();
 
@@ -2384,6 +2429,10 @@ let friendRequests = new Map();
 let friendships = new Map();
 let friendMessages = new Map();
 let _friendReqSeq = 1;
+// 好友聊天文件传输（JSON 等小文件）：用独立存储，避免被私聊消息 2000 字上限截断。
+// fileId 随机不可猜，仅收发双方（好友）能拿到；与私聊消息同采用 JSON 文件持久化。
+const FRIEND_FILES_FILE = path.join(DATA_DIR, 'friend_files.json');
+let friendFiles = new Map(); // fileId -> {id, fromClientId, toClientId, name, content, createdAt}
 
 function friendshipKey(a, b) { return [String(a), String(b)].sort().join('|'); }
 
@@ -2419,6 +2468,19 @@ function saveFriends() {
         };
         fs.writeFileSync(FRIENDS_FILE, JSON.stringify(data, null, 2));
     } catch (e) { console.error('[Friends] 保存失败:', e.message); }
+}
+function loadFriendFiles() {
+    try {
+        if (fs.existsSync(FRIEND_FILES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(FRIEND_FILES_FILE, 'utf8')) || [];
+            if (Array.isArray(arr)) arr.forEach(f => { if (f && f.id) friendFiles.set(f.id, f); });
+        }
+    } catch (e) { console.error('[Friends] 文件加载失败:', e.message); }
+}
+function saveFriendFiles() {
+    ensureDataDir();
+    try { fs.writeFileSync(FRIEND_FILES_FILE, JSON.stringify(Array.from(friendFiles.values()), null, 2)); }
+    catch (e) { console.error('[Friends] 文件保存失败:', e.message); }
 }
 function areFriends(a, b) { return friendships.has(friendshipKey(a, b)); }
 // 找到 a、b 之间处于 pending 的请求（任意方向），返回该请求或 null
@@ -2689,6 +2751,45 @@ app.post('/api/friends/message', (req, res) => {
         res.status(500).json({ success: false, message: '发送失败' });
     }
 });
+// 上传聊天文件（好友之间）：返回 fileId，聊天里只传 fileId + 文件名，避免 2000 字上限截断
+app.post('/api/friends/file', (req, res) => {
+    try {
+        const { fromClientId, toClientId, name, content } = req.body || {};
+        if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
+        if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '只有好友才能发送文件' });
+        const raw = (content == null ? '' : content.toString());
+        if (!raw) return res.json({ success: false, message: '文件内容为空' });
+        if (raw.length > 1000000) return res.json({ success: false, message: '文件过大（上限 1MB）' });
+        const id = 'ff_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+        friendFiles.set(id, {
+            id, fromClientId, toClientId,
+            name: (name || 'file.json').toString().slice(0, 120),
+            content: raw, createdAt: new Date().toISOString()
+        });
+        // 控制总量：超过 300 个删除最旧，避免无限增长
+        if (friendFiles.size > 300) {
+            const oldest = Array.from(friendFiles.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0];
+            if (oldest) friendFiles.delete(oldest.id);
+        }
+        saveFriendFiles();
+        res.json({ success: true, fileId: id });
+    } catch (e) {
+        console.error('[Friends] 上传文件失败:', e);
+        res.status(500).json({ success: false, message: '上传失败' });
+    }
+});
+// 下载聊天文件（fileId 随机不可猜，仅收发双方能从聊天记录里拿到）
+app.get('/api/friends/file/:fileId', (req, res) => {
+    try {
+        const f = friendFiles.get(req.params.fileId);
+        if (!f) return res.status(404).json({ success: false, message: '文件不存在或已失效' });
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(f.name || 'file.json') + '"');
+        res.send(f.content);
+    } catch (e) {
+        res.status(500).json({ success: false, message: '下载失败' });
+    }
+});
 
 // 获取与某好友的聊天记录
 app.get('/api/friends/messages', (req, res) => {
@@ -2850,10 +2951,14 @@ app.get('/api/admin/stats', requireAdminAuth, (req, res) => {
     }
 });
 
-// 展示用金币：优先用客户端上报的真实值，未上报时回退到管理员账本
+// 展示用金币/星星：优先用客户端上报的真实值，未上报时回退到管理员账本
 function getDisplayCoins(id) {
     if (reportedCoins.has(id)) return reportedCoins.get(id);
     return userCoins.get(id) || 0;
+}
+function getDisplayStars(id) {
+    if (reportedStars.has(id)) return reportedStars.get(id);
+    return userStars.get(id) || 0;
 }
 
 // 聚合所有在线玩家，生成用户列表（服务器无独立账号系统，以在线玩家为准）
@@ -2926,14 +3031,16 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
 // 仅持久化到 onlinePlayers（管理后台 /api/users 的权威来源），不做任何鉴权（小游戏）。
 app.post('/api/player-online', (req, res) => {
     try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = req.body || {};
+        const { id, name, coins, stars, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = req.body || {};
         if (!id) return res.json({ success: false, message: '缺少 id' });
         // 客户端上报的 UI 设置（供管理员后台查看/修改）
         if (uiSettings) setClientUISettings(id, uiSettings);
         const existing = onlinePlayers.get(id) || {};
-        // 记录玩家上报的真实金币（供管理员查看）
+        // 记录玩家上报的真实金币/星星（供管理员查看）
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
+        const rs = parseInt(stars);
+        if (!isNaN(rs)) reportedStars.set(id, Math.max(0, rs));
         // 记录玩家上报的关卡进度（供管理员查看过关历史）
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels });
         // 记录玩家上报的成就数据（供管理员查看）
@@ -2961,9 +3068,10 @@ app.post('/api/player-online', (req, res) => {
         savePlayerProfile(id, {
             ip: ip,
             coins: isNaN(rc) ? (prevCoins(id)) : Math.max(0, rc),
+            stars: isNaN(rs) ? (prevStars(id)) : Math.max(0, rs),
             totalPlayTime: _locked ? prevPlayTime(id) : ((typeof totalPlayTime === 'number') ? totalPlayTime : (prevPlayTime(id))),
             gameStats: _locked ? prevStats(id) : ((gameStats && typeof gameStats === 'object') ? gameStats : (prevStats(id))),
-            gamestate: _gsLocked ? prevGamestate(id) : ((gamestate && typeof gamestate === 'object') ? gamestate : (prevGamestate(id))),
+            gamestate: _gsLocked ? prevGamestate(id) : ((gamestate && typeof gameState === 'object') ? gamestate : (prevGamestate(id))),
             username: (name && String(name).trim()) || existing.name || '玩家'
         });
         // 若客户端 IP 已被封禁，则对该用户启用全部功能封禁，并通知客户端弹全屏封禁框
@@ -3020,6 +3128,7 @@ app.post('/api/player-online', (req, res) => {
 
 // 从已存档案中读取历史字段（上报不全时回退，避免清掉已有数据）
 function prevCoins(id) { const p = playerProfiles.get(id); return p && typeof p.coins === 'number' ? p.coins : 0; }
+function prevStars(id) { const p = playerProfiles.get(id); return p && typeof p.stars === 'number' ? p.stars : 0; }
 function prevPlayTime(id) { const p = playerProfiles.get(id); return p && typeof p.totalPlayTime === 'number' ? p.totalPlayTime : 0; }
 function prevStats(id) { const p = playerProfiles.get(id); return p && p.gameStats ? p.gameStats : null; }
 function prevGamestate(id) { const p = playerProfiles.get(id); return p && p.gamestate ? p.gamestate : null; }
@@ -3088,7 +3197,39 @@ app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
     }
 });
 
-// API: 获取用户详细信息（管理员专用）：封禁、IP、金币、游戏时长、gamestate、统计
+// API: 为用户增减星星（管理员专用）
+app.post('/api/users/:userId/stars', requireAdminAuth, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const { amount } = req.body;
+
+        if (amount === undefined || amount === null || isNaN(parseInt(amount))) {
+            return res.status(400).json({ success: false, message: '星星数量无效' });
+        }
+
+        const delta = parseInt(amount);
+        const current = userStars.get(userId) || 0;
+        const updated = current + delta;
+        userStars.set(userId, updated);
+        // 同步到上报账本 + 标记管理员覆盖：客户端下次 player-online 需以此值为准（直接覆盖本地）
+        reportedStars.set(userId, Math.max(0, updated));
+        adminStarOverride.set(userId, true);
+
+        console.log(`[Admin] 用户 ${userId} 星星变更 ${delta >= 0 ? '+' : ''}${delta}，当前余额 ${updated}`);
+        appendAudit('admin', 'stars', `用户 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 星星，余额 ${updated}`);
+
+        res.json({
+            success: true,
+            message: `已为 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 星星`,
+            stars: updated
+        });
+    } catch (error) {
+        console.error('[API] 调整星星失败:', error);
+        res.status(500).json({ success: false, message: '调整星星失败' });
+    }
+});
+
+// API: 获取用户详细信息（管理员专用）：封禁、IP、金币、星星、游戏时长、gamestate、统计
 app.get('/api/admin/users/:userId/info', requireAdminAuth, (req, res) => {
     try {
         const userId = req.params.userId;
@@ -3111,6 +3252,7 @@ app.get('/api/admin/users/:userId/info', requireAdminAuth, (req, res) => {
             ipBanPermanent: ipRec ? !ipRec.expiresAt : false,
             ipBanTerm: ipRec ? describeIPBan(ipRec) : '',
             coins: (typeof prof.coins === 'number') ? prof.coins : (reportedCoins.get(userId) || 0),
+            stars: (typeof prof.stars === 'number') ? prof.stars : (reportedStars.get(userId) || 0),
             totalPlayTime: (typeof prof.totalPlayTime === 'number') ? prof.totalPlayTime : 0,
             gameStats: prof.gameStats || null,
             gamestate: prof.gamestate || null,
@@ -3517,6 +3659,18 @@ app.get('/api/my-coins', (req, res) => {
         res.json({ success: true, coins });
     } catch (e) {
         res.json({ success: true, coins: 0 });
+    }
+});
+
+// API: 玩家拉取自己被管理员发放/扣除的星星余额（开放接口，供客户端同步钱包）
+app.get('/api/my-stars', (req, res) => {
+    try {
+        const id = req.query.id;
+        if (!id) return res.json({ success: true, stars: 0 });
+        const stars = userStars.get(id) || 0;
+        res.json({ success: true, stars });
+    } catch (e) {
+        res.json({ success: true, stars: 0 });
     }
 });
 
@@ -4369,7 +4523,7 @@ io.on('connection', (socket) => {
     // 客户端进入游戏、取名后调用，把自身登记为在线玩家（roomId 为 null 表示尚未进入任何房间）。
     socket.on('player-online', (data) => {
         try {
-        const { id, name, coins, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = data || {};
+        const { id, name, coins, stars, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = data || {};
         if (!id) return;
         const ip = getClientIp(socket.request);
         const role = getUserRole(id);
@@ -4392,6 +4546,8 @@ io.on('connection', (socket) => {
         }
         const rc = parseInt(coins);
         if (!isNaN(rc)) reportedCoins.set(id, Math.max(0, rc));
+        const rs = parseInt(stars);
+        if (!isNaN(rs)) reportedStars.set(id, Math.max(0, rs));
         mergeProgress(id, { unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels });
         if (achievements) mergeAchievements(id, achievements);
         const _prof0 = playerProfiles.get(id) || {};
@@ -4400,6 +4556,7 @@ io.on('connection', (socket) => {
         savePlayerProfile(id, {
             ip: ip,
             coins: isNaN(rc) ? prevCoins(id) : Math.max(0, rc),
+            stars: isNaN(rs) ? prevStars(id) : Math.max(0, rs),
             totalPlayTime: _locked ? prevPlayTime(id) : ((typeof totalPlayTime === 'number') ? totalPlayTime : prevPlayTime(id)),
             gameStats: _locked ? prevStats(id) : ((gameStats && typeof gameStats === 'object') ? gameStats : prevStats(id)),
             gamestate: _gsLocked ? prevGamestate(id) : ((gamestate && typeof gamestate === 'object') ? gamestate : prevGamestate(id)),
@@ -5183,6 +5340,54 @@ function savePlayerMazes() {
 }
 loadPlayerMazes();
 
+// =============== 玩家回放（单人通关自动录制，上报到服务器供 admin 查看/删除）===============
+// 存储：内存 Map + JSON 文件（与工坊同模式，避免碰 MySQL 迁移）。
+// 上报：前端每录完一场回放自动 POST /api/replays（clientId 归属，replayId 幂等）。
+const playerReplays = new Map(); // replayId -> { id, clientId, accountId, username, levelLabel, durationMs, deathCount, moveCount, finishedAt, data }
+const PLAYER_REPLAYS_FILE = path.join(DATA_DIR, 'player-replays.json');
+function loadPlayerReplays() {
+    try {
+        if (fs.existsSync(PLAYER_REPLAYS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(PLAYER_REPLAYS_FILE, 'utf8'));
+            if (Array.isArray(arr)) {
+                arr.forEach(r => playerReplays.set(r.id, r));
+                console.log(`[回放] 已从 ${PLAYER_REPLAYS_FILE} 加载 ${playerReplays.size} 场回放`);
+            }
+        }
+    } catch (e) { console.error('[回放] 加载失败:', e.message); }
+}
+function savePlayerReplays() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(PLAYER_REPLAYS_FILE, JSON.stringify(Array.from(playerReplays.values()), null, 2));
+    } catch (e) { console.error('[回放] 保存失败:', e.message); }
+}
+loadPlayerReplays();
+
+// =============== 玩家存档（自动/手动存档，上报到服务器供 admin 查看/删除）===============
+// 存储：内存 Map + JSON 文件（与工坊同模式）。
+// 上报：前端每次保存存档自动 POST /api/saves（clientId 归属，saveId 幂等）。
+const playerSaves = new Map(); // saveId -> { id, clientId, accountId, username, slot, type, level, createdAt, data }
+const PLAYER_SAVES_FILE = path.join(DATA_DIR, 'player-saves.json');
+function loadPlayerSaves() {
+    try {
+        if (fs.existsSync(PLAYER_SAVES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(PLAYER_SAVES_FILE, 'utf8'));
+            if (Array.isArray(arr)) {
+                arr.forEach(s => playerSaves.set(s.id, s));
+                console.log(`[存档] 已从 ${PLAYER_SAVES_FILE} 加载 ${playerSaves.size} 个存档`);
+            }
+        }
+    } catch (e) { console.error('[存档] 加载失败:', e.message); }
+}
+function savePlayerSaves() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(PLAYER_SAVES_FILE, JSON.stringify(Array.from(playerSaves.values()), null, 2));
+    } catch (e) { console.error('[存档] 保存失败:', e.message); }
+}
+loadPlayerSaves();
+
 // =============== 云储存（玩家注册账号，每个账号最多 5 个地图）===============
 // 存储：DB 优先（cloud_storage_accounts / cloud_storage_mazes 表），失败回退 JSON 文件（data/cloud-storage.json）。
 const CLOUD_STORAGE_FILE = path.join(DATA_DIR, 'cloud-storage.json');
@@ -5642,6 +5847,59 @@ function genExpansionCode() {
     return 'MZ' + raw;
 }
 loadCloudCodes();
+
+// =============== 存档扩容码 ===============
+// 管理员生成、客户端（本地存档）兑换：可自定义使用次数 / 允许 IP / 扩容到的存档槽位数。
+// 存档本身是玩家本地 localStorage 数据，服务端只负责签发与校验"有效码"，
+// 玩家在游戏内输入码 → 前端调 /api/save-codes/redeem 校验 → 校验通过才在本地扩容。
+// 这样码无法被玩家自己编造（固定密码 11save++ 已废弃）。
+// 存储：JSON 文件（data/save-codes.json），与云空间扩容码同构，无需 DB 表迁移。
+const SAVE_CODES_FILE = path.join(DATA_DIR, 'save-codes.json');
+let saveCodes = new Map(); // code -> { code, max_uses, used, allowed_ips, slots, created_at, created_by, note, active, redeemed_by[], redeemed_ips[] }
+function loadSaveCodes() {
+    try {
+        if (fs.existsSync(SAVE_CODES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(SAVE_CODES_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(c => saveCodes.set(c.code, c));
+            console.log(`[存档扩容] 已从 ${SAVE_CODES_FILE} 加载 ${saveCodes.size} 个扩容码`);
+        }
+    } catch (e) { console.error('[存档扩容] 扩容码载入失败:', e.message); }
+}
+function saveSaveCodes() {
+    try { ensureDataDir(); fs.writeFileSync(SAVE_CODES_FILE, JSON.stringify(Array.from(saveCodes.values()), null, 2)); }
+    catch (e) { console.error('[存档扩容] 扩容码保存失败:', e.message); }
+}
+async function dbGetSaveCode(code) {
+    const c = saveCodes.get(code);
+    if (c) {
+        c.redeemed_by = Array.isArray(c.redeemed_by) ? c.redeemed_by : [];
+        c.redeemed_ips = Array.isArray(c.redeemed_ips) ? c.redeemed_ips : [];
+    }
+    return c || null;
+}
+async function dbAllSaveCodes() {
+    return Array.from(saveCodes.values()).map(c => ({
+        ...c,
+        redeemed_by: Array.isArray(c.redeemed_by) ? c.redeemed_by : [],
+        redeemed_ips: Array.isArray(c.redeemed_ips) ? c.redeemed_ips : []
+    }));
+}
+async function dbUpsertSaveCode(c) {
+    saveCodes.set(c.code, c); // 内存同步，保证兑换校验即时可用
+    saveSaveCodes();
+}
+async function dbDeleteSaveCode(code) {
+    saveCodes.delete(code);
+    saveSaveCodes();
+}
+// 生成可读扩容码：SV + 16 位 base32，分组展示（区别于云空间 MZ 前缀）
+function genSaveCode() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉易混字符 I O 0 1
+    let raw = '';
+    for (let i = 0; i < 16; i++) raw += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return 'SV' + raw;
+}
+loadSaveCodes();
 
 // =============== 云链接（分享迷宫为可游玩的网页链接） ===============
 // 独立于「云储存」的一套轻量账号体系：玩家在工坊「查看/分享迷宫」里把一张迷宫发布成云链接，
@@ -6638,6 +6896,7 @@ function cloudLink2faEnabled() { return globalFunctions.cloudLink2fa !== false; 
 function twofaGlobalEnabledFor(acc) {
     if (!acc) return true;
     if (acc.__kind === 'backup') return backup2faEnabled();
+    if (acc.__kind === 'savereplay') return savereplay2faEnabled();
     if (acc.max_mazes != null) return cloud2faEnabled();
     return cloudLink2faEnabled();
 }
@@ -7800,6 +8059,389 @@ app.put('/api/admin/cloud-backup/accounts/:username/2fa', requireAdminAuth, asyn
         appendAudit('admin', 'cloud-backup-2fa-admin-disable', `管理员关闭云备份账号「${username}」的二次认证`, req); res.json({ success: true, enabled: false, message: '已关闭该账号的二次认证' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
+// ===== 云存档/云录像 独立账号体系（与云备份同构，覆盖 云存档 + 云录像；JWT type='savereplay'）=====
+// 复用共享 helper：bcrypt / jwt / totp* / pending2fa* / assert2faCode / parseTotpScopes / twofaScopeEnabled / assert2faScope / twofaGlobalEnabledFor / _healAccountColumn。
+// ===================================================================
+const SAVEREPLAY_FILE = path.join(DATA_DIR, 'savereplays.json');
+let savereplayAccounts = new Map();
+function savereplayEnabled() { return globalFunctions.savereplay !== false; }
+function savereplay2faEnabled() { return globalFunctions.savereplay2fa !== false; }
+function loadSaveReplays() {
+    try {
+        if (fs.existsSync(SAVEREPLAY_FILE)) {
+            const s = JSON.parse(fs.readFileSync(SAVEREPLAY_FILE, 'utf8'));
+            if (s && s.accounts) s.accounts.forEach(a => { a.__kind = 'savereplay'; savereplayAccounts.set(a.username, a); });
+        }
+        console.log(`[云备份] 已加载 ${savereplayAccounts.size} 账号`);
+    } catch (e) { console.error('[云备份] 加载失败:', e.message); }
+}
+function saveSaveReplays() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(SAVEREPLAY_FILE, JSON.stringify({
+            accounts: Array.from(savereplayAccounts.values()).map(a => { const c = Object.assign({}, a); delete c.__kind; return c; })
+        }, null, 2));
+    } catch (e) { console.error('[云备份] 保存失败:', e.message); }
+}
+async function dbGetSaveReplayAccount(username) {
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT * FROM savereplay_accounts WHERE username=?', [username]); if (rows && rows.length) { const a = rows[0]; a.__kind = 'savereplay'; return a; } } catch (e) { console.error('[云备份] DB 读账号失败:', e.message); }
+    }
+    const a = savereplayAccounts.get(username);
+    if (a) a.__kind = 'savereplay';
+    return a || null;
+}
+async function dbGetSaveReplayAccountByClient(clientId) {
+    if (!clientId) return null;
+    if (DB_AVAILABLE && pool) {
+        try { const [rows] = await pool.query('SELECT * FROM savereplay_accounts WHERE client_id=?', [clientId]); if (rows && rows.length) { const a = rows[0]; a.__kind = 'savereplay'; return a; } } catch (e) { console.error('[云备份] DB 读账号(clientId)失败:', e.message); }
+    }
+    for (const acc of savereplayAccounts.values()) { if (acc.client_id === clientId) { acc.__kind = 'savereplay'; return acc; } }
+    return null;
+}
+async function dbSaveSaveReplayAccount(acc) {
+    const clientId = (acc.client_id != null) ? acc.client_id : null;
+    const disabled = (acc.disabled != null) ? (acc.disabled ? 1 : 0) : 0;
+    const bannedUntil = (acc.banned_until != null && acc.banned_until !== '') ? String(acc.banned_until) : null;
+    const twoFactor = (acc.two_factor_enabled != null) ? (acc.two_factor_enabled ? 1 : 0) : 0;
+    const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
+    const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
+    const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
+    const SQL = 'INSERT INTO savereplay_accounts (username, password_hash, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes];
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query(SQL, PARAMS); return; }
+        catch (e) {
+            const m = String(e.message || '');
+            const mm = m.match(/Unknown column ['"]?([a-z_]+)['"]?/i);
+            if (mm && CLOUD_ACCOUNT_COLUMNS[mm[1]] && await _healAccountColumn(mm[1], 'savereplay_accounts')) {
+                try { await pool.query(SQL, PARAMS); return; } catch (e2) { console.error('[云备份] 自愈补列后写入仍失败:', e2.message); }
+            }
+            console.error('[云备份] DB 写账号失败:', e.message);
+        }
+    }
+    const c = Object.assign({}, acc, { client_id: clientId, disabled, banned_until: bannedUntil, two_factor_enabled: twoFactor, creator_client_id: creatorClientId, totp_secret: totpSecret, totp_scopes: totpScopes });
+    c.__kind = 'savereplay';
+    savereplayAccounts.set(acc.username, c);
+    saveSaveReplays();
+}
+async function dbAllSaveReplayAccounts() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT username, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled FROM savereplay_accounts ORDER BY created_at DESC');
+            if (rows) return rows.map(r => ({ username: r.username, created_at: r.created_at, updated_at: r.updated_at, client_id: r.client_id || null, disabled: !!r.disabled, banned_until: (r.banned_until != null && r.banned_until !== '') ? r.banned_until : null, two_factor_enabled: r.two_factor_enabled ? 1 : 0 }));
+        } catch (e) { console.error('[云备份] DB 读账号列表失败:', e.message); }
+    }
+    return Array.from(savereplayAccounts.values()).map(a => ({ username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null, disabled: !!a.disabled, banned_until: (a.banned_until != null && a.banned_until !== '') ? a.banned_until : null, two_factor_enabled: (a.two_factor_enabled != null ? (a.two_factor_enabled ? 1 : 0) : 0) }));
+}
+async function dbDeleteSaveReplayAccount(username) {
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM savereplay_sessions WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); }
+        try { await pool.query('DELETE FROM savereplay_accounts WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删账号失败:', e.message); }
+    }
+    for (const [k, s] of savereplaySessions) if (s.username === username) savereplaySessions.delete(k);
+    saveSaveReplaySessions();
+    savereplayAccounts.delete(username);
+    saveSaveReplays();
+}
+// ===== 云备份会话（设备）管理 =====
+const SAVEREPLAY_SESSIONS_FILE = path.join(DATA_DIR, 'savereplay-sessions.json');
+let savereplaySessions = new Map();
+async function loadSaveReplaySessions() {
+    try {
+        if (DB_AVAILABLE && pool) {
+            try {
+                const [rows] = await pool.query('SELECT * FROM savereplay_sessions');
+                if (rows) rows.forEach(s => savereplaySessions.set(s.id, s));
+                return; // DB 成功 → 以 DB 为准
+            } catch (e) { console.error('[云备份] DB 会话载入失败，回退 JSON:', e.message); }
+        }
+        if (fs.existsSync(SAVEREPLAY_SESSIONS_FILE)) { const arr = JSON.parse(fs.readFileSync(SAVEREPLAY_SESSIONS_FILE, 'utf8')); if (Array.isArray(arr)) arr.forEach(s => savereplaySessions.set(s.id, s)); }
+    } catch (e) { console.error('[云备份] 会话载入失败:', e.message); }
+}
+function saveSaveReplaySessions() { try { ensureDataDir(); fs.writeFileSync(SAVEREPLAY_SESSIONS_FILE, JSON.stringify(Array.from(savereplaySessions.values()), null, 2)); } catch (e) { console.error('[云备份] 会话保存失败:', e.message); } }
+async function dbGetSaveReplaySessions(username) {
+    if (DB_AVAILABLE && pool) { try { const [rows] = await pool.query('SELECT * FROM savereplay_sessions WHERE username=? ORDER BY last_active_at DESC', [username]); if (rows) { rows.forEach(s => savereplaySessions.set(s.id, s)); return rows; } } catch (e) { console.error('[云备份] DB 读会话失败:', e.message); } }
+    return Array.from(savereplaySessions.values()).filter(s => s.username === username).sort((a, b) => (b.last_active_at || '').localeCompare(a.last_active_at || ''));
+}
+async function dbUpsertSaveReplaySession(s) { savereplaySessions.set(s.id, s); if (DB_AVAILABLE && pool) { try { await pool.query('INSERT INTO savereplay_sessions (id, username, device, ip, created_at, last_active_at) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE device=VALUES(device), ip=VALUES(ip), last_active_at=VALUES(last_active_at)', [s.id, s.username, s.device, s.ip, s.created_at, s.last_active_at]); return; } catch (e) { console.error('[云备份] DB 写会话失败:', e.message); } } saveSaveReplaySessions(); }
+async function dbDeleteSaveReplaySession(id) { savereplaySessions.delete(id); if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM savereplay_sessions WHERE id=?', [id]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } saveSaveReplaySessions(); }
+async function dbDeleteSaveReplaySessionsExcept(username, exceptId) { if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM savereplay_sessions WHERE username=? AND id<>?', [username, exceptId]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } for (const [k, s] of savereplaySessions) if (s.username === username && k !== exceptId) savereplaySessions.delete(k); saveSaveReplaySessions(); }
+async function dbDeleteSaveReplaySessionsByUser(username) { if (!username) return; if (DB_AVAILABLE && pool) { try { await pool.query('DELETE FROM savereplay_sessions WHERE username=?', [username]); } catch (e) { console.error('[云备份] DB 删会话失败:', e.message); } } for (const [k, s] of savereplaySessions) if (s.username === username) savereplaySessions.delete(k); saveSaveReplaySessions(); }
+function makeSaveReplaySession(username, device, ip) { const id = genSessionId(); const now = new Date().toISOString(); const s = { id, username, device: (device || '未知设备').toString().slice(0, 128), ip: (ip || '').toString().slice(0, 64), created_at: now, last_active_at: now }; dbUpsertSaveReplaySession(s).catch(e => console.error('[云备份] 创建会话失败:', e.message)); return s; }
+function touchSaveReplaySession(sess) { sess.last_active_at = new Date().toISOString(); const now = Date.now(); if (!sess._lastTouch || now - sess._lastTouch > 60000) { sess._lastTouch = now; dbUpsertSaveReplaySession(sess).catch(() => {}); } }
+loadSaveReplays();
+loadSaveReplaySessions().catch(e => console.error('[云备份] 会话载入失败:', e.message));
+
+// 云备份鉴权
+async function requireSaveReplayAuth(req, res, next) {
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, message: '未登录' });
+    try {
+        const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        if (decoded.type !== 'savereplay' || !decoded.username) return res.status(401).json({ success: false, message: '无效的登录令牌' });
+        req.savereplayUser = decoded.username;
+        const acc = await dbGetSaveReplayAccount(decoded.username);
+        if (acc && acc.disabled) {
+            if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); await dbUpdateBanHistoryUnban('savereplay', decoded.username, 'system'); }
+            else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
+        }
+        const sid = decoded.sid;
+        if (sid) {
+            let sess = savereplaySessions.get(sid);
+            if (!sess) {
+                // 内存会话丢失（服务端重启 / 冷启动 DB 未就绪）→ 回 DB 重hydrate，避免有效令牌被误判“已退出登录”
+                try { await dbGetSaveReplaySessions(decoded.username); sess = savereplaySessions.get(sid); } catch (e) {}
+            }
+            if (!sess || sess.username !== decoded.username) return res.status(401).json({ success: false, message: '该设备已被退出登录，请重新登录' });
+            touchSaveReplaySession(sess); req.savereplaySessionId = sid;
+        }
+        else { req.savereplaySessionId = null; }
+        next();
+    } catch (e) { res.status(401).json({ success: false, message: '登录已过期，请重新登录' }); }
+}
+
+// 公开：云备份功能是否开启
+app.get('/api/savereplay/enabled', (req, res) => { res.json({ success: true, enabled: savereplayEnabled() }); });
+
+// 注册
+app.post('/api/savereplay/register', async (req, res) => {
+    try {
+        if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        if (!username || !password) return res.status(400).json({ success: false, message: '用户名和密码不能为空' });
+        if (username.length > 64 || password.length < 4) return res.status(400).json({ success: false, message: '用户名过长或密码至少 4 位' });
+        const existing = await dbGetSaveReplayAccount(username);
+        if (existing) return res.status(409).json({ success: false, message: '该用户名已被注册' });
+        const password_hash = bcrypt.hashSync(password, 10);
+        const now = new Date().toISOString();
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        const acc = { username, password_hash, created_at: now, updated_at: now, client_id: clientId, creator_client_id: clientId };
+        await dbSaveSaveReplayAccount(acc);
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const ip = getClientIp(req);
+        const sess = makeSaveReplaySession(username, device, ip);
+        const token = jwt.sign({ username, type: 'savereplay', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
+    } catch (e) { console.error('[云备份] 注册失败:', e); res.status(500).json({ success: false, message: '注册失败' }); }
+});
+
+// 登录
+app.post('/api/savereplay/login', async (req, res) => {
+    try {
+        if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        const acc = await dbGetSaveReplayAccount(username);
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        if (acc.disabled) {
+            if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); await dbUpdateBanHistoryUnban('savereplay', username, 'system'); }
+            else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
+        }
+        if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
+            const code = read2faCode(req);
+            if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
+            const deny = assert2faCode(acc, code);
+            if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+        }
+        const clientId = (req.body.clientId || '').toString().trim() || null;
+        if (clientId && acc.client_id !== clientId) { acc.client_id = clientId; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); }
+        const device = (req.body.device || req.headers['user-agent'] || '未知设备').toString().slice(0, 128);
+        const ip = getClientIp(req);
+        const sess = makeSaveReplaySession(username, device, ip);
+        const token = jwt.sign({ username, type: 'savereplay', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        res.json({ success: true, token, username, sid: sess.id });
+    } catch (e) { console.error('[云备份] 登录失败:', e); res.status(500).json({ success: false, message: '登录失败' }); }
+});
+
+// 修改密码
+app.put('/api/savereplay/password', requireSaveReplayAuth, async (req, res) => {
+    try {
+        const acc = await dbGetSaveReplayAccount(req.savereplayUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const deny = assert2faScope(acc, 'account', read2faCode(req));
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        const oldP = (req.body.oldPassword || '').toString();
+        const newP = (req.body.newPassword || '').toString();
+        if (!bcrypt.compareSync(oldP, acc.password_hash)) return res.status(400).json({ success: false, message: '原密码错误' });
+        if (newP.length < 4) return res.status(400).json({ success: false, message: '新密码至少 4 位' });
+        acc.password_hash = bcrypt.hashSync(newP, 10);
+        acc.updated_at = new Date().toISOString();
+        await dbSaveSaveReplayAccount(acc);
+        appendAudit(req.savereplayUser || 'savereplay', 'savereplay-password', `云存档录像账号「${req.savereplayUser}」修改密码`, req);
+        res.json({ success: true, message: '密码已修改' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 注销账号
+app.delete('/api/savereplay/account', requireSaveReplayAuth, async (req, res) => {
+    try {
+        const acc = await dbGetSaveReplayAccount(req.savereplayUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const deny = assert2faScope(acc, 'account', read2faCode(req));
+        if (deny) return res.status(403).json({ success: false, message: deny });
+        await dbDeleteSaveReplayAccount(req.savereplayUser);
+        appendAudit(req.savereplayUser || 'savereplay', 'savereplay-account-delete', `注销云存档录像账号「${req.savereplayUser}」`, req);
+        res.json({ success: true, message: '账号已注销' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 当前账号信息
+app.get('/api/savereplay/me', requireSaveReplayAuth, async (req, res) => {
+    try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); res.json({ success: true, username: req.savereplayUser, twoFactor: !!acc.two_factor_enabled }); }
+    catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 2FA 状态 / 作用范围
+app.get('/api/savereplay/2fa', requireSaveReplayAuth, async (req, res) => { try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); res.json({ success: true, enabled: !!(acc && acc.two_factor_enabled) }); } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); } });
+app.get('/api/savereplay/2fa/scopes', requireSaveReplayAuth, async (req, res) => {
+    try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); const enabled = !!(acc && acc.two_factor_enabled); const scopes = {}; TOTP_SCOPES.forEach(s => { scopes[s] = enabled && twofaScopeEnabled(acc, s); }); res.json({ success: true, enabled, login: true, scopes }); }
+    catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+app.put('/api/savereplay/2fa/scopes', requireSaveReplayAuth, async (req, res) => {
+    if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+    if (!savereplay2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const acc = await dbGetSaveReplayAccount(req.savereplayUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.status(400).json({ success: false, message: '未开启二次认证，无需配置' });
+        const deny = assert2faCode(acc, read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        const reqScopes = (req.body && req.body.scopes) || {}; const list = TOTP_SCOPES.filter(s => !!reqScopes[s]);
+        acc.totp_scopes = (list.length === TOTP_SCOPES.length) ? null : JSON.stringify(list); acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc);
+        const scopes = {}; TOTP_SCOPES.forEach(s => { scopes[s] = twofaScopeEnabled(acc, s); });
+        res.json({ success: true, enabled: true, login: true, scopes });
+    } catch (e) { res.status(500).json({ success: false, message: '保存失败' }); }
+});
+app.get('/api/savereplay/2fa/setup', requireSaveReplayAuth, async (req, res) => {
+    if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+    if (!savereplay2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const secret = totpGenSecret(); const label = encodeURIComponent('迷宫探险:' + req.savereplayUser); const issuer = encodeURIComponent('迷宫探险');
+        const otpauthUri = 'otpauth://totp/' + label + '?secret=' + secret + '&issuer=' + issuer + '&algorithm=SHA1&digits=6&period=30';
+        let qr = ''; if (typeof QRCode !== 'undefined' && QRCode) { try { qr = await QRCode.toDataURL(otpauthUri); } catch (e) { qr = ''; } }
+        res.json({ success: true, secret, otpauthUri, qr });
+    } catch (e) { res.status(500).json({ success: false, message: '生成失败' }); }
+});
+app.put('/api/savereplay/2fa', requireSaveReplayAuth, async (req, res) => {
+    if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+    try {
+        const password = ((req.body && req.body.password) || '').toString(); const enabled = !!((req.body && req.body.enabled));
+        if (enabled && !savereplay2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认操作' });
+        const acc = await dbGetSaveReplayAccount(req.savereplayUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!bcrypt.compareSync(password, acc.password_hash)) return res.status(400).json({ success: false, message: '密码错误' });
+        if (enabled) {
+            const secret = ((req.body && req.body.secret) || '').toString().trim(); const code = ((req.body && req.body.code) || '').toString().trim();
+            if (!secret) return res.status(400).json({ success: false, message: '缺少 TOTP 密钥' });
+            if (!totpVerify(secret, code)) return res.status(400).json({ success: false, message: '动态验证码错误，请确认浏览器插件时间已同步' });
+            pending2faPut('savereplay', req.savereplayUser, secret, code);
+            return res.json({ success: true, enabled: false, pendingConfirm: true, message: '绑定成功，请等待插件刷新出下一个验证码后再输入一次以完成确认' });
+        }
+        pending2faDrop('savereplay', req.savereplayUser); acc.totp_secret = null; acc.two_factor_enabled = 0; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc);
+        appendAudit(req.savereplayUser || 'savereplay', 'savereplay-2fa-change', `云存档录像账号「${req.savereplayUser}」二次认证关闭`, req);
+        res.json({ success: true, enabled: false, message: '已关闭二次认证' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.post('/api/savereplay/2fa/confirm', requireSaveReplayAuth, async (req, res) => {
+    if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+    if (!savereplay2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const code = ((req.body && req.body.code) || '').toString().trim(); const acc = await dbGetSaveReplayAccount(req.savereplayUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const pend = pending2faTake('savereplay', req.savereplayUser); if (!pend) return res.status(400).json({ success: false, expired: true, enabled: false, message: '绑定已超时失效，请重新开启二次认证' });
+        if (code && code === pend.bindCode) return res.status(400).json({ success: false, sameCode: true, message: '请等待插件刷新出【新的】验证码，不能重复使用刚才那一个' });
+        if (!totpVerify(pend.secret, code)) { appendAudit(req.savereplayUser || 'savereplay', 'savereplay-2fa-confirm-fail', `云存档录像账号「${req.savereplayUser}」二次认证确认失败（动态码错误，密钥保留可重试）`, req); return res.status(400).json({ success: false, retryable: true, enabled: false, message: '动态码不正确，请确认你的 2FA 插件显示的验证码后重试（不能重复使用绑定时的那个码，需等插件刷新出新码）' }); }
+        pending2faDrop('savereplay', req.savereplayUser); acc.totp_secret = pend.secret; acc.two_factor_enabled = 1; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc);
+        appendAudit(req.savereplayUser || 'savereplay', 'savereplay-2fa-change', `云存档录像账号「${req.savereplayUser}」二次认证开启（已通过二次确认）`, req);
+        res.json({ success: true, enabled: true, message: '二次认证已开启' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.post('/api/savereplay/verify', requireSaveReplayAuth, async (req, res) => {
+    if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+    try { const password = ((req.body && req.body.password) || '').toString(); const acc = await dbGetSaveReplayAccount(req.savereplayUser); if (!acc || !bcrypt.compareSync(password, acc.password_hash)) return res.status(400).json({ success: false, message: '密码错误' }); res.json({ success: true }); }
+    catch (e) { res.status(500).json({ success: false, message: '验证失败' }); }
+});
+// 安全抽查心跳 / 挑战
+app.post('/api/savereplay/2fa/checkin', requireSaveReplayAuth, async (req, res) => {
+    try { const active = !((req.body && req.body.active === false)); const key = _2faKey('savereplay', req.savereplayUser);
+        if (active) { const acc = await dbGetSaveReplayAccount(req.savereplayUser); const has2fa = !!(acc && acc.two_factor_enabled && acc.totp_secret && twofaGlobalEnabledFor(acc)); _2faActive.set(key, { kind: 'savereplay', username: req.savereplayUser, activeAt: Date.now(), has2fa }); }
+        else { _2faActive.delete(key); } res.json({ success: true }); } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.get('/api/savereplay/2fa/challenge', requireSaveReplayAuth, async (req, res) => {
+    try { const key = _2faKey('savereplay', req.savereplayUser); const c = _2faChallenges.get(key);
+        res.json({ success: true, challenge: !!c, expired: false }); } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.post('/api/savereplay/2fa/challenge', requireSaveReplayAuth, async (req, res) => {
+    try { const key = _2faKey('savereplay', req.savereplayUser); const c = _2faChallenges.get(key);
+        if (!c) return res.status(400).json({ success: false, message: '没有待验证的抽查任务' });
+        const acc = await dbGetSaveReplayAccount(req.savereplayUser);
+        if (!acc || !acc.two_factor_enabled || !acc.totp_secret) { _2faChallenges.delete(key); return res.json({ success: true, message: '未开启二次认证，跳过抽查' }); }
+        if (!totpVerify(acc.totp_secret, read2faCode(req) || '')) { appendAudit(req.savereplayUser || 'savereplay', 'savereplay-2fa-spot-check-fail', `云存档录像账号「${req.savereplayUser}」随机抽查验证失败`, req); return res.status(403).json({ success: false, message: '动态码错误，请重新输入（来自你的 2FA 浏览器插件）' }); }
+        _2faChallenges.delete(key); _2faCoolDown.set(key, Date.now() + _2FA_COOLDOWN); appendAudit(req.savereplayUser || 'savereplay', 'savereplay-2fa-spot-check', `云存档录像账号「${req.savereplayUser}」随机抽查验证通过（冷却 5 分钟）`, req);
+        res.json({ success: true, message: '抽查验证通过' }); } catch (e) { res.status(500).json({ success: false, message: '失败' }); }
+});
+app.post('/api/savereplay/authorize', requireSaveReplayAuth, async (req, res) => {
+    if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
+    try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.two_factor_enabled) return res.json({ success: true, required: false });
+        const deny = assert2faScope(acc, 'authorize', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        res.json({ success: true, required: true }); } catch (e) { res.status(500).json({ success: false, message: '授权校验失败' }); }
+});
+
+// 会话管理
+app.get('/api/savereplay/sessions', requireSaveReplayAuth, async (req, res) => {
+    try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); const deny = assert2faScope(acc, 'sessions', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        const list = await dbGetSaveReplaySessions(req.savereplayUser); const out = list.map(s => ({ id: s.id, device: s.device || '未知设备', ip: s.ip || '', current: s.id === req.savereplaySessionId, created_at: s.created_at, last_active_at: s.last_active_at }));
+        res.json({ success: true, sessions: out }); } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+app.delete('/api/savereplay/sessions/:id', requireSaveReplayAuth, async (req, res) => {
+    try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); const deny = assert2faScope(acc, 'sessions', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        const id = req.params.id; const list = await dbGetSaveReplaySessions(req.savereplayUser); const target = list.find(s => s.id === id); if (!target) return res.status(404).json({ success: false, message: '会话不存在' });
+        await dbDeleteSaveReplaySession(id); res.json({ success: true, message: id === req.savereplaySessionId ? '已退出当前设备' : '已退出该设备' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.delete('/api/savereplay/sessions', requireSaveReplayAuth, async (req, res) => {
+    try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); const deny = assert2faScope(acc, 'sessions', read2faCode(req)); if (deny) return res.status(403).json({ success: false, message: deny });
+        await dbDeleteSaveReplaySessionsExcept(req.savereplayUser, req.savereplaySessionId); res.json({ success: true, message: '已退出其他所有设备' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// ===== 云备份管理（管理员）=====
+app.get('/api/admin/savereplay/accounts', requireAdminAuth, async (req, res) => {
+    try {
+        const accounts = await dbAllSaveReplayAccounts(); const q = ((req.query.q || '').toString().trim()).toLowerCase(); let list = accounts;
+        if (q) list = list.filter(a => (a.username || '').toLowerCase().includes(q) || (a.client_id || '').toLowerCase().includes(q));
+        const out = await Promise.all(list.map(async a => { let backupCount = 0; let lastIps = []; try { backupCount = Array.from(playerReplays.values()).filter(r => r.accountId === a.username).length + Array.from(playerSaves.values()).filter(s => s.accountId === a.username).length; } catch (e) {} try { const sessions = await dbGetSaveReplaySessions(a.username); const seen = new Set(); for (const s of sessions) { const ip = s.ip && typeof s.ip === 'string' ? s.ip.trim() : ''; if (ip && !seen.has(ip)) { seen.add(ip); lastIps.push(ip); } } } catch (e) {} return { username: a.username, created_at: a.created_at, updated_at: a.updated_at, client_id: a.client_id || null, disabled: !!a.disabled, bannedUntil: (a.banned_until != null && a.banned_until !== '') ? a.banned_until : null, twoFactor: !!a.two_factor_enabled, backupCount, lastIps }; }));
+        res.json({ success: true, accounts: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取账号列表失败' }); }
+});
+app.delete('/api/admin/savereplay/accounts/:username', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetSaveReplayAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        await dbDeleteSaveReplayAccount(username); appendAudit('admin', 'savereplay-account-delete', `删除云存档录像账号「${username}」及其全部备份/会话`, req); res.json({ success: true, message: '已删除账号及其备份/会话' }); } catch (e) { res.status(500).json({ success: false, message: '删除失败' }); }
+});
+app.put('/api/admin/savereplay/accounts/:username/ban', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetSaveReplayAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const disabled = !!(req.body && req.body.disabled); acc.disabled = disabled; acc.updated_at = new Date().toISOString();
+        if (disabled) { const bu = (req.body && req.body.bannedUntil); acc.banned_until = (bu && String(bu).trim() !== '') ? String(bu) : null; await dbDeleteSaveReplaySessionsByUser(username); }
+        else { acc.banned_until = null; }
+        await dbSaveSaveReplayAccount(acc); const actorName = (req.admin && req.admin.name) || 'admin';
+        if (disabled) { await dbSaveBanHistory({ id: 'bh_savereplay_' + username + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6), type: 'savereplay', target: username, username: username, clientId: acc.client_id || null, reason: acc.banned_until ? ('限时封禁至 ' + acc.banned_until) : '永久封禁', bannedAt: acc.updated_at, expiresAt: acc.banned_until || null, unbannedAt: null, unbannedBy: null, bannedBy: actorName }); }
+        else { await dbUpdateBanHistoryUnban('savereplay', username, actorName); }
+        appendAudit('admin', 'savereplay-account-ban', `云存档录像账号「${username}」${disabled ? (acc.banned_until ? '限时封禁至 ' + acc.banned_until : '永久封禁') : '解封'}，并已退登其全部设备`, req);
+        res.json({ success: true, disabled, bannedUntil: acc.banned_until || null, message: disabled ? (acc.banned_until ? ('已封禁该账号（至 ' + acc.banned_until + '），并已退登其全部设备') : '已永久封禁该账号，并已退登其全部设备') : '已解封该账号' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.put('/api/admin/savereplay/accounts/:username/password', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetSaveReplayAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const password = (req.body && req.body.password || '').toString(); if (password.length < 4) return res.status(400).json({ success: false, message: '密码至少 4 位' });
+        acc.password_hash = bcrypt.hashSync(password, 10); acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); appendAudit('admin', 'savereplay-account-password', `重置云存档录像账号「${username}」的密码`, req); res.json({ success: true, message: '密码已修改' }); } catch (e) { res.status(500).json({ success: false, message: '修改失败' }); }
+});
+app.put('/api/admin/savereplay/accounts/:username/2fa', requireAdminAuth, async (req, res) => {
+    try { const username = decodeURIComponent(req.params.username || ''); if (!username) return res.status(400).json({ success: false, message: '缺少用户名' }); const acc = await dbGetSaveReplayAccount(username); if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (req.body && req.body.enabled === true) return res.status(400).json({ success: false, message: '开启二次认证必须由用户本人操作' });
+        acc.two_factor_enabled = 0; acc.totp_secret = null; acc.totp_scopes = null; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc);
+        appendAudit('admin', 'savereplay-2fa-admin-disable', `管理员关闭云存档录像账号「${username}」的二次认证`, req); res.json({ success: true, enabled: false, message: '已关闭该账号的二次认证' }); } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
 // ===== 云储存管理（管理员专用）=====
 // 列出所有云储存账号
 app.get('/api/admin/cloud-storage/users', requireAdminAuth, async (req, res) => {
@@ -8146,6 +8788,99 @@ app.delete('/api/admin/cloud-codes/:code', requireAdminAuth, async (req, res) =>
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
+// =============== 存档扩容码（管理员签发 + 客户端兑换） ===============
+// 管理员生成存档扩容码
+app.post('/api/admin/save-codes', requireAdminAuth, async (req, res) => {
+    try {
+        const b = req.body || {};
+        let maxUses = parseInt(b.maxUses, 10);
+        if (!maxUses || maxUses < 1) maxUses = 1;
+        if (maxUses > 1000) maxUses = 1000;
+        let slots = parseInt(b.slots, 10);
+        if (!slots || slots < 1) slots = 20;
+        if (slots > 100) slots = 100; // 存档槽位硬上限（避免本地 localStorage 爆炸）
+        let allowedIps = '*';
+        if (b.allowedIps && String(b.allowedIps).trim() && String(b.allowedIps).trim() !== '*') {
+            allowedIps = String(b.allowedIps).split(',').map(s => s.trim()).filter(Boolean);
+            if (allowedIps.length === 0) allowedIps = '*';
+        }
+        const code = genSaveCode();
+        const now = new Date().toISOString();
+        const obj = {
+            code, max_uses: maxUses, used: 0, allowed_ips: allowedIps, slots,
+            created_at: now, created_by: (req.adminUser || 'admin'), note: (b.note || '').toString().slice(0, 255),
+            active: 1, severed: 0, redeemed_by: [], redeemed_ips: []
+        };
+        await dbUpsertSaveCode(obj);
+        appendAudit('admin', 'save-code-create', `生成存档扩容码 ${code}（槽位 ${slots}，可用 ${maxUses} 次）`, req);
+        res.json({ success: true, code, maxUses, slots, allowedIps, message: '生成成功' });
+    } catch (e) {
+        console.error('[存档扩容] 生成扩容码失败:', e);
+        res.status(500).json({ success: false, message: '生成失败' });
+    }
+});
+
+// 管理员列出所有存档扩容码
+app.get('/api/admin/save-codes', requireAdminAuth, async (req, res) => {
+    try {
+        const list = await dbAllSaveCodes();
+        const out = list.map(c => ({
+            code: c.code, maxUses: c.max_uses, used: c.used,
+            allowedIps: c.allowed_ips, slots: c.slots,
+            created_at: c.created_at, created_by: c.created_by, note: c.note,
+            active: c.active !== 0 && c.active !== false
+        }));
+        res.json({ success: true, codes: out });
+    } catch (e) { res.status(500).json({ success: false, message: '获取失败' }); }
+});
+
+// 管理员作废某个存档扩容码
+app.delete('/api/admin/save-codes/:code', requireAdminAuth, async (req, res) => {
+    try {
+        const code = (req.params.code || '').toUpperCase();
+        const c = await dbGetSaveCode(code);
+        if (!c) return res.status(404).json({ success: false, message: '扩容码不存在' });
+        await dbDeleteSaveCode(code);
+        appendAudit('admin', 'save-code-void', `作废存档扩容码 ${code}`, req);
+        res.json({ success: true, message: '已作废' });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 客户端（本地存档）兑换存档扩容码：校验码有效后返回应扩容到的槽位数
+// 无需登录（存档是本地数据），但校验：码存在 / 未作废 / 未超次数 / IP 允许
+app.post('/api/save-codes/redeem', async (req, res) => {
+    try {
+        const raw = (req.body && req.body.code || '').toString().toUpperCase().replace(/[\s-]/g, '');
+        if (!raw) return res.status(400).json({ success: false, message: '请输入扩容码' });
+        const c = await dbGetSaveCode(raw);
+        if (!c) return res.status(404).json({ success: false, message: '扩容码无效' });
+        if (c.active === 0 || c.active === false) return res.status(410).json({ success: false, message: '该扩容码已作废' });
+        if (c.used >= c.max_uses) return res.status(403).json({ success: false, message: '该扩容码已达到使用上限' });
+        const clientIp = getClientIp(req);
+        if (c.allowed_ips !== '*' && Array.isArray(c.allowed_ips)) {
+            const ok = c.allowed_ips.some(ip => {
+                const t = ip.trim();
+                if (!t) return false;
+                return clientIp === t || clientIp.startsWith(t.replace(/\.\*$/, '.')) || clientIp === t.replace(/\.\*$/, '');
+            });
+            if (!ok) return res.status(403).json({ success: false, message: `该扩容码不允许当前 IP（${clientIp}）使用` });
+        }
+        // IP 维度的重复兑换防护：同一 IP 已兑换过则拦截（存档是本地，无法跨设备追踪账号，用 IP 近似）
+        const redeemedIps = Array.isArray(c.redeemed_ips) ? c.redeemed_ips : [];
+        if (redeemedIps.includes(clientIp)) {
+            return res.status(403).json({ success: false, message: '本机已使用过该扩容码' });
+        }
+        c.used = (c.used || 0) + 1;
+        redeemedIps.push(clientIp);
+        c.redeemed_ips = redeemedIps;
+        await dbUpsertSaveCode(c);
+        res.json({ success: true, slots: c.slots, message: `存档位可扩容至 ${c.slots} 个` });
+    } catch (e) {
+        console.error('[存档扩容] 兑换失败:', e);
+        res.status(500).json({ success: false, message: '兑换失败' });
+    }
+});
+
 // 管理员查看某云账号占用空间（容量 / 地图数 / 占用字节 / 设备列表）
 app.get('/api/admin/cloud-storage/usage', requireAdminAuth, async (req, res) => {
     try {
@@ -8448,6 +9183,212 @@ app.post('/api/admin/player-mazes/:mazeId/promote', requireAdminAuth, async (req
     }
 });
 
+// 从请求头解析云账号归属：若携带有效的云储存 JWT，则返回 { accountId, username }，否则 null。
+// 用于让上报的回放/存档归属到账号（跨设备可见），同时兼容无登录时的 clientId 归属。
+function resolveCloudOwner(req) {
+    const h = (req.headers && req.headers.authorization) || '';
+    if (!h.startsWith('Bearer ')) return null;
+    try {
+        const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        if (decoded.type !== 'cloud' || !decoded.username) return null;
+        return { accountId: decoded.username, username: decoded.username };
+    } catch (e) { return null; }
+}
+
+// 云存档/云录像 归属解析：从 savereplay JWT 取用户名，accountId 加 'sr:' 前缀避免与云储存/云备份同名账号冲突
+function resolveSaveReplayOwner(req) {
+    const h = (req.headers && req.headers.authorization) || '';
+    if (!h.startsWith('Bearer ')) return { accountId: null, username: null };
+    try {
+        const decoded = jwt.verify(h.substring(7), JWT_SECRET);
+        if (decoded.type !== 'savereplay' || !decoded.username) return { accountId: null, username: null };
+        return { accountId: decoded.username, username: decoded.username };
+    } catch (e) { return { accountId: null, username: null }; }
+}
+
+// =============== 玩家回放上报（前端每录完一场自动 POST，clientId 归属，replayId 幂等）===============
+app.post('/api/replays', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const clientId = b.clientId || (req.headers['x-client-id'] || '').toString() || '';
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId，无法归属回放' });
+        const replayId = (b.replayId || '').toString().trim();
+        if (!replayId) return res.status(400).json({ success: false, message: '缺少 replayId' });
+        const data = b.data || null;
+        if (!data || !data.maze) return res.status(400).json({ success: false, message: '回放数据缺失' });
+        const owner = resolveSaveReplayOwner(req);
+        const rec = {
+            id: replayId,
+            clientId: clientId,
+            accountId: (owner && owner.accountId) || b.accountId || null,
+            username: (owner && owner.username) || b.username || null,
+            levelLabel: data.levelLabel || '关卡',
+            durationMs: data.durationMs || 0,
+            deathCount: data.deathCount || 0,
+            moveCount: data.moveCount || 0,
+            finishedAt: data.finishedAt || Date.now(),
+            data: data // 完整回放（含 maze/frames 等），admin 列表不返回，但保留以便下载/回放
+        };
+        playerReplays.set(replayId, rec);
+        savePlayerReplays();
+        console.log(`[回放] 玩家 ${clientId} 上报回放: ${rec.levelLabel} (${replayId})`);
+        res.json({ success: true, message: '回放已上报' });
+    } catch (e) {
+        console.error('[回放] 上报失败:', e);
+        res.status(500).json({ success: false, message: '上报失败' });
+    }
+});
+
+// =============== 玩家存档上报（前端每次保存自动 POST，clientId 归属，saveId 幂等）===============
+app.post('/api/saves', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const clientId = b.clientId || (req.headers['x-client-id'] || '').toString() || '';
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId，无法归属存档' });
+        const saveId = (b.saveId || '').toString().trim();
+        if (!saveId) return res.status(400).json({ success: false, message: '缺少 saveId' });
+        const data = b.data || null;
+        if (!data) return res.status(400).json({ success: false, message: '存档数据缺失' });
+        const owner = resolveSaveReplayOwner(req);
+        const rec = {
+            id: saveId,
+            clientId: clientId,
+            accountId: (owner && owner.accountId) || b.accountId || null,
+            username: (owner && owner.username) || b.username || null,
+            slot: b.slot || 'auto',     // 'auto' | 'manual'
+            slotIndex: (b.slot === 'manual' && b.slotIndex !== undefined && b.slotIndex !== null && b.slotIndex !== '')
+                ? (parseInt(b.slotIndex, 10) || 0) : null,
+            type: b.type || (b.slot || 'auto'),
+            level: data.level || 0,
+            createdAt: data.savedAt || data.createdAt || Date.now(),
+            data: data // 完整存档快照
+        };
+        playerSaves.set(saveId, rec);
+        savePlayerSaves();
+        console.log(`[存档] 玩家 ${clientId} 上报存档: ${rec.slot} 第${rec.level}关 (${saveId})`);
+        res.json({ success: true, message: '存档已上报' });
+    } catch (e) {
+        console.error('[存档] 上报失败:', e);
+        res.status(500).json({ success: false, message: '上报失败' });
+    }
+});
+
+// 管理员：查看某玩家的全部回放（仅返回元数据，不含完整 data）
+app.get('/api/admin/users/:userId/replays', requireAdminAuth, (req, res) => {
+    try {
+        const uid = req.params.userId;
+        const list = Array.from(playerReplays.values())
+            .filter(r => r.clientId === uid || r.accountId === uid)
+            .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0))
+            .map(r => ({
+                id: r.id, clientId: r.clientId, username: r.username,
+                levelLabel: r.levelLabel, durationMs: r.durationMs,
+                deathCount: r.deathCount, moveCount: r.moveCount, finishedAt: r.finishedAt
+            }));
+        res.json({ success: true, replays: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取回放失败' });
+    }
+});
+
+// 管理员：查看某玩家的全部存档（仅返回元数据）
+app.get('/api/admin/users/:userId/saves', requireAdminAuth, (req, res) => {
+    try {
+        const uid = req.params.userId;
+        const list = Array.from(playerSaves.values())
+            .filter(s => s.clientId === uid || s.accountId === uid)
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+            .map(s => ({
+                id: s.id, clientId: s.clientId, username: s.username,
+                slot: s.slot, slotIndex: s.slotIndex, type: s.type, level: s.level, createdAt: s.createdAt
+            }));
+        res.json({ success: true, saves: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取存档失败' });
+    }
+});
+
+// 管理员：删除某玩家的指定回放
+app.delete('/api/admin/users/:userId/replays/:rid', requireAdminAuth, (req, res) => {
+    try {
+        const rid = req.params.rid;
+        if (!playerReplays.has(rid)) return res.status(404).json({ success: false, message: '回放不存在' });
+        playerReplays.delete(rid);
+        savePlayerReplays();
+        appendAudit('admin', 'player-replay-delete', `删除玩家回放 ${rid}`);
+        res.json({ success: true, message: '回放删除成功' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 管理员：删除某玩家的指定存档
+app.delete('/api/admin/users/:userId/saves/:sid', requireAdminAuth, (req, res) => {
+    try {
+        const sid = req.params.sid;
+        if (!playerSaves.has(sid)) return res.status(404).json({ success: false, message: '存档不存在' });
+        playerSaves.delete(sid);
+        savePlayerSaves();
+        appendAudit('admin', 'player-save-delete', `删除玩家存档 ${sid}`);
+        res.json({ success: true, message: '存档删除成功' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// ===== 玩家本人：云回放 / 云存档（需云账号登录，跨设备同步）=====
+// 拉取自己的全部云回放（含完整数据，可直接跨设备回放）
+app.get('/api/replays/self', requireSaveReplayAuth, (req, res) => {
+    try {
+        const list = Array.from(playerReplays.values())
+            .filter(r => r.accountId === req.savereplayUser)
+            .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+        res.json({ success: true, replays: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取云回放失败' });
+    }
+});
+
+// 删除自己的云回放（仅删除云端副本，不影响本机）
+app.delete('/api/replays/:rid', requireSaveReplayAuth, (req, res) => {
+    try {
+        const rid = req.params.rid;
+        const rec = playerReplays.get(rid);
+        if (!rec || rec.accountId !== req.savereplayUser) return res.status(404).json({ success: false, message: '回放不存在' });
+        playerReplays.delete(rid);
+        savePlayerReplays();
+        res.json({ success: true, message: '云回放已删除' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 拉取自己的全部云存档（含完整数据）
+app.get('/api/saves/self', requireSaveReplayAuth, (req, res) => {
+    try {
+        const list = Array.from(playerSaves.values())
+            .filter(s => s.accountId === req.savereplayUser)
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        res.json({ success: true, saves: list });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '获取云存档失败' });
+    }
+});
+
+// 删除自己的云存档（仅删除云端副本，不影响本机）
+app.delete('/api/saves/:sid', requireSaveReplayAuth, (req, res) => {
+    try {
+        const sid = req.params.sid;
+        const rec = playerSaves.get(sid);
+        if (!rec || rec.accountId !== req.savereplayUser) return res.status(404).json({ success: false, message: '存档不存在' });
+        playerSaves.delete(sid);
+        savePlayerSaves();
+        res.json({ success: true, message: '云存档已删除' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
 // ===== 新增：用户页面访问控制 / 功能控制（管理员专用） =====
 app.post('/api/admin/access', requireAdminAuth, (req, res) => {
     try {
@@ -8541,6 +9482,90 @@ app.get('/api/daily-challenge-config', (req, res) => {
             ? { coins: parseInt(cfg.rewards.coins, 10) || 0, stars: parseInt(cfg.rewards.stars, 10) || 0 }
             : null
     });
+});
+
+// =============== 排行榜（每日挑战通关时间/步数榜 + 每周赛）===============
+// 每日榜 period = 当天日期；每周榜 period = 本周一日期。各自独立刷新。
+function weekStartString(d) {
+    const dt = new Date(d);
+    const day = dt.getDay(); // 0=周日..6=周六
+    const diff = (day === 0 ? -6 : 1 - day); // 周日归上周，周一=0
+    dt.setDate(dt.getDate() + diff);
+    const y = dt.getFullYear();
+    const m = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+}
+
+app.post('/api/leaderboard/submit', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const mode = (b.mode === 'weekly') ? 'weekly' : 'daily';
+        const clientId = String(b.clientId || '').slice(0, 64);
+        const name = (String(b.name || '').trim() || '匿名玩家').slice(0, 64);
+        let timeMs = parseInt(b.timeMs, 10);
+        let steps = parseInt(b.steps, 10);
+        if (!clientId) return res.status(400).json({ error: '缺少 clientId' });
+        if (!Number.isFinite(timeMs) || timeMs <= 0) timeMs = 0;
+        if (!Number.isFinite(steps) || steps < 0) steps = 0;
+        const period = (mode === 'weekly') ? weekStartString(new Date()) : serverTodayString();
+        const id = `${mode}_${period}_${clientId}_${Date.now()}`;
+        const createdAt = new Date().toISOString();
+        if (pool) {
+            await pool.query(
+                `INSERT INTO leaderboards (id, mode, period, client_id, name, time_ms, steps, created_at)
+                 VALUES (?,?,?,?,?,?,?,?)`,
+                [id, mode, period, clientId, name, timeMs, steps, createdAt]
+            );
+        } else {
+            const lbFile = path.join(DATA_DIR, 'leaderboards.json');
+            let arr = [];
+            try { arr = JSON.parse(fs.readFileSync(lbFile, 'utf8') || '[]'); } catch (e) {}
+            arr.push({ id, mode, period, client_id: clientId, name, time_ms: timeMs, steps, created_at: createdAt });
+            fs.writeFileSync(lbFile, JSON.stringify(arr));
+        }
+        res.json({ ok: true });
+    } catch (e) {
+        console.error('[Leaderboard] submit 失败:', e.message);
+        res.status(500).json({ error: '提交失败' });
+    }
+});
+
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        const mode = (req.query.mode === 'weekly') ? 'weekly' : 'daily';
+        const period = (mode === 'weekly') ? weekStartString(new Date()) : serverTodayString();
+        let rows = [];
+        if (pool) {
+            const [r] = await pool.query(
+                `SELECT client_id, name, time_ms, steps FROM leaderboards
+                 WHERE mode=? AND period=? ORDER BY time_ms ASC, steps ASC LIMIT 1000`,
+                [mode, period]
+            );
+            rows = r.map(x => ({ clientId: x.client_id, name: x.name, timeMs: x.time_ms, steps: x.steps }));
+        } else {
+            const lbFile = path.join(DATA_DIR, 'leaderboards.json');
+            try {
+                const arr = JSON.parse(fs.readFileSync(lbFile, 'utf8') || '[]');
+                rows = arr.filter(x => x.mode === mode && x.period === period)
+                    .map(x => ({ clientId: x.client_id, name: x.name, timeMs: x.time_ms, steps: x.steps }))
+                    .sort((a, b) => (a.timeMs - b.timeMs) || (a.steps - b.steps));
+            } catch (e) {}
+        }
+        // 同一玩家只保留最好成绩（rows 已按 time 升序排列，取首次出现即最优）
+        const seen = new Set();
+        const entries = [];
+        for (const row of rows) {
+            if (seen.has(row.clientId)) continue;
+            seen.add(row.clientId);
+            entries.push(row);
+            if (entries.length >= 100) break;
+        }
+        res.json({ mode, period, entries });
+    } catch (e) {
+        console.error('[Leaderboard] query 失败:', e.message);
+        res.status(500).json({ error: '查询失败' });
+    }
 });
 
 // 管理接口：保存每日挑战自定义配置（需管理员令牌）
@@ -9759,5 +10784,6 @@ server.listen(PORT, () => {
     await loadAccounts();
     await loadHomeProfiles();
     loadFriends();             // 好友请求 / 好友关系 / 私聊记录（JSON 文件持久化）
+    loadFriendFiles();          // 好友聊天文件传输（JSON 等小文件，独立存储）
     await loadMazes();         // DB 模式下从 popular_mazes 表载入热门迷宫到内存（与全局配置同模式）
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
