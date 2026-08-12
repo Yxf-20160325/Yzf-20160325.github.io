@@ -787,6 +787,64 @@ async function saveDailyChallengeConfig() {
     catch (e) { console.error('[DailyChallenge] 保存失败:', e.message); }
 }
 
+// ===== 每周皮肤主题（admin 分发限时活动皮肤，对所有玩家生效）=====
+const WEEKLY_SKIN_THEME_FILE = path.join(DATA_DIR, 'weekly-skin-theme.json');
+// 可选主题皮肤目录（与前端 skins.available 对应；供后台下拉选择）
+const WEEKLY_SKIN_CATALOG = [
+    { id: 'default', name: '默认角色', icon: '👤' },
+    { id: 'warrior', name: '勇士', icon: '⚔️' },
+    { id: 'mage', name: '法师', icon: '🧙' },
+    { id: 'ninja', name: '忍者', icon: '🥷' },
+    { id: 'robot', name: '机器人', icon: '🤖' },
+    { id: 'alien', name: '外星人', icon: '👽' },
+    { id: 'knight', name: '骑士', icon: '🛡️' },
+    { id: 'dragon', name: '龙', icon: '🐉' },
+    { id: 'skin-custom', name: '自定义颜色', icon: '🎨' },
+    { id: 'skin-fox', name: '狐狸', icon: '🦊' },
+    { id: 'skin-cat', name: '猫咪', icon: '🐱' },
+    { id: 'skin-panda', name: '熊猫', icon: '🐼' },
+    { id: 'skin-lion', name: '狮子', icon: '🦁' },
+    { id: 'skin-frog', name: '青蛙', icon: '🐸' },
+    { id: 'skin-tiger', name: '老虎', icon: '🐯' },
+    { id: 'skin-redfox', name: '红狐', icon: '🦊' },
+    { id: 'skin-bluecat', name: '蓝猫', icon: '🐱' },
+    { id: 'skin-greenfrog', name: '绿蛙', icon: '🐸' }
+];
+// 结构：{ skinId, title, description, startsAt(ISO), endsAt(ISO), createdAt, createdBy }
+let weeklySkinTheme = null;
+
+// 计算本周一 00:00(本地) ~ 下周一 00:00 的 ISO 区间
+function currentWeekRange() {
+    const now = new Date();
+    const dow = (now.getDay() + 6) % 7; // 周一=0
+    const monday = new Date(now); monday.setDate(now.getDate() - dow);
+    monday.setHours(0, 0, 0, 0);
+    const nextMonday = new Date(monday); nextMonday.setDate(monday.getDate() + 7);
+    return { startsAt: monday.toISOString(), endsAt: nextMonday.toISOString() };
+}
+
+async function loadWeeklySkinTheme() {
+    try {
+        if (fs.existsSync(WEEKLY_SKIN_THEME_FILE)) {
+            const s = JSON.parse(fs.readFileSync(WEEKLY_SKIN_THEME_FILE, 'utf8'));
+            if (s && typeof s === 'object') weeklySkinTheme = s;
+        }
+    } catch (e) { console.error('[WeeklySkin] 加载失败:', e.message); }
+}
+async function saveWeeklySkinTheme() {
+    ensureDataDir();
+    try { fs.writeFileSync(WEEKLY_SKIN_THEME_FILE, JSON.stringify(weeklySkinTheme || null, null, 2)); }
+    catch (e) { console.error('[WeeklySkin] 保存失败:', e.message); }
+}
+// 主题是否处于生效期
+function weeklySkinThemeActive(theme) {
+    if (!theme || !theme.skinId) return false;
+    const now = Date.now();
+    const s = theme.startsAt ? new Date(theme.startsAt).getTime() : 0;
+    const e = theme.endsAt ? new Date(theme.endsAt).getTime() : Infinity;
+    return now >= s && now < e;
+}
+
 // ===== 多账号系统（超级管理员可创建 admin / superadmin 账号，自定义名称+密码）=====
 const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
 // 账号结构：{ id, name, role:'admin'|'superadmin', passwordHash, createdBy, createdAt, lastIp, disabled }
@@ -1110,6 +1168,71 @@ async function readAudit(limit) {
         const arr = lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
         return limit ? arr.slice(-limit) : arr;
     } catch (e) { return []; }
+}
+
+// ===== 登录失败限流（防暴力破解）=====
+// 账号级：同一账号连续密码错误达上限即临时锁定；IP 级：同一网络在窗口内多次失败即临时限制，防分布式爆破。
+const LOGIN_FAIL_MAX = 5;                 // 同一账号连续密码错误上限
+const LOGIN_LOCK_MS = 15 * 60 * 1000;     // 账号锁定 15 分钟
+const LOGIN_IP_FAIL_MAX = 30;             // 同一 IP 在窗口内失败次数上限
+const LOGIN_IP_WINDOW_MS = 10 * 60 * 1000; // IP 失败计数窗口（10 分钟，过期清零）
+const LOGIN_IP_LOCK_MS = 10 * 60 * 1000;  // IP 临时限制 10 分钟
+const loginFailByKey = new Map();         // kind:username -> { count, lockedUntil }
+const loginFailByIp = new Map();          // ip -> { count, firstAt, lockedUntil }
+
+function _loginKey(kind, username) { return kind + ':' + (username || ''); }
+
+// 返回 { blocked:bool, retryAfter:ms(仅 blocked), message:string }
+function checkLoginRateLimit(kind, username, req) {
+    const now = Date.now();
+    const ip = getClientIp(req);
+    const a = loginFailByKey.get(_loginKey(kind, username));
+    if (a && a.lockedUntil && a.lockedUntil > now) {
+        const mins = Math.ceil((a.lockedUntil - now) / 60000);
+        return { blocked: true, retryAfter: a.lockedUntil - now, message: '该账号因多次登录失败已被临时锁定，请 ' + mins + ' 分钟后再试' };
+    }
+    if (ip) {
+        const r = loginFailByIp.get(ip);
+        if (r) {
+            if (r.lockedUntil && r.lockedUntil > now) {
+                const mins = Math.ceil((r.lockedUntil - now) / 60000);
+                return { blocked: true, retryAfter: r.lockedUntil - now, message: '当前网络因多次登录失败已被临时限制，请 ' + mins + ' 分钟后再试' };
+            }
+            if (r.firstAt && (now - r.firstAt) > LOGIN_IP_WINDOW_MS) loginFailByIp.delete(ip); // 窗口过期，计数清零
+        }
+    }
+    return { blocked: false };
+}
+
+// 记录一次登录失败（账号级 + IP 级各计一次，达上限即锁定）
+function recordLoginFailure(kind, username, req) {
+    const now = Date.now();
+    const ip = getClientIp(req);
+    const k = _loginKey(kind, username);
+    const a = loginFailByKey.get(k) || { count: 0, lockedUntil: 0 };
+    a.count += 1;
+    if (a.count >= LOGIN_FAIL_MAX) {
+        a.lockedUntil = now + LOGIN_LOCK_MS;
+        a.count = 0;
+        console.warn('[限流] 账号临时锁定', k, '至', new Date(a.lockedUntil).toISOString());
+    }
+    loginFailByKey.set(k, a);
+    if (ip) {
+        const r = loginFailByIp.get(ip) || { count: 0, firstAt: now, lockedUntil: 0 };
+        if (!r.firstAt) r.firstAt = now;
+        r.count += 1;
+        if (r.count >= LOGIN_IP_FAIL_MAX) {
+            r.lockedUntil = now + LOGIN_IP_LOCK_MS;
+            r.count = 0;
+            console.warn('[限流] IP 临时限制', ip, '至', new Date(r.lockedUntil).toISOString());
+        }
+        loginFailByIp.set(ip, r);
+    }
+}
+
+// 登录成功后清除账号级失败计数（IP 级不清零，避免用一次成功绕过 IP 限流）
+function clearLoginFailure(kind, username) {
+    loginFailByKey.delete(_loginKey(kind, username));
 }
 
 // 遥测数据：记录客户端上报的用户操作（需用户同意后才会上报）
@@ -2171,6 +2294,9 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(400).json({ success: false, message: '密码不能为空' });
         }
 
+        const rl = checkLoginRateLimit('admin', name || 'shared', req);
+        if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
+
         // 管理员账号被超级管理员禁用时拒绝登录
         if (adminDisabled) {
             console.log('管理员登录被拒：账号已被超级管理员禁用');
@@ -2180,11 +2306,13 @@ app.post('/api/admin/login', async (req, res) => {
         const acc = await findAccountByCredentials('admin', name, password);
         if (acc) {
             const token = generateAdminToken(acc.id, acc.name);
+            clearLoginFailure('admin', name || 'shared');
             appendAudit('admin', 'login', '管理员登录' + (name ? ('（账号 ' + name + '）') : '（共享密码）'), req);
             console.log('管理员登录成功', name || '(共享)');
             return res.json({ success: true, message: '登录成功', token, name: acc.name });
         } else {
             console.log('管理员密码验证失败');
+            recordLoginFailure('admin', name || 'shared', req);
             return res.status(401).json({ success: false, message: '密码或账号名称错误' });
         }
         
@@ -2199,17 +2327,30 @@ app.post('/api/superadmin/login', async (req, res) => {
     try {
         const { password, name } = req.body || {};
         if (!password) return res.status(400).json({ success: false, message: '密码不能为空' });
+        const rl = checkLoginRateLimit('superadmin', name || 'shared', req);
+        if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await findAccountByCredentials('superadmin', name, password);
         if (acc) {
             const token = generateSuperAdminToken(acc.id, acc.name);
+            clearLoginFailure('superadmin', name || 'shared');
             appendAudit('superadmin', 'login', '超级管理员登录' + (name ? ('（账号 ' + name + '）') : '（共享密码）'), req);
             return res.json({ success: true, token, name: acc.name });
         }
+        recordLoginFailure('superadmin', name || 'shared', req);
         return res.status(401).json({ success: false, message: '密码或账号名称错误' });
     } catch (e) {
         console.error('[SuperAdmin] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
     }
+});
+
+// 审计日志查看（管理员）：返回最近操作记录，便于追责
+app.get('/api/admin/audit', requireAdminAuth, async (req, res) => {
+    try {
+        const limit = Math.min(parseInt((req.query && req.query.limit) || '500', 10) || 500, 5000);
+        const rows = await readAudit(limit);
+        res.json({ success: true, logs: rows });
+    } catch (e) { console.error('[审计] 读取失败:', e); res.status(500).json({ success: false, message: '读取失败' }); }
 });
 
 // 修改 superadmin / admin 密码
@@ -6302,6 +6443,7 @@ app.post('/api/cloud-links/register', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeCloudLinkSession(username, device, ip);
         const token = jwt.sign({ username, type: 'clink', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('clink', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云链接] 注册失败:', e);
@@ -6315,8 +6457,11 @@ app.post('/api/cloud-links/login', async (req, res) => {
     try {
         const username = (req.body.username || '').toString().trim();
         const password = (req.body.password || '').toString();
+        const rl = checkLoginRateLimit('clink', username, req);
+        if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await dbGetLinkAccount(username);
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
+            recordLoginFailure('clink', username, req);
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
         if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
@@ -6336,6 +6481,7 @@ app.post('/api/cloud-links/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeCloudLinkSession(username, device, ip);
         const token = jwt.sign({ username, type: 'clink', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('clink', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云链接] 登录失败:', e);
@@ -6827,6 +6973,7 @@ app.put('/api/admin/cloud-links/accounts/:username/ban', requireAdminAuth, async
         acc.updated_at = new Date().toISOString();
         await dbSaveLinkAccount(acc);
         if (acc.disabled) await dbDeleteCloudLinkSessionsByUser(acc.username); // 封禁即退登全部设备
+        appendAudit('admin', 'cloud-link-account-ban', `云链接账号「${req.params.username}」${acc.disabled ? '封禁' : '解封'}，并已退登其全部设备`, req);
         res.json({ success: true, message: acc.disabled ? '已封禁' : '已解封' });
     } catch (e) {
         console.error('[云链接] 管理端封禁失败:', e);
@@ -6844,6 +6991,7 @@ app.put('/api/admin/cloud-links/accounts/:username/password', requireAdminAuth, 
         acc.password_hash = bcrypt.hashSync(password, 10);
         acc.updated_at = new Date().toISOString();
         await dbSaveLinkAccount(acc);
+        appendAudit('admin', 'cloud-link-account-password', `重置云链接账号「${req.params.username}」的密码`, req);
         res.json({ success: true, message: '密码已重置' });
     } catch (e) {
         console.error('[云链接] 管理端改密失败:', e);
@@ -6879,6 +7027,7 @@ app.delete('/api/admin/cloud-links/accounts/:username', requireAdminAuth, async 
         const acc = await dbGetLinkAccount(req.params.username);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         await dbDeleteLinkAccount(req.params.username);
+        appendAudit('admin', 'cloud-link-account-delete', `删除云链接账号「${req.params.username}」及其全部链接`, req);
         res.json({ success: true, message: '已删除账号及其全部链接' });
     } catch (e) {
         console.error('[云链接] 管理端删账号失败:', e);
@@ -6963,6 +7112,7 @@ app.post('/api/cloud-storage/register', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeCloudSession(username, device, ip);
         const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('cloud', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云储存] 注册失败:', e);
@@ -6976,8 +7126,11 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
         const username = (req.body.username || '').toString().trim();
         const password = (req.body.password || '').toString();
+        const rl = checkLoginRateLimit('cloud', username, req);
+        if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await dbGetCloudAccount(username);
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) {
+            recordLoginFailure('cloud', username, req);
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
         if (acc.disabled) {
@@ -7008,6 +7161,7 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeCloudSession(username, device, ip);
         const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('cloud', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) {
         console.error('[云储存] 登录失败:', e);
@@ -7814,6 +7968,7 @@ app.post('/api/cloud-backup/register', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeBackupSession(username, device, ip);
         const token = jwt.sign({ username, type: 'backup', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('backup', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) { console.error('[云备份] 注册失败:', e); res.status(500).json({ success: false, message: '注册失败' }); }
 });
@@ -7824,8 +7979,10 @@ app.post('/api/cloud-backup/login', async (req, res) => {
         if (!backupEnabled()) return res.status(403).json({ success: false, message: '云备份功能已关闭' });
         const username = (req.body.username || '').toString().trim();
         const password = (req.body.password || '').toString();
+        const rl = checkLoginRateLimit('backup', username, req);
+        if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await dbGetBackupAccount(username);
-        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) { recordLoginFailure('backup', username, req); return res.status(401).json({ success: false, message: '用户名或密码错误' }); }
         if (acc.disabled) {
             if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc); await dbUpdateBanHistoryUnban('backup', username, 'system'); }
             else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
@@ -7842,6 +7999,7 @@ app.post('/api/cloud-backup/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeBackupSession(username, device, ip);
         const token = jwt.sign({ username, type: 'backup', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('backup', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) { console.error('[云备份] 登录失败:', e); res.status(500).json({ success: false, message: '登录失败' }); }
 });
@@ -8224,6 +8382,7 @@ app.post('/api/savereplay/register', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeSaveReplaySession(username, device, ip);
         const token = jwt.sign({ username, type: 'savereplay', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('savereplay', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) { console.error('[云备份] 注册失败:', e); res.status(500).json({ success: false, message: '注册失败' }); }
 });
@@ -8234,8 +8393,10 @@ app.post('/api/savereplay/login', async (req, res) => {
         if (!savereplayEnabled()) return res.status(403).json({ success: false, message: '云存档/云录像功能已关闭' });
         const username = (req.body.username || '').toString().trim();
         const password = (req.body.password || '').toString();
+        const rl = checkLoginRateLimit('savereplay', username, req);
+        if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await dbGetSaveReplayAccount(username);
-        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) return res.status(401).json({ success: false, message: '用户名或密码错误' });
+        if (!acc || !bcrypt.compareSync(password, acc.password_hash)) { recordLoginFailure('savereplay', username, req); return res.status(401).json({ success: false, message: '用户名或密码错误' }); }
         if (acc.disabled) {
             if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); await dbUpdateBanHistoryUnban('savereplay', username, 'system'); }
             else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
@@ -8252,6 +8413,7 @@ app.post('/api/savereplay/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeSaveReplaySession(username, device, ip);
         const token = jwt.sign({ username, type: 'savereplay', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        clearLoginFailure('savereplay', username);
         res.json({ success: true, token, username, sid: sess.id });
     } catch (e) { console.error('[云备份] 登录失败:', e); res.status(500).json({ success: false, message: '登录失败' }); }
 });
@@ -9217,6 +9379,9 @@ app.post('/api/replays', async (req, res) => {
         const data = b.data || null;
         if (!data || !data.maze) return res.status(400).json({ success: false, message: '回放数据缺失' });
         const owner = resolveSaveReplayOwner(req);
+        const SAVEREPLAY_REPLAY_MAX = 300;
+        const _cur = Array.from(playerReplays.values()).filter(r => r.accountId === (owner && owner.accountId)).length;
+        if (_cur >= SAVEREPLAY_REPLAY_MAX) return res.status(403).json({ success: false, message: `云回放已达上限（${SAVEREPLAY_REPLAY_MAX} 条），请先到云空间清理旧回放后再上传` });
         const rec = {
             id: replayId,
             clientId: clientId,
@@ -9603,6 +9768,75 @@ app.put('/api/admin/daily-challenge', requireAdminAuth, async (req, res) => {
     } catch (error) {
         console.error('[API] 保存每日挑战配置失败:', error);
         res.status(500).json({ success: false, message: '保存失败' });
+    }
+});
+
+// ===== 每周皮肤主题：玩家端拉取（公开，供主菜单横幅展示）=====
+app.get('/api/weekly-skin-theme', (req, res) => {
+    try {
+        const active = weeklySkinThemeActive(weeklySkinTheme);
+        const theme = active ? weeklySkinTheme : null;
+        res.json({
+            success: true,
+            theme: theme ? {
+                skinId: theme.skinId,
+                title: theme.title || '',
+                description: theme.description || '',
+                startsAt: theme.startsAt,
+                endsAt: theme.endsAt
+            } : null,
+            catalog: WEEKLY_SKIN_CATALOG
+        });
+    } catch (e) {
+        res.json({ success: true, theme: null, catalog: WEEKLY_SKIN_CATALOG });
+    }
+});
+
+// admin 设置每周皮肤主题（对所有玩家分发限时活动皮肤）
+app.put('/api/admin/weekly-skin-theme', requireAdminAuth, async (req, res) => {
+    try {
+        const b = req.body || {};
+        const skinId = (b.skinId || '').toString().trim();
+        const cat = WEEKLY_SKIN_CATALOG.find(x => x.id === skinId);
+        if (!cat) return res.status(400).json({ success: false, message: '无效的皮肤：' + skinId });
+        let startsAt, endsAt;
+        if (b.startsAt && b.endsAt) {
+            startsAt = new Date(b.startsAt).toISOString();
+            endsAt = new Date(b.endsAt).toISOString();
+        } else {
+            const r = currentWeekRange(); startsAt = r.startsAt; endsAt = r.endsAt;
+        }
+        if (new Date(startsAt).getTime() >= new Date(endsAt).getTime()) {
+            return res.status(400).json({ success: false, message: '结束时间必须晚于开始时间' });
+        }
+        weeklySkinTheme = {
+            skinId,
+            title: (b.title || '').toString().trim() || (cat.name + ' 主题周'),
+            description: (b.description || '').toString().trim(),
+            startsAt, endsAt,
+            createdAt: new Date().toISOString(),
+            createdBy: (req.admin && (req.admin.name || req.admin.role)) || 'admin'
+        };
+        await saveWeeklySkinTheme();
+        appendAudit('admin', 'weekly-skin-theme', `设置每周皮肤主题: skinId=${skinId}, 周期 ${startsAt} ~ ${endsAt}`);
+        console.log('[Admin] 每周皮肤主题已保存:', weeklySkinTheme);
+        res.json({ success: true, message: '每周皮肤主题已保存', theme: weeklySkinTheme });
+    } catch (error) {
+        console.error('[API] 保存每周皮肤主题失败:', error);
+        res.status(500).json({ success: false, message: '保存失败' });
+    }
+});
+
+// admin 清除每周皮肤主题
+app.delete('/api/admin/weekly-skin-theme', requireAdminAuth, async (req, res) => {
+    try {
+        weeklySkinTheme = null;
+        await saveWeeklySkinTheme();
+        appendAudit('admin', 'weekly-skin-theme-clear', '清除每周皮肤主题');
+        res.json({ success: true, message: '已清除每周皮肤主题' });
+    } catch (error) {
+        console.error('[API] 清除每周皮肤主题失败:', error);
+        res.status(500).json({ success: false, message: '清除失败' });
     }
 });
 
@@ -10781,6 +11015,7 @@ server.listen(PORT, () => {
     await loadUserSettings();
     await loadGlobalFunctions();
     await loadDailyChallengeConfig();
+    await loadWeeklySkinTheme();
     await loadAccounts();
     await loadHomeProfiles();
     loadFriends();             // 好友请求 / 好友关系 / 私聊记录（JSON 文件持久化）
