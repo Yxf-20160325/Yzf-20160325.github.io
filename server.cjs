@@ -204,6 +204,11 @@ const DB_TABLES_SQL = [
         data JSON NOT NULL,
         updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS weekly_skin_theme (
+        id VARCHAR(32) PRIMARY KEY,
+        data JSON NOT NULL,
+        updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS cloud_storage_accounts (
         username VARCHAR(64) PRIMARY KEY,
         password_hash VARCHAR(255) NOT NULL,
@@ -823,15 +828,47 @@ function currentWeekRange() {
     return { startsAt: monday.toISOString(), endsAt: nextMonday.toISOString() };
 }
 
+// 加载每周皮肤主题：DB 优先（weekly_skin_theme 表，单例行 id='current'），失败回退 JSON 文件
 async function loadWeeklySkinTheme() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query("SELECT data FROM weekly_skin_theme WHERE id='current'");
+            if (rows && rows.length && rows[0].data) {
+                const parsed = (typeof rows[0].data === 'string') ? JSON.parse(rows[0].data) : rows[0].data;
+                if (parsed && typeof parsed === 'object') {
+                    weeklySkinTheme = parsed;
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('[WeeklySkin] DB 读取失败，回退 JSON:', e.message);
+        }
+    }
     try {
         if (fs.existsSync(WEEKLY_SKIN_THEME_FILE)) {
             const s = JSON.parse(fs.readFileSync(WEEKLY_SKIN_THEME_FILE, 'utf8'));
             if (s && typeof s === 'object') weeklySkinTheme = s;
         }
     } catch (e) { console.error('[WeeklySkin] 加载失败:', e.message); }
+    if (DB_AVAILABLE && pool) {
+        try { await saveWeeklySkinTheme(); } catch (_) {}
+    }
 }
+// 保存每周皮肤主题：DB 优先（UPSERT 单行），失败回退 JSON 文件
 async function saveWeeklySkinTheme() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const updatedAt = new Date().toISOString();
+            await pool.query(
+                "INSERT INTO weekly_skin_theme (id, data, updated_at) VALUES ('current', ?, ?) " +
+                "ON DUPLICATE KEY UPDATE data=VALUES(data), updated_at=VALUES(updated_at)",
+                [JSON.stringify(weeklySkinTheme || null), updatedAt]
+            );
+            return;
+        } catch (e) {
+            console.error('[WeeklySkin] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
     ensureDataDir();
     try { fs.writeFileSync(WEEKLY_SKIN_THEME_FILE, JSON.stringify(weeklySkinTheme || null, null, 2)); }
     catch (e) { console.error('[WeeklySkin] 保存失败:', e.message); }
@@ -11011,7 +11048,7 @@ server.listen(PORT, () => {
     loadServerErrorsFromFile();   // 恢复重启前记录的异常
     await initDatabase();
     loadAdminState();
-    await loadUserRoles(); 
+    await loadUserRoles();
     await loadUserSettings();
     await loadGlobalFunctions();
     await loadDailyChallengeConfig();
