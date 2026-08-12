@@ -11011,7 +11011,7 @@ server.listen(PORT, () => {
     loadServerErrorsFromFile();   // 恢复重启前记录的异常
     await initDatabase();
     loadAdminState();
-    await loadUserRoles();
+    await loadUserRoles(); 
     await loadUserSettings();
     await loadGlobalFunctions();
     await loadDailyChallengeConfig();
