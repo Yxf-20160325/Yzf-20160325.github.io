@@ -2681,6 +2681,32 @@ function saveFriendFiles() {
     try { fs.writeFileSync(FRIEND_FILES_FILE, JSON.stringify(Array.from(friendFiles.values()), null, 2)); }
     catch (e) { console.error('[Friends] 文件保存失败:', e.message); }
 }
+
+// ===== 好友赠送：礼物记录（JSON 文件持久化，与好友系统同策略，避免 filess.io 连接上限）=====
+// 礼物类型：skin（复制解锁，无需余额）/ coins / stars（服务端账本差额模型，领取时转账）
+// gift: { id, fromClientId, fromName, toClientId, toName, giftType, skinId, amount, message, status, createdAt, updatedAt }
+const GIFTS_FILE = path.join(DATA_DIR, 'gifts.json');
+let gifts = new Map();
+let _giftSeq = 1;
+function loadGifts() {
+    try {
+        if (fs.existsSync(GIFTS_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(GIFTS_FILE, 'utf8')) || [];
+            if (Array.isArray(arr)) arr.forEach(g => { if (g && g.id) gifts.set(g.id, g); });
+        }
+    } catch (e) { console.error('[Gifts] 加载失败:', e.message); }
+    // 修复序列号，避免跨重启 id 冲突
+    for (const g of gifts.keys()) {
+        const parts = String(g).split('_');
+        const n = parseInt(parts[parts.length - 1], 10);
+        if (!isNaN(n) && n >= _giftSeq) _giftSeq = n + 1;
+    }
+}
+function saveGifts() {
+    ensureDataDir();
+    try { fs.writeFileSync(GIFTS_FILE, JSON.stringify(Array.from(gifts.values()), null, 2)); }
+    catch (e) { console.error('[Gifts] 保存失败:', e.message); }
+}
 function areFriends(a, b) { return friendships.has(friendshipKey(a, b)); }
 // 找到 a、b 之间处于 pending 的请求（任意方向），返回该请求或 null
 function findPendingRequest(a, b) {
@@ -3005,6 +3031,125 @@ app.get('/api/friends/messages', (req, res) => {
         res.json({ success: true, messages: out });
     } catch (e) {
         res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// ===== 好友赠送 REST 接口（公开，无鉴权；与好友系统同属社交接口）=====
+
+// 发送礼物（须为好友）
+app.post('/api/friends/gift', (req, res) => {
+    try {
+        const { fromClientId, toClientId, fromName, toName, giftType, skinId, amount, message } = req.body || {};
+        if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
+        if (fromClientId === toClientId) return res.json({ success: false, message: '不能赠送给自己' });
+        if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们还不是好友' });
+        const allowed = ['skin', 'coins', 'stars'];
+        if (!allowed.includes(giftType)) return res.json({ success: false, message: '礼物类型无效' });
+        let amt = 0;
+        if (giftType === 'skin') {
+            if (!skinId || !String(skinId).trim()) return res.json({ success: false, message: '请选择要赠送的皮肤' });
+        } else {
+            amt = parseInt(amount, 10);
+            if (isNaN(amt) || amt <= 0) return res.json({ success: false, message: '数量必须大于 0' });
+            if (amt > 1000000) return res.json({ success: false, message: '单次赠送数量过大' });
+            const ledger = giftType === 'coins' ? userCoins : userStars;
+            if ((ledger.get(fromClientId) || 0) < amt) return res.json({ success: false, message: '你的服务器余额不足，无法赠送' });
+        }
+        const id = 'gift_' + Date.now().toString(36) + '_' + (_giftSeq++);
+        const now = new Date().toISOString();
+        const gift = {
+            id, fromClientId,
+            fromName: (fromName || '').toString().slice(0, 24),
+            toClientId, toName: (toName || '').toString().slice(0, 24),
+            giftType,
+            skinId: giftType === 'skin' ? String(skinId).trim().slice(0, 64) : null,
+            amount: giftType === 'skin' ? null : amt,
+            message: (message || '').toString().slice(0, 120),
+            status: 'pending', createdAt: now, updatedAt: now
+        };
+        gifts.set(id, gift);
+        saveGifts();
+        pushToNotificationSocket(toClientId, 'friend-gift-received', {
+            giftId: id, fromClientId, fromName: gift.fromName, toClientId,
+            giftType, skinId: gift.skinId, amount: gift.amount, message: gift.message, createdAt: now
+        });
+        console.log(`[Gifts] ${gift.fromName}(${fromClientId}) 赠送 ${giftType}${gift.skinId || gift.amount} 给 ${gift.toName}(${toClientId})`);
+        res.json({ success: true, giftId: id });
+    } catch (e) {
+        console.error('[Gifts] 发送礼物失败:', e);
+        res.status(500).json({ success: false, message: '赠送失败' });
+    }
+});
+
+// 查询收到的 / 发出的礼物
+app.get('/api/friends/gifts', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, received: [], sent: [] });
+        const received = [], sent = [];
+        for (const g of gifts.values()) {
+            if (g.toClientId === clientId) received.push(g);
+            else if (g.fromClientId === clientId) sent.push(g);
+        }
+        received.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        sent.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        res.json({ success: true, received: received.slice(0, 50), sent: sent.slice(0, 50) });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 接受 / 拒绝礼物
+app.post('/api/friends/gift/respond', (req, res) => {
+    try {
+        const { giftId, clientId, action } = req.body || {};
+        if (!giftId || !clientId) return res.json({ success: false, message: '缺少参数' });
+        const gift = gifts.get(giftId);
+        if (!gift) return res.json({ success: false, message: '礼物不存在' });
+        if (gift.toClientId !== clientId) return res.json({ success: false, message: '这不是给你的礼物' });
+        if (gift.status !== 'pending') return res.json({ success: false, message: '该礼物已处理' });
+        const now = new Date().toISOString();
+        if (action === 'decline') {
+            gift.status = 'declined';
+            gift.updatedAt = now;
+            saveGifts();
+            pushToNotificationSocket(gift.fromClientId, 'friend-gift-declined', { giftId, toClientId: clientId, toName: gift.toName });
+            return res.json({ success: true, status: 'declined' });
+        }
+        if (action === 'accept') {
+            if (gift.giftType === 'skin') {
+                gift.status = 'accepted';
+                gift.updatedAt = now;
+                saveGifts();
+                pushToNotificationSocket(gift.fromClientId, 'friend-gift-accepted', {
+                    giftId, toClientId: clientId, toName: gift.toName, giftType: 'skin', skinId: gift.skinId
+                });
+                return res.json({ success: true, status: 'accepted', gift });
+            }
+            // coins / stars：领取时转账（服务端账本差额模型，客户端按差额对账，不会污染本地钱包）
+            const ledger = gift.giftType === 'coins' ? userCoins : userStars;
+            const senderBal = ledger.get(gift.fromClientId) || 0;
+            if (senderBal < gift.amount) {
+                gift.status = 'failed';
+                gift.updatedAt = now;
+                saveGifts();
+                return res.json({ success: false, message: '赠送方余额已不足，无法领取' });
+            }
+            ledger.set(gift.fromClientId, senderBal - gift.amount);
+            const recipBal = ledger.get(gift.toClientId) || 0;
+            ledger.set(gift.toClientId, recipBal + gift.amount);
+            gift.status = 'accepted';
+            gift.updatedAt = now;
+            saveGifts();
+            pushToNotificationSocket(gift.fromClientId, 'friend-gift-accepted', {
+                giftId, toClientId: clientId, toName: gift.toName, giftType: gift.giftType, amount: gift.amount
+            });
+            return res.json({ success: true, status: 'accepted', gift });
+        }
+        return res.json({ success: false, message: '操作无效' });
+    } catch (e) {
+        console.error('[Gifts] 处理礼物失败:', e);
+        res.status(500).json({ success: false, message: '处理失败' });
     }
 });
 
@@ -11116,5 +11261,6 @@ server.listen(PORT, () => {
     await loadHomeProfiles();
     loadFriends();             // 好友请求 / 好友关系 / 私聊记录（JSON 文件持久化）
     loadFriendFiles();          // 好友聊天文件传输（JSON 等小文件，独立存储）
+    loadGifts();                // 好友赠送礼物记录（JSON 文件持久化）
     await loadMazes();         // DB 模式下从 popular_mazes 表载入热门迷宫到内存（与全局配置同模式）
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
