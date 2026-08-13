@@ -1,3 +1,4 @@
+
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
@@ -194,6 +195,7 @@ const DB_TABLES_SQL = [
         button_text VARCHAR(64) DEFAULT NULL,
         button_url VARCHAR(1024) DEFAULT NULL,
         button_action VARCHAR(32) DEFAULT NULL,
+        button_skin VARCHAR(32) DEFAULT NULL,
         INDEX idx_ann_active_created (active, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS global_functions (
@@ -472,7 +474,7 @@ async function initDatabase() {
             try {
                 const [dbRow] = await pool.query('SELECT DATABASE() AS db');
                 const dbName = (dbRow && dbRow[0] && dbRow[0].db) || '';
-                for (const col of ['button_text', 'button_url', 'button_action']) {
+                for (const col of ['button_text', 'button_url', 'button_action', 'button_skin']) {
                     const [c] = await pool.query(
                         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='announcements' AND COLUMN_NAME=?",
                         [dbName, col]
@@ -5285,7 +5287,7 @@ async function loadAnnouncementsFromStore() {
     if (DB_AVAILABLE && pool) {
         try {
             const [rows] = await pool.query(
-                'SELECT id, title, content, priority, active, created_by, created_at, button_text, button_url, button_action FROM announcements ORDER BY created_at DESC'
+                'SELECT id, title, content, priority, active, created_by, created_at, button_text, button_url, button_action, button_skin FROM announcements ORDER BY created_at DESC'
             );
             return rows.map(r => ({
                 id: r.id,
@@ -5297,7 +5299,8 @@ async function loadAnnouncementsFromStore() {
                 createdAt: r.created_at,
                 buttonText: r.button_text,
                 buttonUrl: r.button_url,
-                buttonAction: r.button_action
+                buttonAction: r.button_action,
+                buttonSkin: r.button_skin
             }));
         } catch (e) {
             console.error('[公告] DB 读取失败，回退 JSON:', e.message);
@@ -5319,7 +5322,7 @@ async function saveAnnouncementsToJsonStore(arr) {
 }
 
 // 创建公告（返回创建的记录）。DB 优先，失败回退 JSON 文件。
-async function createAnnouncement({ title, content, priority, createdBy, buttonText, buttonUrl, buttonAction }) {
+async function createAnnouncement({ title, content, priority, createdBy, buttonText, buttonUrl, buttonAction, buttonSkin }) {
     const createdAt = new Date().toISOString();
     const rec = {
         id: null,
@@ -5331,13 +5334,14 @@ async function createAnnouncement({ title, content, priority, createdBy, buttonT
         createdAt,
         buttonText: buttonText || null,
         buttonUrl: buttonUrl || null,
-        buttonAction: buttonAction || null
+        buttonAction: buttonAction || null,
+        buttonSkin: buttonSkin || null
     };
     if (DB_AVAILABLE && pool) {
         try {
             const [result] = await pool.query(
-                'INSERT INTO announcements (title, content, priority, active, created_by, created_at, button_text, button_url, button_action) VALUES (?,?,?,?,?,?,?,?,?)',
-                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt, rec.buttonText, rec.buttonUrl, rec.buttonAction]
+                'INSERT INTO announcements (title, content, priority, active, created_by, created_at, button_text, button_url, button_action, button_skin) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt, rec.buttonText, rec.buttonUrl, rec.buttonAction, rec.buttonSkin]
             );
             rec.id = result.insertId;
             return rec;
@@ -5379,8 +5383,8 @@ app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
             return res.status(400).json({ success: false, message: '公告内容不能为空' });
         }
         // 按钮动作白名单：仅允许已知游戏内界面入口，杜绝任意函数调用
-        const ALLOWED_ANN_BUTTON_ACTIONS = ['single','multiplayer','puzzle','daily','skin','workshop','achievements','statistics','replay','save','cloud','friends'];
-        let safeButtonText = null, safeButtonUrl = null, safeButtonAction = null;
+        const ALLOWED_ANN_BUTTON_ACTIONS = ['single','multiplayer','puzzle','daily','skin','workshop','achievements','statistics','replay','save','cloud','friends','skinActivity'];
+        let safeButtonText = null, safeButtonUrl = null, safeButtonAction = null, safeButtonSkin = null;
         const rawAction = (buttonAction && String(buttonAction).trim()) || '';
         if (rawAction) {
             if (ALLOWED_ANN_BUTTON_ACTIONS.indexOf(rawAction) === -1) {
@@ -5388,6 +5392,16 @@ app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
             }
             safeButtonAction = rawAction;
             safeButtonText = (buttonText && String(buttonText).trim()) ? String(buttonText).trim().slice(0, 32) : null;
+            // 皮肤活动：必须指定 admin 选定的皮肤（仅允许 WEEKLY_SKIN_CATALOG 内的合法皮肤 id）
+            if (rawAction === 'skinActivity') {
+                const rawSkin = (buttonSkin && String(buttonSkin).trim()) || '';
+                const cat = WEEKLY_SKIN_CATALOG.find(x => x.id === rawSkin);
+                if (!cat) {
+                    return res.status(400).json({ success: false, message: '皮肤活动必须指定一个有效的活动皮肤（在皮肤目录内）' });
+                }
+                safeButtonSkin = rawSkin;
+                if (!safeButtonText) safeButtonText = '🎁 免费领取「' + cat.name + '」';
+            }
         } else if (buttonUrl && String(buttonUrl).trim()) {
             // 按钮链接安全校验：仅允许 http(s) 外链，禁止 javascript:/data:/伪协议等。
             const raw = String(buttonUrl).trim();
@@ -5399,7 +5413,7 @@ app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
             }
         }
         const publisher = (req.admin && req.admin.name) || (req.admin && req.admin.role) || 'admin';
-        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher, buttonText: safeButtonText, buttonUrl: safeButtonUrl, buttonAction: safeButtonAction });
+        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher, buttonText: safeButtonText, buttonUrl: safeButtonUrl, buttonAction: safeButtonAction, buttonSkin: safeButtonSkin });
         appendAudit('admin', 'announcement-create', `发布公告: ${String(title).slice(0, 80)}`);
         // 实时推送给所有在线客户端（游戏端监听 'announcement-new' 全屏弹出）
         io.emit('announcement-new', rec);
