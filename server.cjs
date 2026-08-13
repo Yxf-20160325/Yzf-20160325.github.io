@@ -1,4 +1,3 @@
-
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
@@ -192,6 +191,9 @@ const DB_TABLES_SQL = [
         active TINYINT(1) DEFAULT 1,
         created_by VARCHAR(64),
         created_at VARCHAR(32),
+        button_text VARCHAR(64) DEFAULT NULL,
+        button_url VARCHAR(1024) DEFAULT NULL,
+        button_action VARCHAR(32) DEFAULT NULL,
         INDEX idx_ann_active_created (active, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS global_functions (
@@ -466,6 +468,22 @@ async function initDatabase() {
             await conn.ping();
             conn.release();
             await createTables();
+            // 迁移：为已存在的 announcements 表补充 button_text / button_url 列（旧库无按钮字段）。
+            try {
+                const [dbRow] = await pool.query('SELECT DATABASE() AS db');
+                const dbName = (dbRow && dbRow[0] && dbRow[0].db) || '';
+                for (const col of ['button_text', 'button_url', 'button_action']) {
+                    const [c] = await pool.query(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='announcements' AND COLUMN_NAME=?",
+                        [dbName, col]
+                    );
+                    if (!c || c.length === 0) {
+                        const type = col === 'button_text' ? 'VARCHAR(64) DEFAULT NULL' : (col === 'button_url' ? 'VARCHAR(1024) DEFAULT NULL' : 'VARCHAR(32) DEFAULT NULL');
+                        await pool.query('ALTER TABLE announcements ADD COLUMN ' + col + ' ' + type);
+                        console.log('🗄️ 已为 announcements 表补充 ' + col + ' 列（支持公告按钮）');
+                    }
+                }
+            } catch (e) { console.error('[公告] 补充按钮列失败:', e.message); }
             // 迁移：为已存在的 cloud_storage_accounts 表补充 max_mazes 列。
             // 旧库账号表在加入扩容码功能前已建好，CREATE TABLE IF NOT EXISTS 不会补列，
             // 会导致 dbSaveCloudAccount 写入 max_mazes 时报 "Unknown column" 被吞掉、
@@ -666,6 +684,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     showAntiCheatTab: true,
     gamepadEnabled: true,  // 是否允许玩家连接/使用游戏手柄（含虚拟手柄测试）
     showKeybindTab: true,  // 是否显示 UI设置弹窗的「⌨️ 键位」标签页
+    tutorialEnabled: true, // 是否允许新手指导（首次自动引导 + 调试页手动触发）
     newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
@@ -5266,7 +5285,7 @@ async function loadAnnouncementsFromStore() {
     if (DB_AVAILABLE && pool) {
         try {
             const [rows] = await pool.query(
-                'SELECT id, title, content, priority, active, created_by, created_at FROM announcements ORDER BY created_at DESC'
+                'SELECT id, title, content, priority, active, created_by, created_at, button_text, button_url, button_action FROM announcements ORDER BY created_at DESC'
             );
             return rows.map(r => ({
                 id: r.id,
@@ -5275,7 +5294,10 @@ async function loadAnnouncementsFromStore() {
                 priority: r.priority,
                 active: r.active,
                 createdBy: r.created_by,
-                createdAt: r.created_at
+                createdAt: r.created_at,
+                buttonText: r.button_text,
+                buttonUrl: r.button_url,
+                buttonAction: r.button_action
             }));
         } catch (e) {
             console.error('[公告] DB 读取失败，回退 JSON:', e.message);
@@ -5297,7 +5319,7 @@ async function saveAnnouncementsToJsonStore(arr) {
 }
 
 // 创建公告（返回创建的记录）。DB 优先，失败回退 JSON 文件。
-async function createAnnouncement({ title, content, priority, createdBy }) {
+async function createAnnouncement({ title, content, priority, createdBy, buttonText, buttonUrl, buttonAction }) {
     const createdAt = new Date().toISOString();
     const rec = {
         id: null,
@@ -5306,13 +5328,16 @@ async function createAnnouncement({ title, content, priority, createdBy }) {
         priority: parseInt(priority, 10) || 0,
         active: 1,
         createdBy: createdBy || 'admin',
-        createdAt
+        createdAt,
+        buttonText: buttonText || null,
+        buttonUrl: buttonUrl || null,
+        buttonAction: buttonAction || null
     };
     if (DB_AVAILABLE && pool) {
         try {
             const [result] = await pool.query(
-                'INSERT INTO announcements (title, content, priority, active, created_by, created_at) VALUES (?,?,?,?,?,?)',
-                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt]
+                'INSERT INTO announcements (title, content, priority, active, created_by, created_at, button_text, button_url, button_action) VALUES (?,?,?,?,?,?,?,?,?)',
+                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt, rec.buttonText, rec.buttonUrl, rec.buttonAction]
             );
             rec.id = result.insertId;
             return rec;
@@ -5346,15 +5371,35 @@ async function deleteAnnouncementById(id) {
 // 管理员：发布公告（持久化 + 实时广播给所有在线客户端）
 app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
     try {
-        const { title, content, priority } = req.body || {};
+        const { title, content, priority, buttonText, buttonUrl, buttonAction } = req.body || {};
         if (!title || !String(title).trim()) {
             return res.status(400).json({ success: false, message: '公告标题不能为空' });
         }
         if (!content || !String(content).trim()) {
             return res.status(400).json({ success: false, message: '公告内容不能为空' });
         }
+        // 按钮动作白名单：仅允许已知游戏内界面入口，杜绝任意函数调用
+        const ALLOWED_ANN_BUTTON_ACTIONS = ['single','multiplayer','puzzle','daily','skin','workshop','achievements','statistics','replay','save','cloud','friends'];
+        let safeButtonText = null, safeButtonUrl = null, safeButtonAction = null;
+        const rawAction = (buttonAction && String(buttonAction).trim()) || '';
+        if (rawAction) {
+            if (ALLOWED_ANN_BUTTON_ACTIONS.indexOf(rawAction) === -1) {
+                return res.status(400).json({ success: false, message: '无效的按钮动作标识' });
+            }
+            safeButtonAction = rawAction;
+            safeButtonText = (buttonText && String(buttonText).trim()) ? String(buttonText).trim().slice(0, 32) : null;
+        } else if (buttonUrl && String(buttonUrl).trim()) {
+            // 按钮链接安全校验：仅允许 http(s) 外链，禁止 javascript:/data:/伪协议等。
+            const raw = String(buttonUrl).trim();
+            if (/^https?:\/\//i.test(raw)) {
+                safeButtonUrl = raw;
+                safeButtonText = (buttonText && String(buttonText).trim()) ? String(buttonText).trim().slice(0, 32) : '查看详情';
+            } else {
+                return res.status(400).json({ success: false, message: '按钮链接必须是 http(s) 开头的安全网址' });
+            }
+        }
         const publisher = (req.admin && req.admin.name) || (req.admin && req.admin.role) || 'admin';
-        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher });
+        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher, buttonText: safeButtonText, buttonUrl: safeButtonUrl, buttonAction: safeButtonAction });
         appendAudit('admin', 'announcement-create', `发布公告: ${String(title).slice(0, 80)}`);
         // 实时推送给所有在线客户端（游戏端监听 'announcement-new' 全屏弹出）
         io.emit('announcement-new', rec);
