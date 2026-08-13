@@ -5375,7 +5375,7 @@ async function deleteAnnouncementById(id) {
 // 管理员：发布公告（持久化 + 实时广播给所有在线客户端）
 app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
     try {
-        const { title, content, priority, buttonText, buttonUrl, buttonAction } = req.body || {};
+        const { title, content, priority, buttonText, buttonUrl, buttonAction, buttonSkin } = req.body || {};
         if (!title || !String(title).trim()) {
             return res.status(400).json({ success: false, message: '公告标题不能为空' });
         }
