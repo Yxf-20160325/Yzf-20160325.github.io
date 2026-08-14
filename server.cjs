@@ -687,6 +687,8 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     gamepadEnabled: true,  // 是否允许玩家连接/使用游戏手柄（含虚拟手柄测试）
     showKeybindTab: true,  // 是否显示 UI设置弹窗的「⌨️ 键位」标签页
     tutorialEnabled: true, // 是否允许新手指导（首次自动引导 + 调试页手动触发）
+    dailyCheckinEnabled: true, // 每日签到是否对玩家显示（admin 可关闭）
+    monthCard: { enabled: false, coinPrice: 300, realPrice: 30, wechatQr: '' }, // 月卡配置：开放开关 / 金币价 / 真钱价 / 微信收款码(base64)
     newUi: { mode: 'probability', prob: 100 }
 };
 let globalFunctions = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
@@ -10029,6 +10031,19 @@ app.get('/api/admin/global-functions', (req, res) => {
 });
 
 // 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
+// ===== 月卡开通审核流：存储（玩家申请 → admin 审核 → 后端记录，玩家端轮询生效）=====
+const MONTHCARD_APPLICATIONS_FILE = path.join(DATA_DIR, 'monthcard-applications.json');
+const MONTHCARD_GRANTS_FILE = path.join(DATA_DIR, 'monthcard-grants.json');
+let monthCardApplications = new Map(); // id -> {id, clientId, playerName, method('coin'|'wechat'), price, createdAt, status('pending'|'approved'|'rejected'), resolvedAt, adminNote, adminName}
+let monthCardGrants = new Map();       // clientId -> {until, method, grantedAt, applicationId}
+function loadMonthCardData() {
+    try { const a = JSON.parse(fs.readFileSync(MONTHCARD_APPLICATIONS_FILE, 'utf8')); if (Array.isArray(a)) a.forEach(x => monthCardApplications.set(x.id, x)); } catch (e) {}
+    try { const g = JSON.parse(fs.readFileSync(MONTHCARD_GRANTS_FILE, 'utf8')); if (g && typeof g === 'object') Object.keys(g).forEach(k => monthCardGrants.set(k, g[k])); } catch (e) {}
+}
+function saveMonthCardApplications() { try { fs.writeFileSync(MONTHCARD_APPLICATIONS_FILE, JSON.stringify(Array.from(monthCardApplications.values()), null, 2)); } catch (e) {} }
+function saveMonthCardGrants() { try { fs.writeFileSync(MONTHCARD_GRANTS_FILE, JSON.stringify(Object.fromEntries(monthCardGrants), null, 2)); } catch (e) {} }
+loadMonthCardData();
+
 app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
     try {
         const body = req.body || {};
@@ -10047,6 +10062,16 @@ app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
                 next.newUi = { mode: m, prob: prob };
             }
         }
+        // 月卡配置（对象，非布尔）：开放开关 / 金币价 / 真钱价 / 微信收款码(base64)
+        if (body.monthCard && typeof body.monthCard === 'object') {
+            const mc = body.monthCard;
+            next.monthCard = {
+                enabled: mc.enabled === true,
+                coinPrice: Math.max(0, parseInt(mc.coinPrice, 10) || 0),
+                realPrice: Math.max(0, parseInt(mc.realPrice, 10) || 0),
+                wechatQr: (typeof mc.wechatQr === 'string') ? mc.wechatQr : ''
+            };
+        }
         globalFunctions = next;
         await saveGlobalFunctions();
         // 实时广播给所有已连接的游戏客户端
@@ -10059,6 +10084,81 @@ app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
         console.error('[API] 保存全局功能设定失败:', error);
         res.status(500).json({ success: false, message: '保存失败' });
     }
+});
+
+// ===== 月卡开通审核流端点 =====
+function monthCardIsOpen() { return !!(globalFunctions && globalFunctions.monthCard && globalFunctions.monthCard.enabled); }
+// 玩家提交月卡开通申请（公开，无需鉴权）。同一 clientId 已有 pending 申请则去重，已生效则跳过。
+app.post('/api/monthcard/apply', async (req, res) => {
+    try {
+        if (!monthCardIsOpen()) return res.status(403).json({ success: false, message: '月卡暂未开放' });
+        const b = req.body || {};
+        const clientId = (b.clientId || '').toString().slice(0, 128);
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少玩家标识' });
+        const method = b.method === 'coin' ? 'coin' : 'wechat';
+        const price = Math.max(0, parseInt(b.price, 10) || 0);
+        // 已批准且未过期：直接告知已生效
+        const g0 = monthCardGrants.get(clientId);
+        if (g0 && g0.until > Date.now()) return res.json({ success: true, id: null, alreadyActive: true, message: '月卡已生效' });
+        // 同 clientId 已有 pending 申请：去重
+        let existing = null;
+        for (const x of monthCardApplications.values()) { if (x.clientId === clientId && x.status === 'pending') { existing = x; break; } }
+        if (existing) return res.json({ success: true, id: existing.id, alreadyPending: true, message: '已有待审核申请' });
+        const id = 'mc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        const app = { id, clientId, playerName: (b.playerName || '玩家').toString().slice(0, 40), method, price, createdAt: Date.now(), status: 'pending' };
+        monthCardApplications.set(id, app); saveMonthCardApplications();
+        appendAudit('player', 'monthcard-apply', `玩家 ${app.playerName}(${clientId}) 申请${method === 'coin' ? '金币' : '微信'}月卡 价${price}`);
+        res.json({ success: true, id, message: '已提交，等待管理员审核' });
+    } catch (e) { res.status(500).json({ success: false, message: '提交失败' }); }
+});
+// admin 查看申请列表（可按 ?status=pending 过滤）
+app.get('/api/admin/monthcard-applications', requireAdminAuth, async (req, res) => {
+    try {
+        let list = Array.from(monthCardApplications.values());
+        const st = req.query.status;
+        if (st) list = list.filter(x => x.status === st);
+        list.sort((a, b) => b.createdAt - a.createdAt);
+        res.json({ success: true, applications: list });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+// admin 批准 / 拒绝
+app.post('/api/admin/monthcard-applications/:id/resolve', requireAdminAuth, async (req, res) => {
+    try {
+        const app = monthCardApplications.get(req.params.id);
+        if (!app) return res.status(404).json({ success: false, message: '申请不存在' });
+        if (app.status !== 'pending') return res.status(400).json({ success: false, message: '该申请已处理' });
+        const action = req.body && req.body.action;
+        if (action !== 'approve' && action !== 'reject') return res.status(400).json({ success: false, message: '无效操作' });
+        app.status = action === 'approve' ? 'approved' : 'rejected';
+        app.resolvedAt = Date.now();
+        app.adminNote = ((req.body && req.body.adminNote) || '').toString().slice(0, 200);
+        app.adminName = (req.admin && req.admin.name) || 'admin';
+        if (action === 'approve') {
+            monthCardGrants.set(app.clientId, { until: Date.now() + 30 * 86400000, method: app.method, grantedAt: Date.now(), applicationId: app.id });
+            saveMonthCardGrants();
+            appendAudit('admin', 'monthcard-approve', `批准 ${app.playerName}(${app.clientId}) 月卡`);
+        } else {
+            appendAudit('admin', 'monthcard-reject', `拒绝 ${app.playerName}(${app.clientId}) 月卡`);
+        }
+        saveMonthCardApplications();
+        res.json({ success: true, status: app.status });
+    } catch (e) { res.status(500).json({ success: false, message: '处理失败' }); }
+});
+// 玩家查询自己月卡状态（公开）。active=pending 之外的已批准且在期；pending=是否有待审核申请
+app.get('/api/monthcard/status', async (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId' });
+        const g = monthCardGrants.get(clientId);
+        const active = !!(g && g.until > Date.now());
+        let app = null;
+        for (const x of monthCardApplications.values()) { if (x.clientId === clientId) { if (!app || x.createdAt > app.createdAt) app = x; } }
+        res.json({
+            success: true, active, until: active ? g.until : 0, method: active ? g.method : null,
+            applicationStatus: app ? app.status : null, applicationId: app ? app.id : null,
+            pending: !!(app && app.status === 'pending')
+        });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
 });
 
 // ===== 每日挑战自定义配置（admin 可编辑并设持续天数，默认1天）=====
