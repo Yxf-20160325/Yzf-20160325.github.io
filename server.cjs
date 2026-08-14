@@ -40,7 +40,7 @@ let DB_AVAILABLE = false;
 // 默认数据库连接（已写入 server；部署到 onrender 等平台时，若设置了同名环境变量则覆盖此处默认值）。
 // 你已配好的 DB_HOST / DB_PORT 通过环境变量传入即可覆盖下面两个默认值。
 const DEFAULT_DB = {
-    host: process.env.DB_HOST || 'nu3uys.h.filess.io',
+    host: process.env.DB_HOST ,
     port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3307,
     user: process.env.DB_USER || 'maze_graysetsor',
     password: process.env.DB_PASSWORD || '4c613aeb828b9923c8b12b63b11373f2a31a3357',
@@ -1292,6 +1292,125 @@ function recordLoginFailure(kind, username, req) {
 function clearLoginFailure(kind, username) {
     loginFailByKey.delete(_loginKey(kind, username));
 }
+
+// ===== 账号安全增强：最后登录追踪 / 注销冷静期（软删除）/ 安全日志查询 =====
+const ACCOUNT_TABLE = { cloud: 'cloud_storage_accounts', clink: 'cloud_link_accounts', backup: 'cloud_backup_accounts', savereplay: 'savereplay_accounts' };
+const ACCOUNT_DELETE_MS = 24 * 60 * 60 * 1000; // 注销冷静期：1 天可撤销窗口
+
+// 更新账号表某些列（带自愈补列），仅 MySQL 模式生效
+async function dbTouchAccount(kind, username, fields) {
+    if (!DB_AVAILABLE || !pool) return;
+    const table = ACCOUNT_TABLE[kind]; if (!table) return;
+    const cols = Object.keys(fields || {});
+    if (!cols.length) return;
+    const sets = cols.map(c => c + '=?').join(', ');
+    const vals = cols.map(c => fields[c]); vals.push(username);
+    try { await pool.query('UPDATE ' + table + ' SET ' + sets + ' WHERE username=?', vals); }
+    catch (e) {
+        const mm = String(e.message || '').match(/Unknown column ['"]?([a-z_]+)['"]?/i);
+        if (mm && CLOUD_ACCOUNT_COLUMNS[mm[1]] && await _healAccountColumn(mm[1], table)) {
+            try { await pool.query('UPDATE ' + table + ' SET ' + sets + ' WHERE username=?', vals); } catch (e2) { console.error('[账号追踪] 自愈后仍失败', e2.message); }
+        } else console.error('[账号追踪] 更新失败', e.message);
+    }
+}
+
+// 按 actor（用户名）查询该账号自身的安全日志
+async function queryAuditForActor(actor, limit) {
+    limit = limit || 50;
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [rows] = await pool.query('SELECT ts, actor, action, detail, ip FROM audit_logs WHERE actor=? ORDER BY id DESC LIMIT ?', [actor, limit]);
+            return rows.map(r => ({ ts: r.ts, actor: r.actor, action: r.action, detail: r.detail, ip: r.ip })).reverse();
+        } catch (e) { console.error('[安全日志] DB 读取失败', e.message); }
+    }
+    try {
+        if (!fs.existsSync(AUDIT_FILE)) return [];
+        const lines = fs.readFileSync(AUDIT_FILE, 'utf8').trim().split('\n').filter(Boolean);
+        const arr = lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean).filter(e => e.actor === actor);
+        return limit ? arr.slice(-limit) : arr;
+    } catch (e) { return []; }
+}
+
+// 取账号记录（按 kind）
+async function getAccountByKind(kind, username) {
+    if (kind === 'cloud') return dbGetCloudAccount(username);
+    if (kind === 'clink') return dbGetLinkAccount(username);
+    if (kind === 'backup') return dbGetBackupAccount(username);
+    if (kind === 'savereplay') return dbGetSaveReplayAccount(username);
+    return null;
+}
+// 硬删除账号（冷静期过期后由定时器调用，级联删除全部数据）
+async function deleteAccountHard(kind, username) {
+    if (kind === 'cloud') return dbDeleteCloudAccount(username);
+    if (kind === 'clink') return dbDeleteLinkAccount(username);
+    if (kind === 'backup') return dbDeleteBackupAccount(username);
+    if (kind === 'savereplay') return dbDeleteSaveReplayAccount(username);
+}
+// 退登某账号全部设备
+async function logoutAccountAllDevices(kind, username) {
+    const f = { cloud: dbDeleteCloudSessionsByUser, clink: dbDeleteCloudLinkSessionsByUser, backup: dbDeleteBackupSessionsByUser, savereplay: dbDeleteSaveReplaySessionsByUser }[kind];
+    if (typeof f === 'function') { try { await f(username); } catch (e) {} }
+}
+
+// 软删除（注销冷静期）：标记 deleted_at，保留数据以便恢复，并退登全部设备
+async function applySoftDelete(kind, username, req) {
+    const deletedAt = new Date(Date.now() + ACCOUNT_DELETE_MS).toISOString();
+    await dbTouchAccount(kind, username, { deleted_at: deletedAt });
+    await logoutAccountAllDevices(kind, username);
+}
+// 恢复账号（冷静期内撤销注销）：需密码 + 2FA(if scope)
+async function restoreAccountByPassword(kind, username, password, code) {
+    const acc = await getAccountByKind(kind, username);
+    if (!acc) return { ok: false, status: 404, message: '账号不存在' };
+    if (!acc.deleted_at) return { ok: false, status: 400, message: '该账号未处于注销待删除状态' };
+    if (!password) return { ok: false, status: 400, message: '请输入密码以确认恢复' };
+    if (!bcrypt.compareSync(password, acc.password_hash)) return { ok: false, status: 400, message: '密码错误' };
+    const deny = assert2faScope(acc, 'account', code);
+    if (deny) return { ok: false, status: 403, message: deny };
+    await dbTouchAccount(kind, username, { deleted_at: null });
+    return { ok: true };
+}
+// 登录时若账号处于注销冷静期且未过期 → 返回待删除提示（阻止登录，引导恢复）
+function pendingDeleteNotice(acc) {
+    if (!acc || !acc.deleted_at) return null;
+    const t = new Date(acc.deleted_at).getTime();
+    if (isNaN(t)) return null;
+    if (t <= Date.now()) return null; // 已过期（定时器会清理），放行
+    const hrs = Math.max(1, Math.ceil((t - Date.now()) / 3600000));
+    return { pendingDelete: true, deleteExpiresAt: acc.deleted_at, message: '该账号已申请注销，将在约 ' + hrs + ' 小时后永久删除。如需保留，请使用「恢复账号」功能。' };
+}
+// 登录收尾：记录最后登录 IP/设备，并检测是否新网络/新设备（异常登录提醒）
+async function finalizeLoginTrack(kind, acc, ip, device, req) {
+    const prevIp = acc.last_login_ip || '';
+    const prevDev = acc.last_login_device || '';
+    let notice = '';
+    if (prevIp && prevIp !== ip) {
+        notice = '检测到新网络登录：本次来自 ' + ip + '，上次来自 ' + prevIp;
+        appendAudit(acc.username, kind + '-login-new-ip', `账号「${acc.username}」新网络登录（本次 ${ip}，上次 ${prevIp}）`, req);
+    } else if (prevDev && prevDev !== device) {
+        notice = '检测到新设备登录：本次「' + device + '」，上次「' + prevDev + '」';
+        appendAudit(acc.username, kind + '-login-new-device', `账号「${acc.username}」新设备登录（本次 ${device}）`, req);
+    }
+    await dbTouchAccount(kind, acc.username, { last_login_ip: ip, last_login_at: new Date().toISOString(), last_login_device: device });
+    return notice;
+}
+// 惰性清理：删除已超过冷静期的账号（含其全部数据）
+async function cleanupPendingDeletes() {
+    if (!DB_AVAILABLE || !pool) return;
+    const nowIso = new Date().toISOString();
+    for (const kind of Object.keys(ACCOUNT_TABLE)) {
+        const table = ACCOUNT_TABLE[kind];
+        try {
+            const [rows] = await pool.query('SELECT username FROM ' + table + ' WHERE deleted_at IS NOT NULL AND deleted_at < ?', [nowIso]);
+            for (const r of rows) {
+                try { await deleteAccountHard(kind, r.username); appendAudit(r.username || kind, kind + '-account-purged', `注销冷静期已过，永久删除账号「${r.username}」`, null); }
+                catch (e) { console.error('[清理] 删除过期账号失败', r.username, e.message); }
+            }
+        } catch (e) { /* 列可能尚未存在，忽略 */ }
+    }
+}
+setInterval(cleanupPendingDeletes, 60 * 60 * 1000); // 每小时清理一次过期注销账号
+
 
 // 遥测数据：记录客户端上报的用户操作（需用户同意后才会上报）
 // 返回 true/false，便于接口在写入失败时如实返回，而不是假成功
@@ -5841,7 +5960,11 @@ const CLOUD_ACCOUNT_COLUMNS = {
     two_factor_enabled: 'TINYINT(1) NOT NULL DEFAULT 0',
     creator_client_id: 'VARCHAR(64)',
     totp_secret: 'VARCHAR(64)',
-    totp_scopes: 'VARCHAR(255)'
+    totp_scopes: 'VARCHAR(255)',
+    last_login_ip: 'VARCHAR(64)',
+    last_login_at: 'VARCHAR(32)',
+    last_login_device: 'VARCHAR(255)',
+    deleted_at: 'VARCHAR(32)'
 };
 const _healedAccountCols = {};
 // 自愈补列：默认补 cloud_storage_accounts；传入 tableName 可补 cloud_link_accounts（两表结构同款）
@@ -6705,6 +6828,7 @@ app.post('/api/cloud-links/login', async (req, res) => {
             recordLoginFailure('clink', username, req);
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
+        { const pd = pendingDeleteNotice(acc); if (pd) return res.status(423).json(Object.assign({ success: false, code: 'PENDING_DELETE' }, pd)); }
         if (acc.disabled) return res.status(403).json({ success: false, disabled: true, message: '该云链接账号已被管理员封禁' });
         // 二次认证：已开启 2FA 的账号必须在登录时提供正确动态码（管理员关闭该模块 2FA 时跳过，避免锁死）
         if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
@@ -6722,8 +6846,9 @@ app.post('/api/cloud-links/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeCloudLinkSession(username, device, ip);
         const token = jwt.sign({ username, type: 'clink', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        const _loginNotice = await finalizeLoginTrack('clink', acc, ip, device, req);
         clearLoginFailure('clink', username);
-        res.json({ success: true, token, username, sid: sess.id });
+        res.json({ success: true, token, username, sid: sess.id, loginNotice: _loginNotice });
     } catch (e) {
         console.error('[云链接] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
@@ -6757,19 +6882,23 @@ app.put('/api/cloud-links/password', requireLinkAuth, async (req, res) => {
 // 自助注销账号：需验证密码（级联删除全部云链接、会话与登录态）
 app.delete('/api/cloud-links/account', requireLinkAuth, async (req, res) => {
     if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
+    const rl = checkLoginRateLimit('del:clink', req.linkUser, req);
+    if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
     try {
         const password = ((req.body && req.body.password) || '').toString();
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
         const acc = await dbGetLinkAccount(req.linkUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         const denyDel = assert2faScope(acc, 'account', read2faCode(req));
-        if (denyDel) return res.status(403).json({ success: false, message: denyDel });
+        if (denyDel) { recordLoginFailure('del:clink', req.linkUser, req); return res.status(403).json({ success: false, message: denyDel }); }
         if (!bcrypt.compareSync(password, acc.password_hash)) {
+            recordLoginFailure('del:clink', req.linkUser, req);
             return res.status(400).json({ success: false, message: '密码错误' });
         }
-        await dbDeleteLinkAccount(req.linkUser);
-        appendAudit(req.linkUser || 'clink', 'cloud-link-account-delete', `云链接账号「${req.linkUser}」自行注销`, req);
-        res.json({ success: true, message: '账号已注销' });
+        await applySoftDelete('clink', req.linkUser, req);
+        clearLoginFailure('del:clink', req.linkUser);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-account-delete', `云链接账号「${req.linkUser}」申请注销（冷静期 1 天）`, req);
+        res.json({ success: true, pendingDelete: true, message: '已申请注销，账号将在 1 天后永久删除；期间可随时恢复。' });
     } catch (e) { res.status(500).json({ success: false, message: '注销失败' }); }
 });
 
@@ -7374,6 +7503,7 @@ app.post('/api/cloud-storage/login', async (req, res) => {
             recordLoginFailure('cloud', username, req);
             return res.status(401).json({ success: false, message: '用户名或密码错误' });
         }
+        { const pd = pendingDeleteNotice(acc); if (pd) return res.status(423).json(Object.assign({ success: false, code: 'PENDING_DELETE' }, pd)); }
         if (acc.disabled) {
             if (cloudAccountBanExpired(acc)) {
                 // 限时封禁已过期 → 自动解封并允许登录
@@ -7402,8 +7532,9 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeCloudSession(username, device, ip);
         const token = jwt.sign({ username, type: 'cloud', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        const _loginNotice = await finalizeLoginTrack('cloud', acc, ip, device, req);
         clearLoginFailure('cloud', username);
-        res.json({ success: true, token, username, sid: sess.id });
+        res.json({ success: true, token, username, sid: sess.id, loginNotice: _loginNotice });
     } catch (e) {
         console.error('[云储存] 登录失败:', e);
         res.status(500).json({ success: false, message: '登录失败' });
@@ -7437,19 +7568,23 @@ app.put('/api/cloud-storage/password', requireCloudAuth, async (req, res) => {
 // 自助注销账号：需验证密码（级联删除全部云端地图、会话与登录态）
 app.delete('/api/cloud-storage/account', requireCloudAuth, async (req, res) => {
     if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    const rl = checkLoginRateLimit('del:cloud', req.cloudUser, req);
+    if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
     try {
         const password = ((req.body && req.body.password) || '').toString();
         if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
         const acc = await dbGetCloudAccount(req.cloudUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         const denyDel = assert2faScope(acc, 'account', read2faCode(req));
-        if (denyDel) return res.status(403).json({ success: false, message: denyDel });
+        if (denyDel) { recordLoginFailure('del:cloud', req.cloudUser, req); return res.status(403).json({ success: false, message: denyDel }); }
         if (!bcrypt.compareSync(password, acc.password_hash)) {
+            recordLoginFailure('del:cloud', req.cloudUser, req);
             return res.status(400).json({ success: false, message: '密码错误' });
         }
-        await dbDeleteCloudAccount(req.cloudUser);
-        appendAudit(req.cloudUser || 'cloud', 'cloud-account-delete', `云储存账号「${req.cloudUser}」自行注销`, req);
-        res.json({ success: true, message: '账号已注销' });
+        await applySoftDelete('cloud', req.cloudUser, req);
+        clearLoginFailure('del:cloud', req.cloudUser);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-account-delete', `云储存账号「${req.cloudUser}」申请注销（冷静期 1 天）`, req);
+        res.json({ success: true, pendingDelete: true, message: '已申请注销，账号将在 1 天后永久删除；期间可随时恢复。' });
     } catch (e) { res.status(500).json({ success: false, message: '注销失败' }); }
 });
 
@@ -8224,6 +8359,7 @@ app.post('/api/cloud-backup/login', async (req, res) => {
         if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await dbGetBackupAccount(username);
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) { recordLoginFailure('backup', username, req); return res.status(401).json({ success: false, message: '用户名或密码错误' }); }
+        { const pd = pendingDeleteNotice(acc); if (pd) return res.status(423).json(Object.assign({ success: false, code: 'PENDING_DELETE' }, pd)); }
         if (acc.disabled) {
             if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveBackupAccount(acc); await dbUpdateBanHistoryUnban('backup', username, 'system'); }
             else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
@@ -8240,8 +8376,9 @@ app.post('/api/cloud-backup/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeBackupSession(username, device, ip);
         const token = jwt.sign({ username, type: 'backup', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        const _loginNotice = await finalizeLoginTrack('backup', acc, ip, device, req);
         clearLoginFailure('backup', username);
-        res.json({ success: true, token, username, sid: sess.id });
+        res.json({ success: true, token, username, sid: sess.id, loginNotice: _loginNotice });
     } catch (e) { console.error('[云备份] 登录失败:', e); res.status(500).json({ success: false, message: '登录失败' }); }
 });
 
@@ -8266,14 +8403,23 @@ app.put('/api/cloud-backup/password', requireBackupAuth, async (req, res) => {
 
 // 注销账号
 app.delete('/api/cloud-backup/account', requireBackupAuth, async (req, res) => {
+    const rl = checkLoginRateLimit('del:backup', req.backupUser, req);
+    if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
     try {
+        const password = ((req.body && req.body.password) || '').toString();
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
         const acc = await dbGetBackupAccount(req.backupUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         const deny = assert2faScope(acc, 'account', read2faCode(req));
-        if (deny) return res.status(403).json({ success: false, message: deny });
-        await dbDeleteBackupAccount(req.backupUser);
-        appendAudit(req.backupUser || 'backup', 'cloud-backup-account-delete', `注销云备份账号「${req.backupUser}」`, req);
-        res.json({ success: true, message: '账号已注销' });
+        if (deny) { recordLoginFailure('del:backup', req.backupUser, req); return res.status(403).json({ success: false, message: deny }); }
+        if (!bcrypt.compareSync(password, acc.password_hash)) {
+            recordLoginFailure('del:backup', req.backupUser, req);
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        await applySoftDelete('backup', req.backupUser, req);
+        clearLoginFailure('del:backup', req.backupUser);
+        appendAudit(req.backupUser || 'backup', 'cloud-backup-account-delete', `注销云备份账号「${req.backupUser}」（冷静期 1 天）`, req);
+        res.json({ success: true, pendingDelete: true, message: '已申请注销，账号将在 1 天后永久删除；期间可随时恢复。' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
 
@@ -8638,6 +8784,7 @@ app.post('/api/savereplay/login', async (req, res) => {
         if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
         const acc = await dbGetSaveReplayAccount(username);
         if (!acc || !bcrypt.compareSync(password, acc.password_hash)) { recordLoginFailure('savereplay', username, req); return res.status(401).json({ success: false, message: '用户名或密码错误' }); }
+        { const pd = pendingDeleteNotice(acc); if (pd) return res.status(423).json(Object.assign({ success: false, code: 'PENDING_DELETE' }, pd)); }
         if (acc.disabled) {
             if (cloudAccountBanExpired(acc)) { acc.disabled = 0; acc.banned_until = null; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); await dbUpdateBanHistoryUnban('savereplay', username, 'system'); }
             else { return res.status(403).json({ success: false, disabled: true, code: 'ACCOUNT_DISABLED', message: cloudAccountBanMessage(acc), bannedUntil: acc.banned_until || null, banMessage: cloudAccountBanMessage(acc), bannedDays: cloudAccountBanDays(acc) }); }
@@ -8654,8 +8801,9 @@ app.post('/api/savereplay/login', async (req, res) => {
         const ip = getClientIp(req);
         const sess = makeSaveReplaySession(username, device, ip);
         const token = jwt.sign({ username, type: 'savereplay', sid: sess.id }, JWT_SECRET, { expiresIn: '30d' });
+        const _loginNotice = await finalizeLoginTrack('savereplay', acc, ip, device, req);
         clearLoginFailure('savereplay', username);
-        res.json({ success: true, token, username, sid: sess.id });
+        res.json({ success: true, token, username, sid: sess.id, loginNotice: _loginNotice });
     } catch (e) { console.error('[云备份] 登录失败:', e); res.status(500).json({ success: false, message: '登录失败' }); }
 });
 
@@ -8680,15 +8828,65 @@ app.put('/api/savereplay/password', requireSaveReplayAuth, async (req, res) => {
 
 // 注销账号
 app.delete('/api/savereplay/account', requireSaveReplayAuth, async (req, res) => {
+    const rl = checkLoginRateLimit('del:savereplay', req.savereplayUser, req);
+    if (rl.blocked) return res.status(429).json({ success: false, code: 'LOGIN_LOCKED', message: rl.message, retryAfter: Math.ceil(rl.retryAfter / 1000) });
     try {
+        const password = ((req.body && req.body.password) || '').toString();
+        if (!password) return res.status(400).json({ success: false, message: '请输入密码以确认注销' });
         const acc = await dbGetSaveReplayAccount(req.savereplayUser);
         if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
         const deny = assert2faScope(acc, 'account', read2faCode(req));
-        if (deny) return res.status(403).json({ success: false, message: deny });
-        await dbDeleteSaveReplayAccount(req.savereplayUser);
-        appendAudit(req.savereplayUser || 'savereplay', 'savereplay-account-delete', `注销云存档录像账号「${req.savereplayUser}」`, req);
-        res.json({ success: true, message: '账号已注销' });
+        if (deny) { recordLoginFailure('del:savereplay', req.savereplayUser, req); return res.status(403).json({ success: false, message: deny }); }
+        if (!bcrypt.compareSync(password, acc.password_hash)) {
+            recordLoginFailure('del:savereplay', req.savereplayUser, req);
+            return res.status(400).json({ success: false, message: '密码错误' });
+        }
+        await applySoftDelete('savereplay', req.savereplayUser, req);
+        clearLoginFailure('del:savereplay', req.savereplayUser);
+        appendAudit(req.savereplayUser || 'savereplay', 'savereplay-account-delete', `注销云存档录像账号「${req.savereplayUser}」（冷静期 1 天）`, req);
+        res.json({ success: true, pendingDelete: true, message: '已申请注销，账号将在 1 天后永久删除；期间可随时恢复。' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// ===== 安全日志（按账号查询自身敏感操作）+ 注销冷静期恢复 =====
+function _auditAndRestoreRoutes(kind, userVar, authMiddleware, basePath) {
+    app.get(basePath + '/audit', authMiddleware, async (req, res) => {
+        try { const logs = await queryAuditForActor(req[userVar]); res.json({ success: true, logs: logs || [] }); }
+        catch (e) { res.status(500).json({ success: false, message: '获取安全日志失败' }); }
+    });
+    app.post(basePath + '/account/restore', authMiddleware, async (req, res) => {
+        try {
+            const username = req[userVar];
+            const password = ((req.body && req.body.password) || '').toString();
+            const code = read2faCode(req);
+            const r = await restoreAccountByPassword(kind, username, password, code);
+            if (!r.ok) return res.status(r.status || 400).json({ success: false, message: r.message });
+            appendAudit(username || kind, kind + '-account-restore', `账号「${username}」撤销注销（恢复）`, req);
+            res.json({ success: true, message: '账号已恢复，注销已取消。' });
+        } catch (e) { res.status(500).json({ success: false, message: '恢复失败' }); }
+    });
+}
+_auditAndRestoreRoutes('cloud', 'cloudUser', requireCloudAuth, '/api/cloud-storage');
+_auditAndRestoreRoutes('clink', 'linkUser', requireLinkAuth, '/api/cloud-links');
+_auditAndRestoreRoutes('backup', 'backupUser', requireBackupAuth, '/api/cloud-backup');
+_auditAndRestoreRoutes('savereplay', 'savereplayUser', requireSaveReplayAuth, '/api/savereplay');
+
+// 凭账号密码（无需登录态）恢复处于注销冷静期的账号：登录被阻止时使用的兜底入口
+app.post('/api/account/restore', async (req, res) => {
+    try {
+        const kind = (req.body && req.body.kind) || '';
+        const username = ((req.body && req.body.username) || '').toString().trim();
+        const password = ((req.body && req.body.password) || '').toString();
+        const code = read2faCode(req);
+        if (!ACCOUNT_TABLE[kind]) return res.status(400).json({ success: false, message: '未知账号类型' });
+        const acc = await getAccountByKind(kind, username);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        if (!acc.deleted_at) return res.status(400).json({ success: false, message: '该账号未处于注销待删除状态' });
+        const r = await restoreAccountByPassword(kind, username, password, code);
+        if (!r.ok) return res.status(r.status || 400).json({ success: false, message: r.message });
+        appendAudit(username || kind, kind + '-account-restore', `账号「${username}」撤销注销（恢复，未登录入口）`, req);
+        res.json({ success: true, message: '账号已恢复，现在可以重新登录。' });
+    } catch (e) { res.status(500).json({ success: false, message: '恢复失败' }); }
 });
 
 // 当前账号信息
@@ -11252,7 +11450,7 @@ server.listen(PORT, () => {
     loadServerErrorsFromFile();   // 恢复重启前记录的异常
     await initDatabase();
     loadAdminState();
-    await loadUserRoles(); 
+    await loadUserRoles();
     await loadUserSettings();
     await loadGlobalFunctions();
     await loadDailyChallengeConfig();
