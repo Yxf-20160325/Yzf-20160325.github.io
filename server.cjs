@@ -40,7 +40,7 @@ let DB_AVAILABLE = false;
 // 默认数据库连接（已写入 server；部署到 onrender 等平台时，若设置了同名环境变量则覆盖此处默认值）。
 // 你已配好的 DB_HOST / DB_PORT 通过环境变量传入即可覆盖下面两个默认值。
 const DEFAULT_DB = {
-    host: process.env.DB_HOST ,
+    host: process.env.DB_HOST || 'nu3uys.h.filess.io',
     port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3307,
     user: process.env.DB_USER || 'maze_graysetsor',
     password: process.env.DB_PASSWORD || '4c613aeb828b9923c8b12b63b11373f2a31a3357',
