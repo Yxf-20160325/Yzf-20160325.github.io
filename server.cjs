@@ -10058,7 +10058,9 @@ app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
     try {
         const body = req.body || {};
         const validKeys = Object.keys(GLOBAL_FUNCTIONS_DEFAULT);
-        const next = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT);
+        // 以「当前已保存的配置」为基础（而非硬默认值），仅覆盖本次请求携带的字段。
+        // 否则保存月卡（body 只带 monthCard）会把其余普通开关重置成默认值，反之亦然互相冲掉。
+        const next = Object.assign({}, GLOBAL_FUNCTIONS_DEFAULT, globalFunctions || {});
         for (const k of validKeys) {
             if (typeof body[k] === 'boolean') next[k] = body[k];
         }
