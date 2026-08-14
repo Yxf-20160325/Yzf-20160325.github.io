@@ -13,7 +13,7 @@ const crypto = require('crypto'); // 内置：TOTP(HMAC-SHA1) 二次认证，无
 let QRCode = null;
 try { QRCode = require('qrcode'); } catch (e) { QRCode = null; }
 
-const app = express();
+const app = express(); 
 // 配置CORS以支持跨网络连接
 app.use(cors({
     origin: '*', // 允许所有来源
