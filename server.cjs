@@ -13,7 +13,7 @@ const crypto = require('crypto'); // 内置：TOTP(HMAC-SHA1) 二次认证，无
 let QRCode = null;
 try { QRCode = require('qrcode'); } catch (e) { QRCode = null; }
 
-const app = express(); 
+const app = express();
 // 配置CORS以支持跨网络连接
 app.use(cors({
     origin: '*', // 允许所有来源
@@ -1542,7 +1542,8 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
+// 放宽 JSON body 上限到 15MB：admin 上传微信收款码（整图 base64）可能数 MB，默认 100KB 会触发 PayloadTooLargeError
+app.use(express.json({ limit: '15mb' }));
 
 // 添加安全头中间件
 app.use((req, res, next) => {
@@ -10026,8 +10027,17 @@ app.post('/api/admin/function-control', requireAdminAuth, (req, res) => {
 
 // ===== 全局功能控制（管理员统一开关，影响所有在线游戏客户端）=====
 // 读取当前全局功能开关（公开，供游戏客户端初始化时拉取；仅返回开关，不含敏感信息）
+// 返回给客户端的全局功能配置：剥离微信收款码等大体积 base64（避免每次广播/拉取都传几 MB），
+// 玩家端需要展示收款码时按需从 /api/monthcard/config 拉取
+function publicGlobalFunctions() {
+    const f = Object.assign({}, globalFunctions);
+    if (f.monthCard && typeof f.monthCard === 'object') {
+        f.monthCard = { enabled: !!f.monthCard.enabled, coinPrice: f.monthCard.coinPrice || 0, realPrice: f.monthCard.realPrice || 0 };
+    }
+    return f;
+}
 app.get('/api/admin/global-functions', (req, res) => {
-    res.json({ success: true, functions: Object.assign({}, globalFunctions) });
+    res.json({ success: true, functions: publicGlobalFunctions() });
 });
 
 // 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
@@ -10074,8 +10084,8 @@ app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
         }
         globalFunctions = next;
         await saveGlobalFunctions();
-        // 实时广播给所有已连接的游戏客户端
-        try { io.emit('global-function-update', Object.assign({}, globalFunctions)); } catch (_) {}
+        // 实时广播给所有已连接的游戏客户端（剥离微信收款码大图，避免每客户端重复推送）
+        try { io.emit('global-function-update', publicGlobalFunctions()); } catch (_) {}
         const changed = validKeys.filter(k => GLOBAL_FUNCTIONS_DEFAULT[k] !== globalFunctions[k]);
         appendAudit('admin', 'function-control', `全局功能设定更新: {${changed.map(k => `${k}=${globalFunctions[k]}`).join(', ')}}`);
         console.log('[Admin] 全局功能设定更新:', globalFunctions);
@@ -10157,6 +10167,19 @@ app.get('/api/monthcard/status', async (req, res) => {
             success: true, active, until: active ? g.until : 0, method: active ? g.method : null,
             applicationStatus: app ? app.status : null, applicationId: app ? app.id : null,
             pending: !!(app && app.status === 'pending')
+        });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+// 玩家端按需拉取月卡配置（含微信收款码 base64 大图）；与全局广播解耦，避免每个客户端重复接收几 MB
+app.get('/api/monthcard/config', (req, res) => {
+    try {
+        const mc = (globalFunctions && globalFunctions.monthCard) || { enabled: false, coinPrice: 300, realPrice: 30, wechatQr: '' };
+        res.json({
+            success: true,
+            enabled: !!mc.enabled,
+            coinPrice: mc.coinPrice || 0,
+            realPrice: mc.realPrice || 0,
+            wechatQr: mc.wechatQr || ''
         });
     } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
 });
