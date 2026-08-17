@@ -1545,8 +1545,8 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
-// 放宽 JSON body 上限到 15MB：admin 上传微信收款码（整图 base64）可能数 MB，默认 100KB 会触发 PayloadTooLargeError
-app.use(express.json({ limit: '15mb' }));
+// 放宽 JSON body 上限到 50MB：admin 上传微信收款码（整图 base64）与音乐文件（base64）可能数 MB~数十 MB，默认 100KB 会触发 PayloadTooLargeError
+app.use(express.json({ limit: '50mb' }));
 
 // 添加安全头中间件
 app.use((req, res, next) => {
@@ -4073,11 +4073,58 @@ app.get('/api/admin/music', requireAdminAuth, (req, res) => {
     res.json({ success: true, list: loadServerMusic() });
 });
 
-// 新增一首音乐（可导入链接）：body { name, url }
+// 新增一首音乐：可导入链接（body { name, url }）或直接上传文件（body { name, data, filename }，data 为 base64 / dataURL）
 app.post('/api/admin/music', requireAdminAuth, (req, res) => {
     try {
-        const name = (req.body && req.body.name ? String(req.body.name) : '').trim().slice(0, 120);
-        let url = (req.body && req.body.url ? String(req.body.url) : '').trim();
+        const body = req.body || {};
+        const name = (body.name ? String(body.name) : '').trim().slice(0, 120);
+        let url = (body.url ? String(body.url) : '').trim();
+        const data = body.data ? String(body.data) : '';
+
+        // —— 上传模式：提供了文件内容（base64 或 dataURL）——
+        if (data) {
+            // 若传入完整 dataURL，剥掉头部前缀，仅保留 base64 主体
+            let b64 = data;
+            if (b64.indexOf('data:') === 0) {
+                const idx = b64.indexOf(',');
+                if (idx > 0) b64 = b64.slice(idx + 1);
+            }
+            const origName = (body.filename ? String(body.filename) : '') || (name || 'music');
+            const ext = path.extname(origName).toLowerCase();
+            if (!MUSIC_MIME[ext]) {
+                return res.status(400).json({ success: false, message: '不支持的音频格式（允许：' + Object.keys(MUSIC_MIME).join(', ') + '）' });
+            }
+            // 净化文件名：path.basename 先剥离目录分量（防 ../ 穿越），再仅保留安全字符，避免覆盖已有文件
+            let base = path.basename(origName).replace(/[^\w.\-一-龥]/g, '_').replace(/\.{2,}/g, '.');
+            if (!base) base = 'music' + ext;
+            ensureMusicDir();
+            let finalName = base;
+            let target = path.join(MUSIC_DIR, finalName);
+            if (fs.existsSync(target)) {
+                const escExt = ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                finalName = base.replace(new RegExp(escExt + '$'), '') + '_' + Date.now().toString(36) + ext;
+                target = path.join(MUSIC_DIR, finalName);
+            }
+            let buf;
+            try { buf = Buffer.from(b64, 'base64'); } catch (e) { return res.status(400).json({ success: false, message: '文件内容解码失败' }); }
+            if (!buf.length) return res.status(400).json({ success: false, message: '文件内容为空' });
+            fs.writeFileSync(target, buf);
+            url = '/music/' + encodeURIComponent(finalName);
+            const list = loadServerMusic();
+            const item = {
+                id: 'sm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+                name: name || base,
+                url,
+                createdAt: new Date().toISOString(),
+                addedBy: (req.admin && (req.admin.username || req.admin.id)) || 'admin'
+            };
+            list.push(item);
+            saveServerMusic(list);
+            appendAudit('admin', 'music-upload', `上传服务器音乐「${item.name}」(${url}, ${(buf.length / 1024).toFixed(0)}KB)`);
+            return res.json({ success: true, item });
+        }
+
+        // —— 链接模式（原有逻辑）——
         if (!name) return res.status(400).json({ success: false, message: '请填写音乐名称' });
         if (!url) return res.status(400).json({ success: false, message: '请填写音乐链接/路径' });
         // 归一化：允许 http(s) 外部链接，或服务器 music 目录相对路径 /music/xxx
@@ -4117,6 +4164,15 @@ app.delete('/api/admin/music/:id', requireAdminAuth, (req, res) => {
         if (idx < 0) return res.status(404).json({ success: false, message: '音乐不存在' });
         const removed = list.splice(idx, 1)[0];
         saveServerMusic(list);
+        // 若是本服务器 music 目录下的上传文件，一并删除物理文件（带防穿越校验，避免误删目录外文件）
+        if (removed.url && removed.url.indexOf('/music/') === 0) {
+            try {
+                const fp = path.normalize(path.join(MUSIC_DIR, decodeURIComponent(removed.url.slice('/music/'.length))));
+                if (fp === MUSIC_DIR || fp.startsWith(MUSIC_DIR + path.sep)) {
+                    if (fs.existsSync(fp)) { fs.unlinkSync(fp); }
+                }
+            } catch (e) { /* 仅删库记录，文件删除失败不影响主流程 */ }
+        }
         appendAudit('admin', 'music-delete', `删除服务器音乐「${removed.name}」(${removed.url})`);
         res.json({ success: true, message: '已删除' });
     } catch (e) {
