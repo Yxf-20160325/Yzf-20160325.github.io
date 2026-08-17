@@ -5251,14 +5251,8 @@
                     <div style="font-size:13px;color:#cdd;">我的好友码：<b id="myFriendCodeVal" style="color:#4fc3f7;letter-spacing:1px;">------</b>
                         <button type="button" onclick="copyMyFriendCode()" style="margin-left:8px;padding:4px 10px;background:#2a2a3a;color:#fff;border:1px solid #4CAF50;border-radius:6px;cursor:pointer;font-size:12px;">复制</button>
                     </div>
-                    <p class="setting-hint" style="margin:8px 0 0;">把好友码发给信任的人，对方在「凭好友码添加」处填入即可向你发送请求（选「仅好友码」时，普通搜索添加会被自动拒绝）。</p>
+                    <p class="setting-hint" style="margin:8px 0 0;">把好友码发给信任的人，对方在「好友」页面的「凭码添加」处填入即可向你发送请求（选「仅好友码」时，普通搜索添加会被自动拒绝）。</p>
                 </div>
-                <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                    <input id="friendCodeTargetId" type="text" placeholder="对方玩家 ID" style="flex:1;min-width:120px;padding:7px 10px;border-radius:8px;border:1px solid #4a4a5a;background:#1a1a24;color:#e6e6ef;font-size:13px;">
-                    <input id="friendCodeInput" type="text" placeholder="对方好友码" style="width:120px;padding:7px 10px;border-radius:8px;border:1px solid #4a4a5a;background:#1a1a24;color:#e6e6ef;font-size:13px;text-transform:uppercase;">
-                    <button type="button" onclick="sendFriendRequestByCode()" style="padding:7px 14px;background:linear-gradient(135deg,#4fc3f7,#0288d1);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;white-space:nowrap;">凭码添加</button>
-                </div>
-                <p class="setting-hint">适合对方设置了「仅好友码」时使用；ID 可在其主页或好友搜索结果里复制。</p>
             </div>
 
             <div class="setting-group">
@@ -6541,9 +6535,12 @@ function connectNotificationSocket() {
                     return;
                 }
                 if (soc.friendAddPolicy === 'code') {
+                    // 仅当本地已持有服务端权威码时才做前端比对；否则交后端 /api/friends/request 权威校验，
+                    // 避免首登瞬间 gameState.friendCode 尚未下发、用本地兜底码误拒（后端为准）。
                     const myCode = (typeof myFriendCode === 'function') ? myFriendCode() : '';
                     const got = (data.friendCode || '').toString().trim().toUpperCase();
-                    if (got !== myCode) {
+                    const haveAuth = !!(gameState.friendCode && String(gameState.friendCode).toUpperCase() === myCode);
+                    if (haveAuth && got !== myCode) {
                         if (typeof silentRejectFriendRequest === 'function') silentRejectFriendRequest(data.requestId);
                         return;
                     }
@@ -7188,7 +7185,7 @@ function showFriendsModal() {
     modal.innerHTML = `
         <div style="background:#fff;color:#222;border-radius:12px;max-width:480px;width:90%;padding:24px;text-align:center;position:relative;max-height:90vh;overflow-y:auto;">
             <button onclick="closeFriendsModal()" style="position:absolute;top:10px;right:14px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
-            <h3 style="margin-top:0;">👥 好友</h3>
+            <h3 style="margin-top:0;display:flex;align-items:center;justify-content:center;gap:10px;">👥 好友 <button type="button" onclick="openSocialPrivacySettings()" style="padding:4px 12px;background:#5C6BC0;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;white-space:nowrap;">⚙️ 设置</button></h3>
             <div id="friendTabs" style="display:flex;gap:6px;margin:10px 0 14px;justify-content:center;">
                 <button onclick="switchFriendTab('search')" style="padding:6px 14px;border:1px solid #ddd;border-radius:8px;cursor:pointer;font-size:13px;background:#4CAF50;color:#fff;" data-tab="search">🔍 搜索</button>
                 <button onclick="switchFriendTab('friends')" style="padding:6px 14px;border:1px solid #ddd;border-radius:8px;cursor:pointer;font-size:13px;background:#f5f5f5;color:#333;" data-tab="friends">👤 我的好友</button>
@@ -7247,6 +7244,12 @@ function switchFriendTab(tab) {
     if (tab === 'requests') loadFriendRequests();
 }
 function closeFriendsModal() { const m = document.getElementById('friendsModal'); if (m) m.remove(); }
+// 好友页面「⚙️ 设置」：关闭好友弹窗并直接打开 UI 设置里的「社交与隐私」标签页
+function openSocialPrivacySettings() {
+    try { closeFriendsModal(); } catch (e) {}
+    try { if (typeof showUISettings === 'function') showUISettings(); } catch (e) {}
+    try { if (typeof switchUISettingsTab === 'function') switchUISettingsTab('social'); } catch (e) {}
+}
 // 刷新好友列表 / 请求（供接受/拒绝或收到推送时调用）
 function refreshFriendsPanels() {
     const modal = document.getElementById('friendsModal');
@@ -7344,6 +7347,7 @@ async function searchFriends() {
                 '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">' +
                     '<button class="friend-view-btn" data-friend-idx="' + i + '" style="padding:6px 14px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;">查看主页</button>' +
                     addBtn +
+                    '<button type="button" class="friend-code-btn" data-cid="' + _friendEsc(pl.clientId) + '" data-name="' + _friendEsc(pl.name || '玩家') + '" style="padding:6px 14px;background:linear-gradient(135deg,#4fc3f7,#0288d1);color:#fff;border:none;border-radius:8px;cursor:pointer;' + (isSelf ? 'display:none;' : '') + '">凭码添加</button>' +
                 '</div>' +
             '</div>';
         }).join('');
@@ -7377,6 +7381,14 @@ async function searchFriends() {
                 }
                 sendFriendRequest(cid, nm);
                 setSent(); // 乐观更新，真实状态下次刷新时校正
+            });
+        });
+        // 凭码添加按钮：自动带该行玩家 ID，弹窗填好友码即可
+        box.querySelectorAll('.friend-code-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const cid = btn.getAttribute('data-cid');
+                const nm = btn.getAttribute('data-name');
+                openFriendCodeAdd(cid, nm);
             });
         });
     } catch (e) {
@@ -7588,26 +7600,56 @@ function applySocialPrivacySettings() {
     renderBlocklist();
 }
 
-// 凭好友码添加好友：ID + 好友码 → 发送请求（对方需为「仅好友码」策略时必填）
-async function sendFriendRequestByCode() {
-    const idEl = document.getElementById('friendCodeTargetId');
-    const codeEl = document.getElementById('friendCodeInput');
-    const toClientId = idEl ? idEl.value.trim() : '';
-    const code = codeEl ? codeEl.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase() : '';
-    if (!toClientId) { if (typeof showNotification === 'function') showNotification('请填写对方玩家 ID', 2000); return; }
+// 凭好友码添加好友：玩家 ID 由搜索结果/主页自动带入，仅让用户填好友码
+function openFriendCodeAdd(cid, name) {
+    if (!cid) { if (typeof showNotification === 'function') showNotification('缺少玩家 ID', 2000); return; }
+    if (String(cid) === String(gameState.clientId || '')) { if (typeof showNotification === 'function') showNotification('不能添加自己为好友', 2000); return; }
+    showFriendCodePrompt(cid, name);
+}
+function showFriendCodePrompt(cid, name) {
+    const nm = name || '对方';
+    const overlay = document.createElement('div');
+    overlay.id = 'friendCodePromptOverlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000000;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = '<div style="background:#fff;color:#222;border-radius:12px;max-width:360px;width:88%;padding:22px;text-align:center;position:relative;">' +
+        '<button onclick="closeFriendCodePrompt()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:22px;cursor:pointer;color:#666;">×</button>' +
+        '<h3 style="margin:0 0 10px;">凭好友码添加 ' + _friendEsc(nm) + '</h3>' +
+        '<p style="font-size:12px;color:#666;margin:0 0 12px;">该玩家设为「仅好友码」时需填其好友码；好友码可在其主页复制。普通添加无需好友码。</p>' +
+        '<input id="friendCodePromptInput" type="text" placeholder="对方好友码（选填）" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;text-transform:uppercase;box-sizing:border-box;margin-bottom:14px;">' +
+        '<div style="display:flex;gap:10px;justify-content:center;">' +
+        '<button onclick="closeFriendCodePrompt()" style="padding:8px 18px;border:1px solid #ddd;background:#f5f5f5;border-radius:8px;cursor:pointer;font-size:13px;">取消</button>' +
+        '<button onclick="confirmFriendCodePrompt()" style="padding:8px 18px;background:linear-gradient(135deg,#4fc3f7,#0288d1);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;">发送请求</button>' +
+        '</div></div>';
+    document.body.appendChild(overlay);
+    overlay._targetCid = cid;
+    overlay._targetName = nm;
+    setTimeout(function () { var inp = overlay.querySelector('#friendCodePromptInput'); if (inp) inp.focus(); }, 50);
+}
+function closeFriendCodePrompt() {
+    var o = document.getElementById('friendCodePromptOverlay');
+    if (o) o.remove();
+}
+function confirmFriendCodePrompt() {
+    var o = document.getElementById('friendCodePromptOverlay');
+    if (!o) return;
+    var cid = o._targetCid, nm = o._targetName || '';
+    var inp = o.querySelector('#friendCodePromptInput');
+    var code = inp ? inp.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase() : '';
+    o.remove();
+    _doSendFriendRequestByCode(cid, nm, code);
+}
+async function _doSendFriendRequestByCode(cid, name, code) {
     const me = gameState.clientId || '';
     const myName = gameState.playerName || '';
     if (!me) { if (typeof showNotification === 'function') showNotification('请先设置昵称并进入游戏', 2000); return; }
-    if (me === String(toClientId)) { if (typeof showNotification === 'function') showNotification('不能添加自己为好友', 2000); return; }
     if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { if (typeof showNotification === 'function') showNotification('无法连接服务器', 2000); return; }
     try {
         const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/request', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fromClientId: me, toClientId: toClientId, fromName: myName, toName: '', friendCode: code })
+            body: JSON.stringify({ fromClientId: me, toClientId: String(cid), fromName: myName, toName: '', friendCode: code })
         }).then(r => r.json());
         if (d && d.success) {
             if (typeof showNotification === 'function') showNotification('✅ 好友请求已发送' + (code ? '（凭好友码）' : ''), 2000);
-            if (idEl) idEl.value = ''; if (codeEl) codeEl.value = '';
         } else {
             if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '发送失败'), 2500);
         }
@@ -7647,6 +7689,7 @@ async function loadFriendList() {
                 '<div style="flex:1;min-width:0;"><div style="font-weight:bold;color:#222;">' + nm + ' ' + on + '</div></div>' +
                 '<button class="friend-gift-btn" data-cid="' + _friendEsc(pl.clientId) + '" data-nm="' + nm + '" style="padding:6px 12px;background:#FF7043;color:#fff;border:none;border-radius:8px;cursor:pointer;flex-shrink:0;">🎁 赠送</button>' +
                 '<button class="friend-chat-btn" data-cid="' + _friendEsc(pl.clientId) + '" data-nm="' + nm + '" style="padding:6px 14px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;flex-shrink:0;">💬 聊天</button>' +
+                '<button class="friend-del-btn" data-cid="' + _friendEsc(pl.clientId) + '" data-nm="' + nm + '" style="padding:6px 12px;background:#e53935;color:#fff;border:none;border-radius:8px;cursor:pointer;flex-shrink:0;">🗑️ 删除</button>' +
             '</div>';
         }).join('');
         box.querySelectorAll('.friend-gift-btn').forEach(btn => {
@@ -7655,10 +7698,34 @@ async function loadFriendList() {
         box.querySelectorAll('.friend-chat-btn').forEach(btn => {
             btn.addEventListener('click', (e) => { e.stopPropagation(); showFriendChatModal(btn.getAttribute('data-cid'), btn.getAttribute('data-nm')); });
         });
+        box.querySelectorAll('.friend-del-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => { e.stopPropagation(); removeFriend(btn.getAttribute('data-cid'), btn.getAttribute('data-nm')); });
+        });
         box.querySelectorAll('.friend-list-item').forEach(it => {
             it.addEventListener('click', () => showPlayerProfileModal(it.getAttribute('data-cid'), it.getAttribute('data-nm')));
         });
     } catch (e) { box.innerHTML = '<div style="font-size:13px;color:#c00;padding:10px 0;">加载失败</div>'; }
+}
+
+// 删除好友（二次确认后调用后端双向解除）
+async function removeFriend(cid, nm) {
+    if (!cid) return;
+    if (!confirm('确定删除好友「' + (nm || '该玩家') + '」吗？\n删除后将从你的好友列表移除，对方也会同步移除你。')) return;
+    const me = gameState.clientId || '';
+    if (!me) { if (typeof showNotification === 'function') showNotification('请先进入游戏', 2000); return; }
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { if (typeof showNotification === 'function') showNotification('无法连接服务器', 2000); return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/remove', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientId: me, otherClientId: String(cid) })
+        }).then(r => r.json());
+        if (d && d.success) {
+            if (typeof showNotification === 'function') showNotification('已删除好友 ' + (nm || ''), 2000);
+            loadFriendList(); // 刷新列表
+        } else {
+            if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '删除失败'), 2500);
+        }
+    } catch (e) { if (typeof showNotification === 'function') showNotification('删除失败', 2000); }
 }
 
 // 好友请求列表（收到的）
@@ -31034,55 +31101,57 @@ function handleMultiplayerData(data, peerId) {
                         return;
                     }
 
-                    // 社交与隐私：入房需确认（房主弹窗选择允许 / 拒绝；不影响满员判断）
+                    // 社交与隐私：入房需确认（房主异步非阻塞弹窗选择允许 / 拒绝；不影响满员判断）
+                    const _finalizeJoin = function () {
+                        addPlayer(data.player);
+                        // 合作模式：第二位玩家加入后，若当前迷宫还没有配合门，则自动重开一局以生成压力板联动门（保证「一人踩板一人走」）
+                        if (gameState.multiplayer.isHost && gameState.multiplayer.gameMode === 'coop' &&
+                            Object.keys(gameState.multiplayer.players).length >= 2 &&
+                            (!gameState.multiplayer.mech || !gameState.multiplayer.mech.linkedDoors || gameState.multiplayer.mech.linkedDoors.length === 0)) {
+                            gameState.multiplayer.maze = generateMultiplayerMaze();
+                            Object.values(gameState.multiplayer.players).forEach(pl => { pl.x = 1; pl.y = 1; pl.reachedExit = false; pl.downed = false; });
+                            gameState.multiplayer.moveCount = 0;
+                            gameState.multiplayer.hasKey = false;
+                            if (typeof broadcastGameState === 'function') broadcastGameState();
+                            if (typeof drawMultiplayerMaze === 'function') drawMultiplayerMaze();
+                            if (typeof showNotification === 'function') showNotification('👥 好友已加入，已生成合作解谜关卡（踩板开门）', 2500);
+                        }
+                        // 如果是主机，发送当前游戏状态给新玩家
+                        if (gameState.multiplayer.isHost) {
+                            gameState.multiplayer.connections[peerId].send({
+                                type: 'game-state',
+                                maze: gameState.multiplayer.maze,
+                                players: gameState.multiplayer.players,
+                                exit: gameState.multiplayer.exit,
+                                teleporters: gameState.multiplayer.teleporters,
+                                movingEnemies: gameState.multiplayer.movingEnemies || [],
+                                keyPosition: gameState.multiplayer.keyPosition || null,
+                                doorPosition: gameState.multiplayer.doorPosition || null,
+                                mech: gameState.multiplayer.mech || null,
+                                maxPlayers: gameState.multiplayer.maxPlayers,
+                                protectedPlayers: gameState.multiplayer.protectedPlayers,
+                                gameMode: gameState.multiplayer.gameMode,
+                                mutedPlayers: (gameState.multiplayer.mutedPlayers || []).slice(),
+                                roomLocked: !!gameState.multiplayer.roomLocked,
+                                roomBlacklist: (gameState.multiplayer.roomBlacklist || []).slice()
+                            });
+                        }
+                        drawMultiplayerMaze();
+                    };
                     if (gameState.multiplayer.isHost && typeof getSocial === 'function' && getSocial().roomJoinConfirm) {
                         const who = (data.player && data.player.name) ? (data.player.name + '（' + (data.player.clientId || '') + '）') : '某玩家';
-                        let allowed = false;
-                        try { allowed = window.confirm(who + ' 想加入你的房间，是否允许？\n\n「确定」允许加入，「取消」拒绝其加入。'); } catch (e) { allowed = true; }
-                        if (!allowed) {
-                            try {
-                                gameState.multiplayer.connections[peerId].send({ type: 'room-denied', message: '房主拒绝了你的加入请求' });
-                                gameState.multiplayer.connections[peerId].close();
-                            } catch (e) {}
-                            delete gameState.multiplayer.connections[peerId];
-                            return;
-                        }
+                        // 异步非阻塞弹窗：不再用同步 window.confirm（会冻结游戏线程，且被浏览器抑制时异常放行）
+                        showJoinConfirmModal(who, function () { try { _finalizeJoin(); } catch (e) { console.error('[Join] 接受加入失败', e); } },
+                            function () {
+                                try {
+                                    gameState.multiplayer.connections[peerId].send({ type: 'room-denied', message: '房主拒绝了你的加入请求' });
+                                    gameState.multiplayer.connections[peerId].close();
+                                } catch (e) {}
+                                delete gameState.multiplayer.connections[peerId];
+                            });
+                    } else {
+                        _finalizeJoin();
                     }
-
-                    addPlayer(data.player);
-                    // 合作模式：第二位玩家加入后，若当前迷宫还没有配合门，则自动重开一局以生成压力板联动门（保证「一人踩板一人走」）
-                    if (gameState.multiplayer.isHost && gameState.multiplayer.gameMode === 'coop' &&
-                        Object.keys(gameState.multiplayer.players).length >= 2 &&
-                        (!gameState.multiplayer.mech || !gameState.multiplayer.mech.linkedDoors || gameState.multiplayer.mech.linkedDoors.length === 0)) {
-                        gameState.multiplayer.maze = generateMultiplayerMaze();
-                        Object.values(gameState.multiplayer.players).forEach(pl => { pl.x = 1; pl.y = 1; pl.reachedExit = false; pl.downed = false; });
-                        gameState.multiplayer.moveCount = 0;
-                        gameState.multiplayer.hasKey = false;
-                        if (typeof broadcastGameState === 'function') broadcastGameState();
-                        if (typeof drawMultiplayerMaze === 'function') drawMultiplayerMaze();
-                        if (typeof showNotification === 'function') showNotification('👥 好友已加入，已生成合作解谜关卡（踩板开门）', 2500);
-                    }
-                    // 如果是主机，发送当前游戏状态给新玩家
-                    if (gameState.multiplayer.isHost) {
-                        gameState.multiplayer.connections[peerId].send({
-                            type: 'game-state',
-                            maze: gameState.multiplayer.maze,
-                            players: gameState.multiplayer.players,
-                            exit: gameState.multiplayer.exit,
-                            teleporters: gameState.multiplayer.teleporters,
-                            movingEnemies: gameState.multiplayer.movingEnemies || [],
-                            keyPosition: gameState.multiplayer.keyPosition || null,
-                            doorPosition: gameState.multiplayer.doorPosition || null,
-                            mech: gameState.multiplayer.mech || null,
-                            maxPlayers: gameState.multiplayer.maxPlayers,
-                            protectedPlayers: gameState.multiplayer.protectedPlayers,
-                            gameMode: gameState.multiplayer.gameMode,
-                            mutedPlayers: (gameState.multiplayer.mutedPlayers || []).slice(),
-                            roomLocked: !!gameState.multiplayer.roomLocked,
-                            roomBlacklist: (gameState.multiplayer.roomBlacklist || []).slice()
-                        });
-                    }
-                    drawMultiplayerMaze();
                     break;
                 case 'player-skin': {
                     // 收到某玩家的皮肤，更新其渲染；房主负责中继给其他客户端
@@ -31505,6 +31574,32 @@ function handleMultiplayerData(data, peerId) {
             drawMultiplayerMaze();
         }
 
+
+// 入房需确认：房主异步非阻塞弹窗（替代同步 window.confirm，避免冻结游戏线程；被浏览器抑制时不会误放行）
+function showJoinConfirmModal(who, onAllow, onDeny) {
+    try {
+        const existing = document.getElementById('joinConfirmModal');
+        if (existing) existing.remove();
+    } catch (e) {}
+    const m = document.createElement('div');
+    m.id = 'joinConfirmModal';
+    m.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:12000;display:flex;align-items:center;justify-content:center;';
+    const safeWho = String(who || '某玩家').replace(/[<>&"]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; });
+    m.innerHTML = '<div style="background:#fff;color:#222;border-radius:12px;max-width:380px;width:90%;padding:24px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.3);">' +
+        '<div style="font-size:40px;margin-bottom:10px;">🚪</div>' +
+        '<div style="font-size:16px;font-weight:bold;line-height:1.5;">' + safeWho + ' 想加入你的房间</div>' +
+        '<div style="font-size:13px;color:#666;margin:8px 0 18px;">是否允许其加入？</div>' +
+        '<div style="display:flex;gap:12px;justify-content:center;">' +
+        '<button id="joinAllowBtn" style="padding:10px 22px;background:#4CAF50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">✅ 允许</button>' +
+        '<button id="joinDenyBtn" style="padding:10px 22px;background:#e53935;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">❌ 拒绝</button>' +
+        '</div></div>';
+    document.body.appendChild(m);
+    const close = function () { try { m.remove(); } catch (e) {} };
+    const allowBtn = m.querySelector('#joinAllowBtn');
+    const denyBtn = m.querySelector('#joinDenyBtn');
+    if (allowBtn) allowBtn.onclick = function () { close(); try { if (typeof onAllow === 'function') onAllow(); } catch (e) {} };
+    if (denyBtn) denyBtn.onclick = function () { close(); try { if (typeof onDeny === 'function') onDeny(); } catch (e) {} };
+}
 
 function broadcast(data, excludePlayerId = null) {
     for (const connId in gameState.multiplayer.connections) {
