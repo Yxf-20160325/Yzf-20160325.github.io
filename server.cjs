@@ -446,6 +446,44 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         INDEX idx_lb_mode_period (mode, period),
         INDEX idx_lb_client (client_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    // ===== 好友系统持久化（MySQL 优先，JSON 兜底；onrender 临时磁盘重启会清空 JSON，故必须落库）=====
+    `CREATE TABLE IF NOT EXISTS friendships (
+        user_a VARCHAR(64) NOT NULL,
+        user_b VARCHAR(64) NOT NULL,
+        created_at VARCHAR(32),
+        PRIMARY KEY (user_a, user_b),
+        INDEX idx_fr_b (user_b)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS friend_requests (
+        id VARCHAR(64) NOT NULL,
+        from_client_id VARCHAR(64),
+        from_name VARCHAR(64),
+        to_client_id VARCHAR(64),
+        to_name VARCHAR(64),
+        status VARCHAR(16),
+        message VARCHAR(512),
+        created_at VARCHAR(32),
+        updated_at VARCHAR(32),
+        PRIMARY KEY (id),
+        INDEX idx_fr_to (to_client_id),
+        INDEX idx_fr_from (from_client_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS friend_messages (
+        chat_id VARCHAR(130) NOT NULL,
+        id VARCHAR(64) NOT NULL,
+        from_client_id VARCHAR(64),
+        to_client_id VARCHAR(64),
+        message TEXT,
+        created_at VARCHAR(32),
+        PRIMARY KEY (chat_id, id),
+        INDEX idx_fm_chat (chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS friend_codes (
+        client_id VARCHAR(64) NOT NULL,
+        code VARCHAR(16),
+        PRIMARY KEY (client_id),
+        UNIQUE INDEX idx_fc_code (code)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -2882,7 +2920,7 @@ function ensureFriendCode(clientId, preferred) {
 }
 function friendCodeOf(clientId) { return ensureFriendCode(clientId); }
 
-function loadFriends() {
+function loadFriendsFromJson() {
     try {
         if (fs.existsSync(FRIENDS_FILE)) {
             const d = JSON.parse(fs.readFileSync(FRIENDS_FILE, 'utf8')) || {};
@@ -2896,7 +2934,57 @@ function loadFriends() {
                 }
             });
         }
-    } catch (e) { console.error('[Friends] 加载失败:', e.message); }
+    } catch (e) { console.error('[Friends] JSON 加载失败:', e.message); }
+}
+// 好友数据 MySQL 持久化（DB 模式落库；onrender 临时磁盘重启清空 JSON，故必须落库才留得住）
+async function dbLoadFriendsAll() {
+    if (!pool) return false;
+    try {
+        const [fr] = await pool.query('SELECT user_a, user_b, created_at FROM friendships');
+        fr.forEach(r => {
+            const a = String(r.user_a), b = String(r.user_b);
+            friendships.set(friendshipKey(a, b), { userA: a, userB: b, createdAt: r.created_at || null });
+        });
+        const [rq] = await pool.query('SELECT id, from_client_id, from_name, to_client_id, to_name, status, message, created_at, updated_at FROM friend_requests');
+        rq.forEach(r => friendRequests.set(r.id, {
+            id: r.id, fromClientId: r.from_client_id, fromName: r.from_name, toClientId: r.to_client_id,
+            toName: r.to_name, status: r.status, message: r.message || '', createdAt: r.created_at, updatedAt: r.updated_at
+        }));
+        const [ms] = await pool.query('SELECT chat_id, id, from_client_id, to_client_id, message, created_at FROM friend_messages');
+        ms.forEach(m => {
+            const k = m.chat_id;
+            if (!friendMessages.has(k)) friendMessages.set(k, []);
+            friendMessages.get(k).push({ id: m.id, fromClientId: m.from_client_id, toClientId: m.to_client_id, message: m.message, createdAt: m.created_at });
+        });
+        return true;
+    } catch (e) { console.error('[Friends][DB] 加载失败:', e.message); return false; }
+}
+async function dbSaveFriendsAll() {
+    if (!pool) return false;
+    try {
+        for (const f of friendships.values()) {
+            await pool.query('REPLACE INTO friendships (user_a, user_b, created_at) VALUES (?,?,?)', [String(f.userA), String(f.userB), f.createdAt || null]);
+        }
+        for (const r of friendRequests.values()) {
+            await pool.query('REPLACE INTO friend_requests (id, from_client_id, from_name, to_client_id, to_name, status, message, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                [r.id, r.fromClientId, r.fromName, r.toClientId, r.toName, r.status, r.message || '', r.createdAt, r.updatedAt]);
+        }
+        for (const [chatId, arr] of friendMessages.entries()) {
+            for (const m of arr) {
+                await pool.query('REPLACE INTO friend_messages (chat_id, id, from_client_id, to_client_id, message, created_at) VALUES (?,?,?,?,?,?)',
+                    [chatId, m.id, m.fromClientId, m.toClientId, m.message, m.createdAt]);
+            }
+        }
+        return true;
+    } catch (e) { console.error('[Friends][DB] 保存失败:', e.message); return false; }
+}
+async function loadFriends() {
+    if (pool) {
+        const ok = await dbLoadFriendsAll();
+        if (!ok) loadFriendsFromJson();
+    } else {
+        loadFriendsFromJson();
+    }
     for (const r of friendRequests.keys()) {
         const n = parseInt(String(r).replace(/[^0-9]/g, ''), 10);
         if (!isNaN(n) && n >= _friendReqSeq) _friendReqSeq = n + 1;
@@ -2913,7 +3001,9 @@ function saveFriends() {
             messages: msgs
         };
         fs.writeFileSync(FRIENDS_FILE, JSON.stringify(data, null, 2));
-    } catch (e) { console.error('[Friends] 保存失败:', e.message); }
+    } catch (e) { console.error('[Friends] JSON 保存失败:', e.message); }
+    // 落库（DB 模式）：尽力而为，失败不影响本次会话（JSON 已写，本地/无 DB 时仍可工作）
+    if (pool) { dbSaveFriendsAll().catch(() => {}); }
 }
 function loadFriendFiles() {
     try {
@@ -2928,20 +3018,46 @@ function saveFriendFiles() {
     try { fs.writeFileSync(FRIEND_FILES_FILE, JSON.stringify(Array.from(friendFiles.values()), null, 2)); }
     catch (e) { console.error('[Friends] 文件保存失败:', e.message); }
 }
-function loadFriendCodes() {
+function loadFriendCodesFromJson() {
     try {
         if (fs.existsSync(FRIEND_CODES_FILE)) {
             const arr = JSON.parse(fs.readFileSync(FRIEND_CODES_FILE, 'utf8')) || [];
             if (Array.isArray(arr)) arr.forEach(e => { if (e && e.clientId && e.code) friendCodes.set(String(e.clientId), normalizeFriendCode(e.code)); });
         }
-    } catch (e) { console.error('[FriendCode] 加载失败:', e.message); }
+    } catch (e) { console.error('[FriendCode] JSON 加载失败:', e.message); }
+}
+async function dbLoadFriendCodesAll() {
+    if (!pool) return false;
+    try {
+        const [rows] = await pool.query('SELECT client_id, code FROM friend_codes');
+        rows.forEach(r => friendCodes.set(String(r.client_id), normalizeFriendCode(r.code)));
+        return true;
+    } catch (e) { console.error('[FriendCode][DB] 加载失败:', e.message); return false; }
+}
+async function dbSaveFriendCodesAll() {
+    if (!pool) return false;
+    try {
+        for (const [clientId, code] of friendCodes.entries()) {
+            await pool.query('REPLACE INTO friend_codes (client_id, code) VALUES (?,?)', [String(clientId), code]);
+        }
+        return true;
+    } catch (e) { console.error('[FriendCode][DB] 保存失败:', e.message); return false; }
+}
+async function loadFriendCodes() {
+    if (pool) {
+        const ok = await dbLoadFriendCodesAll();
+        if (!ok) loadFriendCodesFromJson();
+    } else {
+        loadFriendCodesFromJson();
+    }
 }
 function saveFriendCodes() {
     ensureDataDir();
     try {
         const data = Array.from(friendCodes.entries()).map(([clientId, code]) => ({ clientId, code }));
         fs.writeFileSync(FRIEND_CODES_FILE, JSON.stringify(data, null, 2));
-    } catch (e) { console.error('[FriendCode] 保存失败:', e.message); }
+    } catch (e) { console.error('[FriendCode] JSON 保存失败:', e.message); }
+    if (pool) { dbSaveFriendCodesAll().catch(() => {}); }
 }
 
 // ===== 好友赠送：礼物记录（JSON 文件持久化，与好友系统同策略，避免 filess.io 连接上限）=====
@@ -2970,6 +3086,31 @@ function saveGifts() {
     catch (e) { console.error('[Gifts] 保存失败:', e.message); }
 }
 function areFriends(a, b) { return friendships.has(friendshipKey(a, b)); }
+// 返回某玩家的全部好友 clientId 数组（双向）
+function getFriendsOf(clientId) {
+    const out = [];
+    clientId = String(clientId || '');
+    if (!clientId) return out;
+    for (const f of friendships.values()) {
+        if (f.userA === clientId) out.push(f.userB);
+        else if (f.userB === clientId) out.push(f.userA);
+    }
+    return out;
+}
+// 好友上线提醒：向该玩家的所有在线好友广播一条 friend-online 事件。
+// 仅在「刚从离线变为在线」时调用（调用方负责 wasOnline 判断），避免重复打扰。
+function notifyFriendsOnline(id, name) {
+    try {
+        const _hide = (getEffectiveUISettings(id) || {}).onlineStatus === 'hidden';
+        if (_hide) return; // 设为「隐藏」则不向好友广播上线
+        const friends = getFriendsOf(id);
+        for (const fid of friends) {
+            if (onlinePlayers.has(fid)) {
+                pushToNotificationSocket(fid, 'friend-online', { friendClientId: id, friendName: (name && String(name).trim()) || '玩家' });
+            }
+        }
+    } catch (e) { /* 不影响主流程 */ }
+}
 // 找到 a、b 之间处于 pending 的请求（任意方向），返回该请求或 null
 function findPendingRequest(a, b) {
     for (const r of friendRequests.values()) {
@@ -3111,16 +3252,18 @@ app.post('/api/friends/request', (req, res) => {
         }
         const id = 'fr_' + Date.now().toString(36) + '_' + (_friendReqSeq++);
         const now = new Date().toISOString();
+        const reqMessage = (req.body && req.body.message) ? String(req.body.message).slice(0, 200) : '';
         const reqObj = {
             id, fromClientId, fromName: (fromName || '').toString().slice(0, 24),
             toClientId, toName: (toName || '').toString().slice(0, 24),
+            message: reqMessage,
             status: 'pending', createdAt: now, updatedAt: now
         };
         friendRequests.set(id, reqObj);
         saveFriends();
         pushToNotificationSocket(toClientId, 'friend-request-received', {
             requestId: id, fromClientId, fromName: reqObj.fromName, toClientId, toName: reqObj.toName, createdAt: now,
-            friendCode: inCode
+            friendCode: inCode, message: reqMessage
         });
         console.log(`[Friends] ${reqObj.fromName}(${fromClientId}) 请求添加 ${reqObj.toName}(${toClientId}) 为好友`);
         res.json({ success: true, requestId: id });
@@ -3234,6 +3377,41 @@ app.get('/api/friends/list', (req, res) => {
     }
 });
 
+// 你可能认识：基于「共同好友」推荐（排除自己、现有好友；按共同好友数排序，取前 N）
+app.get('/api/friend-suggestions', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, suggestions: [] });
+        const myFriends = new Set(getFriendsOf(clientId));
+        const seen = new Set([clientId]);
+        myFriends.forEach(f => seen.add(f));
+        const mutual = {};
+        for (const fid of myFriends) {
+            for (const cand of getFriendsOf(fid)) {
+                if (seen.has(cand)) continue;
+                mutual[cand] = (mutual[cand] || 0) + 1;
+            }
+        }
+        const list = Object.keys(mutual).map(cid => {
+            const op = onlinePlayers.get(cid) || {};
+            const prof = homeProfiles.get(cid) || {};
+            return {
+                clientId: cid,
+                name: (op.name || prof.name || '玩家').toString(),
+                avatar: prof.avatar || '😀',
+                color: prof.color || '#4CAF50',
+                online: !!onlinePlayers.has(cid),
+                mutual: mutual[cid]
+            };
+        });
+        list.sort((a, b) => (b.mutual - a.mutual) || ((b.online ? 1 : 0) - (a.online ? 1 : 0)) || String(a.name).localeCompare(String(b.name)));
+        res.json({ success: true, suggestions: list.slice(0, 12) });
+    } catch (e) {
+        console.error('[Friends] 推荐失败:', e);
+        res.status(500).json({ success: false, message: '推荐失败' });
+    }
+});
+
 // ===== 管理员：好友关系监管（查看全部 / 筛选 / 删除 / 聊天监管代发）=====
 function _resolveFriendName(clientId) {
     const op = onlinePlayers.get(clientId) || {};
@@ -3330,6 +3508,44 @@ app.post('/api/admin/friends/:a/:b/message', requireAdminAuth, (req, res) => {
     }
 });
 
+// 管理员删除好友私聊消息（按消息 id，不要求仍为好友）
+app.delete('/api/admin/friends/:a/:b/messages/:id', requireAdminAuth, (req, res) => {
+    try {
+        const k = friendshipKey(req.params.a, req.params.b);
+        const id = req.params.id;
+        if (!friendMessages.has(k)) return res.json({ success: false, message: '无聊天记录' });
+        const arr = friendMessages.get(k);
+        const idx = arr.findIndex(m => m.id === id);
+        if (idx < 0) return res.json({ success: false, message: '消息不存在' });
+        arr.splice(idx, 1);
+        saveFriends();
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 管理员编辑好友私聊消息（按消息 id，修改文本）
+app.put('/api/admin/friends/:a/:b/messages/:id', requireAdminAuth, (req, res) => {
+    try {
+        const k = friendshipKey(req.params.a, req.params.b);
+        const id = req.params.id;
+        const text = (req.body && req.body.message || '').toString();
+        if (!text.trim()) return res.json({ success: false, message: '消息不能为空' });
+        if (!friendMessages.has(k)) return res.json({ success: false, message: '无聊天记录' });
+        const arr = friendMessages.get(k);
+        const m = arr.find(x => x.id === id);
+        if (!m) return res.json({ success: false, message: '消息不存在' });
+        m.message = text.slice(0, 2000);
+        m.edited = true;
+        m.editedAt = new Date().toISOString();
+        saveFriends();
+        res.json({ success: true, message: m });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '编辑失败' });
+    }
+});
+
 // 查询两人关系（用于个人主页按钮状态）
 app.get('/api/friends/relation', (req, res) => {
     try {
@@ -3377,6 +3593,23 @@ app.post('/api/friends/message', (req, res) => {
     } catch (e) {
         console.error('[Friends] 发送消息失败:', e);
         res.status(500).json({ success: false, message: '发送失败' });
+    }
+});
+// 好友「戳一戳」轻量互动：校验好友关系后向对方推送 friend-poke（不进聊天记录）
+app.post('/api/friend-poke', (req, res) => {
+    try {
+        const { fromClientId, toClientId, fromName } = req.body || {};
+        if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
+        if (fromClientId === toClientId) return res.json({ success: false, message: '不能戳自己' });
+        if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们还不是好友' });
+        pushToNotificationSocket(toClientId, 'friend-poke', {
+            fromCid: fromClientId,
+            fromName: (fromName || '').toString().slice(0, 24)
+        });
+        res.json({ success: true });
+    } catch (e) {
+        console.error('[Friends] 戳一戳失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
     }
 });
 // 上传聊天文件（好友之间）：返回 fileId，聊天里只传 fileId + 文件名，避免 2000 字上限截断
@@ -3796,6 +4029,7 @@ app.post('/api/player-online', (req, res) => {
         const role = getUserRole(id);
         // 平台来源：微信小程序内嵌 web-view 上报 'miniprogram'，普通浏览器上报 'web'（默认 web）
         const platform = (req.body && req.body.platform) ? String(req.body.platform).slice(0, 20) : 'web';
+        const wasOnline = onlinePlayers.has(id); // 用于「好友上线提醒」去重
         onlinePlayers.set(id, {
             id: id,
             name: (name && String(name).trim()) || existing.name || '玩家',
@@ -3806,6 +4040,8 @@ app.post('/api/player-online', (req, res) => {
             role: role,
             platform: platform
         });
+        // 好友上线提醒：刚从离线变为在线时，向其在线好友广播 friend-online
+        if (!wasOnline) notifyFriendsOnline(id, name);
         onlineSockets.set(id, 'rest');
         // 好友码：服务端权威随机码（客户端首次上报时采用其本地码，之后恒定不变）
         const resolvedFriendCode = ensureFriendCode(id, (req.body && req.body.friendCode) ? String(req.body.friendCode) : '');
@@ -5469,6 +5705,7 @@ io.on('connection', (socket) => {
         try {
         const { id, name, coins, stars, unlockedLevel, completedLevels, puzzleCompletedLevels, customCompletedLevels, achievements, totalPlayTime, gameStats, gamestate, uiSettings } = data || {};
         if (!id) return;
+        const wasOnline = onlinePlayers.has(id); // 用于「好友上线提醒」去重：仅离线→在线时通知
         const ip = getClientIp(socket.request);
         const role = getUserRole(id);
         // 客户端上报的 UI 设置（供管理员后台查看/修改）
@@ -5482,6 +5719,8 @@ io.on('connection', (socket) => {
             ip: ip,
             role: role
         });
+        // 好友上线提醒：刚从离线变为在线时，向其在线好友广播 friend-online（wasOnline 为 false 才发，避免重复打扰）
+        if (!wasOnline) notifyFriendsOnline(id, name);
         // 实时把当前角色推送给客户端（管理员/超级管理员据此开放调试信息与踢人权限）
         socket.emit('role-info', { role: role });
         // 若管理员已远程覆盖该玩家设置，连接时即下发，使其立即生效
@@ -12119,9 +12358,9 @@ server.listen(PORT, () => {
     await loadWeeklySkinTheme();
     await loadAccounts();
     await loadHomeProfiles();
-    loadFriends();             // 好友请求 / 好友关系 / 私聊记录（JSON 文件持久化）
+    await loadFriends();             // 好友请求 / 好友关系 / 私聊记录（MySQL 优先，JSON 兜底）
     loadFriendFiles();          // 好友聊天文件传输（JSON 等小文件，独立存储）
-    loadFriendCodes();          // 好友码（服务端权威随机码，持久化）
+    await loadFriendCodes();          // 好友码（服务端权威随机码，MySQL 优先，JSON 兜底）
     loadGifts();                // 好友赠送礼物记录（JSON 文件持久化）
     await loadMazes();         // DB 模式下从 popular_mazes 表载入热门迷宫到内存（与全局配置同模式）
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
