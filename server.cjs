@@ -32,6 +32,9 @@ const SUPERADMIN_PASSWORD_PATH = path.join(__dirname, 'superadmin-password.txt')
 // 可通过环境变量 DATA_DIR 指向一块「持久磁盘」，否则遥测/审计会在重启后丢失。
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 
+// 服务器音乐库（管理员在后台维护、可推送给玩家客户端播放）：data/server-music.json
+const SERVER_MUSIC_FILE = path.join(DATA_DIR, 'server-music.json');
+
 // ===== MySQL 数据层（默认连接已写入；可用同名环境变量覆盖）=====
 // 连接配置优先级：process.env.DATABASE_URL > 环境变量 DB_* > 下面写死的默认值
 let pool = null;
@@ -1570,6 +1573,89 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 // 管理后台与超级管理员后台页面（游戏 403 拦截已排除这两个路径）
 app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'superadmin.html')));
+
+// ===== 音乐目录访问 API =====
+// 通过 /music/ 访问服务器根目录下的 music 文件夹：
+//   GET /music/         -> 仅以 HTTP 状态码表示目录是否可访问（不返回内容）
+//   GET /music/:file    -> 以正确 MIME 流式返回单个音频文件（支持 Range 断点续传）
+const MUSIC_DIR = path.join(__dirname, 'music');
+// 确保目录存在，避免首次访问直接 500
+if (!fs.existsSync(MUSIC_DIR)) {
+    try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch (e) { /* ignore */ }
+}
+// 请求级兜底：即便运行时目录被删除，也能重新建好，避免列出/读取时抛 ENOENT
+function ensureMusicDir() {
+    try { if (!fs.existsSync(MUSIC_DIR)) fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch (e) {}
+}
+
+// 允许访问的音频扩展名 -> Content-Type
+const MUSIC_MIME = {
+    '.mp3': 'audio/mpeg',
+    '.ogg': 'audio/ogg',
+    '.oga': 'audio/ogg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.flac': 'audio/flac',
+    '.wma': 'audio/x-ms-wma',
+    '.mid': 'audio/midi',
+    '.midi': 'audio/midi',
+};
+
+// 目录请求：不返回任何内容，仅以 HTTP 状态码表示是否成功（200=成功，500=失败）
+app.get('/music/', (req, res) => {
+    ensureMusicDir();
+    try {
+        fs.readdirSync(MUSIC_DIR); // 仅确认目录可读，不返回文件清单
+        res.status(200).end();
+    } catch (err) {
+        res.status(500).end();
+    }
+});
+
+// 单个文件访问（带防目录穿越 + Range 支持）
+app.get('/music/:file', (req, res) => {
+    ensureMusicDir();
+    let decoded;
+    try { decoded = decodeURIComponent(req.params.file); } catch (e) { decoded = req.params.file; }
+    const filePath = path.normalize(path.join(MUSIC_DIR, decoded));
+    // 必须严格限定在 MUSIC_DIR 之内，防止 ../../ 穿越
+    if (filePath !== MUSIC_DIR && !filePath.startsWith(MUSIC_DIR + path.sep)) {
+        return res.status(400).json({ error: '非法路径' });
+    }
+    fs.stat(filePath, (err, stat) => {
+        if (err || !stat.isFile()) {
+            return res.status(404).json({ error: '文件不存在' });
+        }
+        const ext = path.extname(filePath).toLowerCase();
+        const mime = MUSIC_MIME[ext] || 'application/octet-stream';
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Accept-Ranges', 'bytes');
+        const total = stat.size;
+        const range = req.headers.range;
+        if (range) {
+            // 支持 Range 断点续传 / 拖动播放：返回 206
+            const m = /bytes=(\d*)-(\d*)/.exec(range);
+            const start = m && m[1] ? parseInt(m[1], 10) : 0;
+            const end = m && m[2] ? parseInt(m[2], 10) : total - 1;
+            if (isNaN(start) || isNaN(end) || start > end || end >= total) {
+                res.setHeader('Content-Range', `bytes */${total}`);
+                return res.status(416).end();
+            }
+            res.status(206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+            res.setHeader('Content-Length', end - start + 1);
+            const stream = fs.createReadStream(filePath, { start, end });
+            stream.on('error', () => { if (!res.headersSent) res.status(500).end(); });
+            stream.pipe(res);
+        } else {
+            res.setHeader('Content-Length', total);
+            const stream = fs.createReadStream(filePath);
+            stream.on('error', () => { if (!res.headersSent) res.status(500).end(); });
+            stream.pipe(res);
+        }
+    });
+});
 
 // 定义服务器的版本号
 const SERVER_VERSION = "1.15.7";
@@ -3951,6 +4037,144 @@ app.post('/api/admin/users/kick-all', requireAdminAuth, (req, res) => {
     } catch (e) {
         console.error('[API] 批量踢出失败:', e.message);
         res.status(500).json({ success: false, message: '批量踢出失败' });
+    }
+});
+
+// ===== 服务器音乐库（管理员后台维护，可推送到玩家客户端播放）=====
+// 数据：data/server-music.json -> [{ id, name, url, createdAt, addedBy }]
+// url 支持：① 外部链接（http/https 完整 URL）；② 本服务器 music 目录相对路径（如 /music/bgm.mp3）
+let serverMusicCache = null;
+function loadServerMusic() {
+    if (serverMusicCache) return serverMusicCache;
+    try {
+        if (fs.existsSync(SERVER_MUSIC_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(SERVER_MUSIC_FILE, 'utf8'));
+            serverMusicCache = Array.isArray(arr) ? arr : [];
+        } else {
+            serverMusicCache = [];
+        }
+    } catch (e) {
+        serverMusicCache = [];
+    }
+    return serverMusicCache;
+}
+function saveServerMusic(list) {
+    serverMusicCache = Array.isArray(list) ? list : [];
+    try {
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(SERVER_MUSIC_FILE, JSON.stringify(serverMusicCache, null, 2), 'utf8');
+    } catch (e) {
+        console.error('[Music] 保存音乐库失败:', e.message);
+    }
+}
+
+// 列出音乐库
+app.get('/api/admin/music', requireAdminAuth, (req, res) => {
+    res.json({ success: true, list: loadServerMusic() });
+});
+
+// 新增一首音乐（可导入链接）：body { name, url }
+app.post('/api/admin/music', requireAdminAuth, (req, res) => {
+    try {
+        const name = (req.body && req.body.name ? String(req.body.name) : '').trim().slice(0, 120);
+        let url = (req.body && req.body.url ? String(req.body.url) : '').trim();
+        if (!name) return res.status(400).json({ success: false, message: '请填写音乐名称' });
+        if (!url) return res.status(400).json({ success: false, message: '请填写音乐链接/路径' });
+        // 归一化：允许 http(s) 外部链接，或服务器 music 目录相对路径 /music/xxx
+        if (/^https?:\/\//i.test(url)) {
+            // 外部链接：仅做基本形态校验
+            if (!/^https?:\/\/\S+\.\S+/i.test(url)) return res.status(400).json({ success: false, message: '音乐链接格式不正确' });
+        } else {
+            // 非 http 链接：允许 /music/... 形式的本服务器音乐目录路径；其它一律拒绝（防目录穿越）
+            if (!/^\/music\//i.test(url)) {
+                return res.status(400).json({ success: false, message: '仅支持 http(s) 外链或 /music/ 开头的本服务器音乐路径' });
+            }
+        }
+        const list = loadServerMusic();
+        const item = {
+            id: 'sm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            name,
+            url,
+            createdAt: new Date().toISOString(),
+            addedBy: (req.admin && (req.admin.username || req.admin.id)) || 'admin'
+        };
+        list.push(item);
+        saveServerMusic(list);
+        appendAudit('admin', 'music-add', `新增服务器音乐「${name}」(${url})`);
+        res.json({ success: true, item });
+    } catch (e) {
+        console.error('[Music] 新增失败:', e.message);
+        res.status(500).json({ success: false, message: '新增失败' });
+    }
+});
+
+// 删除一首音乐：/api/admin/music/:id
+app.delete('/api/admin/music/:id', requireAdminAuth, (req, res) => {
+    try {
+        const id = req.params.id;
+        const list = loadServerMusic();
+        const idx = list.findIndex(m => m.id === id);
+        if (idx < 0) return res.status(404).json({ success: false, message: '音乐不存在' });
+        const removed = list.splice(idx, 1)[0];
+        saveServerMusic(list);
+        appendAudit('admin', 'music-delete', `删除服务器音乐「${removed.name}」(${removed.url})`);
+        res.json({ success: true, message: '已删除' });
+    } catch (e) {
+        console.error('[Music] 删除失败:', e.message);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 在线客户端列表（供后台单独指定某客户端推送音乐）：返回有活跃 socket 的玩家
+app.get('/api/admin/online-users', requireAdminAuth, (req, res) => {
+    const users = [];
+    for (const [clientId, sockId] of onlineSockets.entries()) {
+        if (!sockId || sockId === 'rest') continue; // 仅含真正建立 socket 的在线玩家
+        const p = onlinePlayers.get(clientId);
+        users.push({ clientId, name: (p && p.name) ? p.name : clientId });
+    }
+    res.json({ success: true, users });
+});
+
+// 控制客户端音乐：body { target:'all'|'client', clientId?, action:'play'|'stop'|'pause', trackId? }
+app.post('/api/admin/music/control', requireAdminAuth, (req, res) => {
+    try {
+        const { target, clientId, action, trackId } = req.body || {};
+        if (!action || !['play', 'stop', 'pause'].includes(action)) {
+            return res.status(400).json({ success: false, message: 'action 必须为 play/stop/pause' });
+        }
+        // 解析要播放的曲目（仅 play 需要 url）
+        let trackName = '', trackUrl = '';
+        if (action === 'play') {
+            if (!trackId) return res.status(400).json({ success: false, message: '请选择要播放的音乐' });
+            const list = loadServerMusic();
+            const item = list.find(m => m.id === trackId);
+            if (!item) return res.status(404).json({ success: false, message: '音乐不存在' });
+            trackName = item.name;
+            trackUrl = item.url;
+        }
+        const payload = { action, name: trackName, url: trackUrl, by: (req.admin && (req.admin.username || req.admin.id)) || 'admin' };
+        let sent = 0;
+        if (target === 'client') {
+            if (!clientId) return res.status(400).json({ success: false, message: '请指定目标客户端' });
+            pushToClientSocket(clientId, 'admin-music-control', payload);
+            sent = 1;
+            appendAudit('admin', 'music-control', `向客户端 ${clientId} 推送音乐指令：${action}${trackName ? '（' + trackName + '）' : ''}`);
+        } else {
+            // 全部客户端：遍历所有活跃 socket 推送
+            for (const [uid, sockId] of onlineSockets.entries()) {
+                if (!sockId || sockId === 'rest') continue;
+                const playerSocket = io.sockets.sockets.get(sockId);
+                if (!playerSocket) continue;
+                playerSocket.emit('admin-music-control', payload);
+                sent++;
+            }
+            appendAudit('admin', 'music-control', `向全部在线客户端推送音乐指令：${action}${trackName ? '（' + trackName + '）' : ''}（${sent} 人）`);
+        }
+        res.json({ success: true, sent, message: `已推送：${action}${trackName ? '《' + trackName + '》' : ''}，覆盖 ${sent} 个客户端` });
+    } catch (e) {
+        console.error('[Music] 控制失败:', e.message);
+        res.status(500).json({ success: false, message: '控制失败' });
     }
 });
 
@@ -10053,6 +10277,65 @@ function loadMonthCardData() {
 function saveMonthCardApplications() { try { fs.writeFileSync(MONTHCARD_APPLICATIONS_FILE, JSON.stringify(Array.from(monthCardApplications.values()), null, 2)); } catch (e) {} }
 function saveMonthCardGrants() { try { fs.writeFileSync(MONTHCARD_GRANTS_FILE, JSON.stringify(Object.fromEntries(monthCardGrants), null, 2)); } catch (e) {} }
 loadMonthCardData();
+
+// ===== 客户端错误上报（玩家端运行时错误，admin 后台可查看）=====
+const CLIENT_ERRORS_FILE = path.join(DATA_DIR, 'client-errors.json');
+let clientErrors = []; // {id, clientId, playerName, message, stack, context, gameVersion, userAgent, time}
+let _clientErrorSeq = 0;
+let _clientErrorRate = new Map(); // clientId -> 最近 5s 内上报时间戳数组（简单频率限制，防刷屏/死循环）
+function loadClientErrors() {
+    try { const a = JSON.parse(fs.readFileSync(CLIENT_ERRORS_FILE, 'utf8')); if (Array.isArray(a)) clientErrors = a; } catch (e) {}
+}
+function saveClientErrors() { try { fs.writeFileSync(CLIENT_ERRORS_FILE, JSON.stringify(clientErrors.slice(-500), null, 2)); } catch (e) {} }
+loadClientErrors();
+function recordClientError(entry) {
+    const now = Date.now();
+    const wid = entry.clientId || 'anonymous';
+    let arr = _clientErrorRate.get(wid) || [];
+    arr = arr.filter(t => now - t < 5000);
+    if (arr.length >= 5) return false; // 单 clientId 每 5 秒最多 5 条
+    arr.push(now);
+    _clientErrorRate.set(wid, arr);
+    _clientErrorSeq += 1;
+    entry.id = _clientErrorSeq + '-' + now;
+    entry.time = entry.time || now;
+    clientErrors.push(entry);
+    if (clientErrors.length > 500) clientErrors = clientErrors.slice(-500);
+    saveClientErrors();
+    return true;
+}
+app.post('/api/client-error', (req, res) => {
+    try {
+        const b = req.body || {};
+        const msg = String(b.message || '').slice(0, 2000);
+        if (!msg) return res.status(400).json({ success: false, message: 'message 不能为空' });
+        const entry = {
+            clientId: String(b.clientId || '').slice(0, 128),
+            playerName: String(b.playerName || '').slice(0, 64),
+            message: msg,
+            stack: String(b.stack || '').slice(0, 4000),
+            context: String(b.context || '').slice(0, 500),
+            gameVersion: String(b.gameVersion || '').slice(0, 64),
+            userAgent: String(b.userAgent || (req.headers['user-agent'] || '')).slice(0, 300),
+            time: (typeof b.time === 'number') ? b.time : Date.now()
+        };
+        const ok = recordClientError(entry);
+        return res.json({ success: true, recorded: ok });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: '记录失败' });
+    }
+});
+app.get('/api/admin/client-errors', requireAdminAuth, (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+    res.json({ success: true, errors: clientErrors.slice().reverse().slice(0, limit), total: clientErrors.length });
+});
+app.delete('/api/admin/client-errors', requireAdminAuth, (req, res) => {
+    clientErrors = [];
+    _clientErrorRate.clear();
+    try { if (fs.existsSync(CLIENT_ERRORS_FILE)) fs.writeFileSync(CLIENT_ERRORS_FILE, '[]'); } catch (_) {}
+    appendAudit('admin', 'clear-client-errors', '清空了全部客户端错误上报', req);
+    res.json({ success: true, message: '已清空客户端错误上报' });
+});
 
 app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
     try {
