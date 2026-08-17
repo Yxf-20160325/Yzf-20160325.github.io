@@ -3188,6 +3188,25 @@ app.post('/api/friends/respond', (req, res) => {
     }
 });
 
+// 删除好友（双向解除关系）
+app.post('/api/friends/remove', (req, res) => {
+    try {
+        const { clientId, otherClientId } = req.body || {};
+        if (!clientId || !otherClientId) return res.json({ success: false, message: '缺少参数' });
+        if (clientId === otherClientId) return res.json({ success: false, message: '不能操作自己' });
+        const key = friendshipKey(clientId, otherClientId);
+        if (!friendships.has(key)) return res.json({ success: false, message: '你们不是好友' });
+        friendships.delete(key);
+        saveFriends();
+        try { pushToNotificationSocket(otherClientId, 'friend-removed', { friendClientId: clientId }); } catch (e) {}
+        console.log(`[Friends] ${clientId} 删除了好友 ${otherClientId}`);
+        res.json({ success: true });
+    } catch (e) {
+        console.error('[Friends] 删除好友失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
 // 好友列表（含在线状态）
 app.get('/api/friends/list', (req, res) => {
     try {
@@ -3212,6 +3231,102 @@ app.get('/api/friends/list', (req, res) => {
         res.json({ success: true, friends });
     } catch (e) {
         res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// ===== 管理员：好友关系监管（查看全部 / 筛选 / 删除 / 聊天监管代发）=====
+function _resolveFriendName(clientId) {
+    const op = onlinePlayers.get(clientId) || {};
+    if (op.name) return String(op.name);
+    const pf = homeProfiles.get(clientId) || {};
+    if (pf.name) return String(pf.name);
+    return '玩家';
+}
+// 列出全部好友关系（支持按 clientId / 昵称过滤；online=1 仅在线）
+app.get('/api/admin/friends', requireAdminAuth, (req, res) => {
+    try {
+        const q = (req.query.q || '').toString().trim().toLowerCase();
+        const onlineOnly = req.query.online === '1';
+        const list = [];
+        for (const f of friendships.values()) {
+            const a = f.userA, b = f.userB;
+            const na = _resolveFriendName(a), nb = _resolveFriendName(b);
+            const aOn = onlinePlayers.has(a), bOn = onlinePlayers.has(b);
+            if (onlineOnly && !aOn && !bOn) continue;
+            if (q) {
+                const hay = (a + ' ' + b + ' ' + na + ' ' + nb).toLowerCase();
+                if (hay.indexOf(q) < 0) continue;
+            }
+            list.push({ userA: a, userAName: na, userAOnline: aOn, userB: b, userBName: nb, userBOnline: bOn, createdAt: f.createdAt || null });
+        }
+        list.sort((x, y) => (y.createdAt || '').localeCompare(x.createdAt || ''));
+        res.json({ success: true, friends: list, total: friendships.size });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 管理员删除好友关系（双向解除 + 通知双方；聊天记录保留以便监管追溯）
+app.delete('/api/admin/friends', requireAdminAuth, (req, res) => {
+    try {
+        const { clientId, otherClientId } = req.body || {};
+        if (!clientId || !otherClientId) return res.json({ success: false, message: '缺少参数' });
+        const key = friendshipKey(clientId, otherClientId);
+        if (!friendships.has(key)) return res.json({ success: false, message: '双方不是好友关系' });
+        friendships.delete(key);
+        saveFriends();
+        try { pushToNotificationSocket(clientId, 'friend-removed', { friendClientId: otherClientId }); } catch (e) {}
+        try { pushToNotificationSocket(otherClientId, 'friend-removed', { friendClientId: clientId }); } catch (e) {}
+        res.json({ success: true, message: '已解除好友关系' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 查看两人好友私聊记录（管理员监管，不要求在线 / 好友）
+app.get('/api/admin/friends/:a/:b/messages', requireAdminAuth, (req, res) => {
+    try {
+        const k = friendshipKey(req.params.a, req.params.b);
+        const msgs = friendMessages.has(k) ? friendMessages.get(k).slice() : [];
+        msgs.sort((x, y) => (x.createdAt || '').localeCompare(y.createdAt || ''));
+        res.json({ success: true, messages: msgs });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 管理员代发好友私聊消息（以好友双方之一身份发送，标记 admin）
+app.post('/api/admin/friends/:a/:b/message', requireAdminAuth, (req, res) => {
+    try {
+        const a = req.params.a, b = req.params.b;
+        const { fromClientId, message } = req.body || {};
+        if (!fromClientId || (fromClientId !== a && fromClientId !== b)) return res.json({ success: false, message: '发送者必须是好友双方之一' });
+        if (!areFriends(a, b)) return res.json({ success: false, message: '双方不是好友，无法代发' });
+        const text = (message || '').toString();
+        if (!text.trim()) return res.json({ success: false, message: '消息不能为空' });
+        const toClientId = (fromClientId === a) ? b : a;
+        const msg = {
+            id: 'fm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+            fromClientId, toClientId,
+            message: text.slice(0, 2000),
+            createdAt: new Date().toISOString(),
+            admin: true
+        };
+        const k = friendshipKey(a, b);
+        if (!friendMessages.has(k)) friendMessages.set(k, []);
+        friendMessages.get(k).push(msg);
+        const arr = friendMessages.get(k);
+        if (arr.length > 500) friendMessages.set(k, arr.slice(-500));
+        saveFriends();
+        try {
+            pushToNotificationSocket(toClientId, 'friend-message-received', {
+                fromClientId, fromName: _resolveFriendName(fromClientId), toClientId,
+                message: msg.message, createdAt: msg.createdAt, id: msg.id, admin: true
+            });
+        } catch (e) {}
+        res.json({ success: true, message: msg });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '发送失败' });
     }
 });
 
