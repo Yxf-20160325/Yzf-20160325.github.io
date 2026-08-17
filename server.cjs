@@ -1094,7 +1094,14 @@ const DEFAULT_UI_SETTINGS = {
     joystickDeadZone: 15,
     joystickRadius: 70,
     joystickPosition: 'bottom-right',
-    uiMode: 'new'
+    uiMode: 'new',
+    // ===== 社交与隐私设置（2026-08-17 新增）=====
+    allowSpectate: true,        // 是否允许他人观战本房间
+    roomJoinConfirm: false,     // 新玩家入房是否需房主确认
+    friendAddPolicy: 'all',     // 谁可加我好友：all=所有人 / code=仅好友码 / closed=关闭
+    onlineStatus: 'all',        // 在线状态可见性：all=所有人可见 / hidden=隐藏（不在搜索中出现）
+    profileScope: 'all',        // 个人资料公开范围：all=所有人 / friends=仅好友 / self=仅自己
+    blocklist: []               // 屏蔽名单：[{cid, name}]，按稳定 clientId 屏蔽
 };
 // 结构：userId -> { admin: <obj|null>, client: <obj|null> }
 // admin 为管理员远程设置的覆盖项；client 为客户端最近一次上报的设置。
@@ -2842,6 +2849,38 @@ const FRIEND_FILES_FILE = path.join(DATA_DIR, 'friend_files.json');
 let friendFiles = new Map(); // fileId -> {id, fromClientId, toClientId, name, content, createdAt}
 
 function friendshipKey(a, b) { return [String(a), String(b)].sort().join('|'); }
+// ===== 好友码：服务端持久化的随机码（不可由 clientId 推导，抗暴力），用于「仅好友码」添加策略 =====
+// 旧实现是 clientId 末 6 位确定性派生，陌生人拿到 clientId 即可反推；现改为随机 8 位码。
+// 字母表排除易混淆字符 0/O/1/I/L，32 选 1 → 约 32^8 ≈ 1.1e12 组合，无法暴力或推测。
+const FRIEND_CODES_FILE = path.join(DATA_DIR, 'friend_codes.json');
+const FRIEND_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+let friendCodes = new Map(); // clientId -> 随机好友码（服务端权威）
+function normalizeFriendCode(c) { return String(c || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase(); }
+function generateFriendCode() {
+    const bytes = require('crypto').randomBytes(8);
+    let s = '';
+    for (let i = 0; i < 8; i++) s += FRIEND_CODE_ALPHABET[bytes[i] % FRIEND_CODE_ALPHABET.length];
+    return s;
+}
+function friendCodeExists(code) {
+    code = normalizeFriendCode(code);
+    for (const v of friendCodes.values()) if (normalizeFriendCode(v) === code) return true;
+    return false;
+}
+// 取好友码：已存在则复用；否则优先采用客户端上报的本地码（若合法且唯一），否则随机生成。恒定不变。
+function ensureFriendCode(clientId, preferred) {
+    clientId = String(clientId || '');
+    if (!clientId) return '';
+    const existing = friendCodes.get(clientId);
+    if (existing) return existing;
+    let code = preferred ? normalizeFriendCode(preferred) : '';
+    if (!code || code.length < 6 || code.length > 12 || friendCodeExists(code)) code = generateFriendCode();
+    while (friendCodeExists(code)) code = generateFriendCode();
+    friendCodes.set(clientId, code);
+    saveFriendCodes();
+    return code;
+}
+function friendCodeOf(clientId) { return ensureFriendCode(clientId); }
 
 function loadFriends() {
     try {
@@ -2888,6 +2927,21 @@ function saveFriendFiles() {
     ensureDataDir();
     try { fs.writeFileSync(FRIEND_FILES_FILE, JSON.stringify(Array.from(friendFiles.values()), null, 2)); }
     catch (e) { console.error('[Friends] 文件保存失败:', e.message); }
+}
+function loadFriendCodes() {
+    try {
+        if (fs.existsSync(FRIEND_CODES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(FRIEND_CODES_FILE, 'utf8')) || [];
+            if (Array.isArray(arr)) arr.forEach(e => { if (e && e.clientId && e.code) friendCodes.set(String(e.clientId), normalizeFriendCode(e.code)); });
+        }
+    } catch (e) { console.error('[FriendCode] 加载失败:', e.message); }
+}
+function saveFriendCodes() {
+    ensureDataDir();
+    try {
+        const data = Array.from(friendCodes.entries()).map(([clientId, code]) => ({ clientId, code }));
+        fs.writeFileSync(FRIEND_CODES_FILE, JSON.stringify(data, null, 2));
+    } catch (e) { console.error('[FriendCode] 保存失败:', e.message); }
 }
 
 // ===== 好友赠送：礼物记录（JSON 文件持久化，与好友系统同策略，避免 filess.io 连接上限）=====
@@ -2995,7 +3049,9 @@ app.get('/api/admin/telemetry', requireAdminAuth, async (req, res) => {
 app.get('/api/profile/:clientId', (req, res) => {
     const p = homeProfiles.get(req.params.clientId);
     if (!p) return res.json({ success: true, profile: null });
-    res.json({ success: true, profile: Object.assign({ clientId: req.params.clientId }, p) });
+    // 社交与隐私：附带接收方的「资料公开范围」，供客户端按需隐藏详情
+    const scope = (getEffectiveUISettings(req.params.clientId) || {}).profileScope || 'all';
+    res.json({ success: true, profile: Object.assign({ clientId: req.params.clientId, profileScope: scope }, p) });
 });
 
 // 好友搜索：按显示名搜索当前在线玩家（公开，无鉴权）
@@ -3009,6 +3065,9 @@ app.get('/api/players/search', (req, res) => {
         const out = [];
         for (const [clientId, p] of onlinePlayers.entries()) {
             if (!p) continue;
+            // 社交与隐私：隐藏在线状态的玩家不出现在好友搜索结果中
+            const vis = (getEffectiveUISettings(clientId) || {}).onlineStatus;
+            if (vis === 'hidden') continue;
             const name = (p.name || '').toString();
             // 按显示名 或 clientId 匹配（同名玩家可贴 ID 精确查找）
             if (name.toLowerCase().indexOf(q) !== -1 || clientId.toLowerCase().indexOf(q) !== -1) {
@@ -3042,6 +3101,14 @@ app.post('/api/friends/request', (req, res) => {
         if (fromClientId === toClientId) return res.json({ success: false, message: '不能添加自己为好友' });
         if (areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们已经是好友了' });
         if (findPendingRequest(fromClientId, toClientId)) return res.json({ success: false, message: '好友请求已存在，请等待对方通过' });
+        // 社交与隐私：按接收方「谁可加我好友」策略拦截（closed=关闭；code=需正确好友码）
+        const tSettings = getEffectiveUISettings(toClientId);
+        const tPolicy = (tSettings && tSettings.friendAddPolicy) || 'all';
+        if (tPolicy === 'closed') return res.json({ success: false, message: '对方已关闭好友添加' });
+        const inCode = (req.body && req.body.friendCode) ? normalizeFriendCode(req.body.friendCode) : '';
+        if (tPolicy === 'code' && inCode !== friendCodeOf(toClientId)) {
+            return res.json({ success: false, message: '对方仅接受好友码添加，请填写正确的好友码' });
+        }
         const id = 'fr_' + Date.now().toString(36) + '_' + (_friendReqSeq++);
         const now = new Date().toISOString();
         const reqObj = {
@@ -3052,13 +3119,26 @@ app.post('/api/friends/request', (req, res) => {
         friendRequests.set(id, reqObj);
         saveFriends();
         pushToNotificationSocket(toClientId, 'friend-request-received', {
-            requestId: id, fromClientId, fromName: reqObj.fromName, toClientId, toName: reqObj.toName, createdAt: now
+            requestId: id, fromClientId, fromName: reqObj.fromName, toClientId, toName: reqObj.toName, createdAt: now,
+            friendCode: inCode
         });
         console.log(`[Friends] ${reqObj.fromName}(${fromClientId}) 请求添加 ${reqObj.toName}(${toClientId}) 为好友`);
         res.json({ success: true, requestId: id });
     } catch (e) {
         console.error('[Friends] 发送请求失败:', e);
         res.status(500).json({ success: false, message: '发送失败' });
+    }
+});
+
+// 获取自己的好友码（服务端权威随机码，供个人展示与「仅好友码」校验）
+app.get('/api/friend-code/:clientId', (req, res) => {
+    try {
+        const id = (req.params.clientId || '').toString();
+        if (!id) return res.json({ success: false, message: '缺少 clientId' });
+        const code = friendCodeOf(id);
+        res.json({ success: true, code: code });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
     }
 });
 
@@ -3612,6 +3692,8 @@ app.post('/api/player-online', (req, res) => {
             platform: platform
         });
         onlineSockets.set(id, 'rest');
+        // 好友码：服务端权威随机码（客户端首次上报时采用其本地码，之后恒定不变）
+        const resolvedFriendCode = ensureFriendCode(id, (req.body && req.body.friendCode) ? String(req.body.friendCode) : '');
         // 持久化玩家档案（IP / 金币 / 时长 / 统计 / 游戏状态），供管理后台查看
         // 若管理员已锁定统计（手动改过），则客户端上报不再覆盖 gameStats / totalPlayTime，保留管理员的数值
         const _prof0 = playerProfiles.get(id) || {};
@@ -3656,6 +3738,7 @@ app.post('/api/player-online', (req, res) => {
             ipBanUsername: (rec && rec.username) || null,
             ipBanClientId: (rec && rec.clientId) || null,
             role: role,
+            friendCode: resolvedFriendCode,
             uiSettings: getEffectiveUISettings(id),
             adminOverridden: !!(userSettings.get(id) || {}).admin,
             // admin 分功能封禁状态（封禁单人/解密/多人/聊天），无 socket 的小程序靠此响应生效
@@ -11923,6 +12006,7 @@ server.listen(PORT, () => {
     await loadHomeProfiles();
     loadFriends();             // 好友请求 / 好友关系 / 私聊记录（JSON 文件持久化）
     loadFriendFiles();          // 好友聊天文件传输（JSON 等小文件，独立存储）
+    loadFriendCodes();          // 好友码（服务端权威随机码，持久化）
     loadGifts();                // 好友赠送礼物记录（JSON 文件持久化）
     await loadMazes();         // DB 模式下从 popular_mazes 表载入热门迷宫到内存（与全局配置同模式）
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
