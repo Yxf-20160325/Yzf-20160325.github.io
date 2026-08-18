@@ -240,6 +240,7 @@ const DB_TABLES_SQL = [
         show_shop TINYINT(1) DEFAULT 1,
         description TEXT,
         difficulty VARCHAR(32),
+        is_public TINYINT(1) DEFAULT 0,
         created_at VARCHAR(32),
         updated_at VARCHAR(32),
         INDEX idx_cloud_user (username)
@@ -578,6 +579,15 @@ async function initDatabase() {
                 if (!tfaCols || tfaCols.length === 0) {
                     await pool.query('ALTER TABLE cloud_storage_accounts ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0');
                     console.log('🗄️ 已为 cloud_storage_accounts 表补充 two_factor_enabled 列（二次认证）');
+                }
+                // 迁移：为 cloud_storage_mazes 表补充 is_public 列（云地图公开/私有切换，个人主页展示）
+                const [pmCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='cloud_storage_mazes' AND COLUMN_NAME='is_public'",
+                    [dbName]
+                );
+                if (!pmCols || pmCols.length === 0) {
+                    await pool.query('ALTER TABLE cloud_storage_mazes ADD COLUMN is_public TINYINT(1) NOT NULL DEFAULT 0');
+                    console.log('🗄️ 已为 cloud_storage_mazes 表补充 is_public 列（云地图公开/私有）');
                 }
                 // 补充 cloud_link_accounts 表的 two_factor_enabled 列
                 const [ltfaCols] = await pool.query(
@@ -3232,6 +3242,38 @@ app.get('/api/players/search', (req, res) => {
     }
 });
 
+// 按用户名/客户端ID 查找玩家（含离线；离线玩家档案持久化在 home_profiles 表）
+app.get('/api/players/lookup', async (req, res) => {
+    try {
+        const q = (req.query.q || '').toString().trim().toLowerCase();
+        if (!q) return res.json({ success: true, players: [] });
+        const limit = Math.min(parseInt(req.query.limit) || 20, 30);
+        let rows = [];
+        if (pool) {
+            const [rs] = await pool.query(
+                'SELECT client_id, name, avatar, color, bio FROM home_profiles WHERE LOWER(name) LIKE ? OR LOWER(client_id) LIKE ? ORDER BY updated_at DESC LIMIT ?',
+                ['%' + q + '%', '%' + q + '%', limit]
+            );
+            rows = rs || [];
+        }
+        const out = rows.map(r => {
+            const cid = r.client_id;
+            return {
+                clientId: cid,
+                name: r.name || '玩家',
+                avatar: r.avatar || '😀',
+                color: r.color || '#4CAF50',
+                bio: (r.bio || '').toString().slice(0, 60),
+                online: onlinePlayers.has(cid)
+            };
+        });
+        res.json({ success: true, players: out });
+    } catch (e) {
+        console.error('[Lookup] 玩家查找失败:', e);
+        res.status(500).json({ success: false, message: '查找失败' });
+    }
+});
+
 // ===== 好友系统 REST 接口（公开，无鉴权；与 player-online 等同属小游戏社交接口）=====
 
 // 发送好友请求
@@ -3240,14 +3282,32 @@ app.post('/api/friends/request', (req, res) => {
         const { fromClientId, toClientId, fromName, toName } = req.body || {};
         if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
         if (fromClientId === toClientId) return res.json({ success: false, message: '不能添加自己为好友' });
+        const inCode = (req.body && req.body.friendCode) ? normalizeFriendCode(req.body.friendCode) : '';
+        const targetCode = friendCodeOf(toClientId);
+        // 凭码添加：好友码正确 → 直接成为好友（跳过对方确认与添加策略；对方主动分享过码即视为授权）
+        if (inCode && inCode === targetCode) {
+            if (areFriends(fromClientId, toClientId)) return res.json({ success: true, becameFriends: true, already: true, message: '你们已经是好友了' });
+            // 清除双方之间残留的 pending 请求（避免互加冲突）
+            for (const r of friendRequests.values()) {
+                if (r.status === 'pending' && ((r.fromClientId === fromClientId && r.toClientId === toClientId) || (r.fromClientId === toClientId && r.toClientId === fromClientId))) {
+                    r.status = 'superseded'; r.updatedAt = new Date().toISOString();
+                }
+            }
+            const now = new Date().toISOString();
+            const key = friendshipKey(fromClientId, toClientId);
+            if (!friendships.has(key)) friendships.set(key, { userA: fromClientId, userB: toClientId, createdAt: now });
+            saveFriends();
+            try { pushToNotificationSocket(toClientId, 'friend-accepted', { friendClientId: fromClientId, friendName: (fromName || '').toString().slice(0, 24), viaCode: true }); } catch (e) {}
+            console.log(`[Friends] ${fromName || fromClientId}(${fromClientId}) 凭好友码直接添加 ${toName || toClientId}(${toClientId}) 为好友`);
+            return res.json({ success: true, becameFriends: true });
+        }
         if (areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们已经是好友了' });
         if (findPendingRequest(fromClientId, toClientId)) return res.json({ success: false, message: '好友请求已存在，请等待对方通过' });
         // 社交与隐私：按接收方「谁可加我好友」策略拦截（closed=关闭；code=需正确好友码）
         const tSettings = getEffectiveUISettings(toClientId);
         const tPolicy = (tSettings && tSettings.friendAddPolicy) || 'all';
         if (tPolicy === 'closed') return res.json({ success: false, message: '对方已关闭好友添加' });
-        const inCode = (req.body && req.body.friendCode) ? normalizeFriendCode(req.body.friendCode) : '';
-        if (tPolicy === 'code' && inCode !== friendCodeOf(toClientId)) {
+        if (tPolicy === 'code' && inCode !== targetCode) {
             return res.json({ success: false, message: '对方仅接受好友码添加，请填写正确的好友码' });
         }
         const id = 'fr_' + Date.now().toString(36) + '_' + (_friendReqSeq++);
@@ -3385,6 +3445,13 @@ app.get('/api/friend-suggestions', (req, res) => {
         const myFriends = new Set(getFriendsOf(clientId));
         const seen = new Set([clientId]);
         myFriends.forEach(f => seen.add(f));
+        // 排除已发送 / 已收到的 pending 请求（避免重复打扰）
+        for (const r of friendRequests.values()) {
+            if (r.status === 'pending' && (r.fromClientId === clientId || r.toClientId === clientId)) {
+                seen.add(r.fromClientId === clientId ? r.toClientId : r.fromClientId);
+            }
+        }
+        // 特征1：共同好友计数（主权重）
         const mutual = {};
         for (const fid of myFriends) {
             for (const cand of getFriendsOf(fid)) {
@@ -3392,19 +3459,58 @@ app.get('/api/friend-suggestions', (req, res) => {
                 mutual[cand] = (mutual[cand] || 0) + 1;
             }
         }
+        const myProf = homeProfiles.get(clientId) || {};
+        const myAvatar = myProf.avatar || '';
+        const myRoomId = (onlinePlayers.get(clientId) || {}).roomId || null;
+        const now = Date.now();
+        const DAY = 86400000;
+        // 特征2：与候选的聊天往来（friendMessages，key=friendshipKey "a|b"）
+        const chatCount = {}, chatLast = {};
+        for (const [k, arr] of friendMessages) {
+            const sep = k.indexOf('|');
+            if (sep <= 0 || !Array.isArray(arr)) continue;
+            const a = k.slice(0, sep), b = k.slice(sep + 1);
+            const other = (a === clientId) ? b : ((b === clientId) ? a : null);
+            if (!other || !mutual[other]) continue;
+            chatCount[other] = (chatCount[other] || 0) + arr.length;
+            let last = 0;
+            for (const m of arr) { const t = new Date(m && m.createdAt).getTime(); if (!isNaN(t) && t > last) last = t; }
+            if (last > (chatLast[other] || 0)) chatLast[other] = last;
+        }
         const list = Object.keys(mutual).map(cid => {
             const op = onlinePlayers.get(cid) || {};
             const prof = homeProfiles.get(cid) || {};
+            const online = !!onlinePlayers.has(cid);
+            const sameRoom = online && !!myRoomId && op.roomId === myRoomId;
+            const cc = chatCount[cid] || 0;
+            const cl = chatLast[cid] || 0;
+            const mutualN = mutual[cid];
+            // 综合评分：共同好友为主，互动 / 在线 / 同房间 / 头像相似为辅
+            let score = mutualN * 100;
+            if (cc > 0) score += Math.min(150, cc * 15);       // 聊过天（封顶 150）
+            if (cl > 0 && now - cl < 7 * DAY) score += 40;     // 7 天内互动过
+            if (online) score += 60;
+            if (sameRoom) score += 90;                          // 同一房间强推荐
+            if (prof.avatar && myAvatar && prof.avatar === myAvatar) score += 5;
+            const reasons = [];
+            if (sameRoom) reasons.push('🏠 正在同一房间');
+            if (cc > 0) reasons.push('💬 聊过 ' + cc + ' 条');
+            if (cl > 0 && now - cl < 7 * DAY) reasons.push('🕐 最近互动');
+            if (mutualN > 0) reasons.push('👥 ' + mutualN + ' 个共同好友');
+            if (online) reasons.push('🟢 在线');
+            if (reasons.length === 0) reasons.push('👥 你可能认识');
             return {
                 clientId: cid,
                 name: (op.name || prof.name || '玩家').toString(),
                 avatar: prof.avatar || '😀',
                 color: prof.color || '#4CAF50',
-                online: !!onlinePlayers.has(cid),
-                mutual: mutual[cid]
+                online,
+                mutual: mutualN,
+                score,
+                reason: reasons.slice(0, 2).join(' · ')
             };
         });
-        list.sort((a, b) => (b.mutual - a.mutual) || ((b.online ? 1 : 0) - (a.online ? 1 : 0)) || String(a.name).localeCompare(String(b.name)));
+        list.sort((a, b) => (b.score - a.score) || (b.mutual - a.mutual) || (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name)));
         res.json({ success: true, suggestions: list.slice(0, 12) });
     } catch (e) {
         console.error('[Friends] 推荐失败:', e);
@@ -3595,23 +3701,6 @@ app.post('/api/friends/message', (req, res) => {
         res.status(500).json({ success: false, message: '发送失败' });
     }
 });
-// 好友「戳一戳」轻量互动：校验好友关系后向对方推送 friend-poke（不进聊天记录）
-app.post('/api/friend-poke', (req, res) => {
-    try {
-        const { fromClientId, toClientId, fromName } = req.body || {};
-        if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
-        if (fromClientId === toClientId) return res.json({ success: false, message: '不能戳自己' });
-        if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们还不是好友' });
-        pushToNotificationSocket(toClientId, 'friend-poke', {
-            fromCid: fromClientId,
-            fromName: (fromName || '').toString().slice(0, 24)
-        });
-        res.json({ success: true });
-    } catch (e) {
-        console.error('[Friends] 戳一戳失败:', e);
-        res.status(500).json({ success: false, message: '操作失败' });
-    }
-});
 // 上传聊天文件（好友之间）：返回 fileId，聊天里只传 fileId + 文件名，避免 2000 字上限截断
 app.post('/api/friends/file', (req, res) => {
     try {
@@ -3675,7 +3764,7 @@ app.get('/api/friends/messages', (req, res) => {
 // 发送礼物（须为好友）
 app.post('/api/friends/gift', (req, res) => {
     try {
-        const { fromClientId, toClientId, fromName, toName, giftType, skinId, amount, message } = req.body || {};
+        const { fromClientId, toClientId, fromName, toName, giftType, skinId, amount, message, balance } = req.body || {};
         if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
         if (fromClientId === toClientId) return res.json({ success: false, message: '不能赠送给自己' });
         if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '你们还不是好友' });
@@ -3689,7 +3778,12 @@ app.post('/api/friends/gift', (req, res) => {
             if (isNaN(amt) || amt <= 0) return res.json({ success: false, message: '数量必须大于 0' });
             if (amt > 1000000) return res.json({ success: false, message: '单次赠送数量过大' });
             const ledger = giftType === 'coins' ? userCoins : userStars;
-            if ((ledger.get(fromClientId) || 0) < amt) return res.json({ success: false, message: '你的服务器余额不足，无法赠送' });
+            // 玩家实有金币/星星在本地钱包；服务器账本(userCoins/userStars)仅记录 admin 发放/扣除。
+            // 优先以客户端上报的本地余额(balance)校验，未上报时回退 admin 账本（兼容旧版客户端）。
+            // 注意：此处不写回账本，避免破坏客户端 dbCoins 差额去重逻辑（admin 账本语义独立）。
+            const bNum = Number(balance);
+            const cliBal = (isFinite(bNum) && bNum >= 0) ? bNum : (ledger.get(fromClientId) || 0);
+            if (cliBal < amt) return res.json({ success: false, message: '你的余额不足，无法赠送' });
         }
         const id = 'gift_' + Date.now().toString(36) + '_' + (_giftSeq++);
         const now = new Date().toISOString();
@@ -6785,16 +6879,17 @@ async function dbUpsertCloudMaze(m) {
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(
-                'INSERT INTO cloud_storage_mazes (id, username, name, maze, size, teleporters, enemy_speed, show_shop, description, difficulty, created_at, updated_at) ' +
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE ' +
+                'INSERT INTO cloud_storage_mazes (id, username, name, maze, size, teleporters, enemy_speed, show_shop, description, difficulty, is_public, created_at, updated_at) ' +
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE ' +
                 'name=VALUES(name), maze=VALUES(maze), size=VALUES(size), teleporters=VALUES(teleporters), ' +
                 'enemy_speed=VALUES(enemy_speed), show_shop=VALUES(show_shop), description=VALUES(description), ' +
-                'difficulty=VALUES(difficulty), updated_at=VALUES(updated_at)',
+                'difficulty=VALUES(difficulty), is_public=VALUES(is_public), updated_at=VALUES(updated_at)',
                 [m.id, m.username, m.name,
                  (typeof m.maze === 'string') ? m.maze : JSON.stringify(m.maze),
                  (typeof m.size === 'string') ? m.size : JSON.stringify(m.size || null),
                  (typeof m.teleporters === 'string') ? m.teleporters : JSON.stringify(m.teleporters || []),
                  m.enemy_speed || 1, m.show_shop !== false ? 1 : 0, m.description || '', m.difficulty || '中等',
+                 m.is_public ? 1 : 0,
                  m.created_at, m.updated_at]);
             return;
         } catch (e) { console.error('[云储存] DB 写图失败:', e.message); }
@@ -8710,6 +8805,7 @@ app.get('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
             teleporters: (typeof m.teleporters === 'string') ? JSON.parse(m.teleporters) : (m.teleporters || []),
             enemySpeed: m.enemy_speed || 1,
             showShop: m.show_shop !== 0,
+            isPublic: !!Number(m.is_public),
             created_at: m.created_at, updated_at: m.updated_at
         }));
         res.json({ success: true, mazes: out, maxMazes: await cloudMaxMazes(req.cloudUser) });
@@ -8739,6 +8835,7 @@ app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
                 maze: b.maze, size: b.size || { width: b.maze[0].length, height: b.maze.length },
                 teleporters: b.teleporters || [], enemy_speed: b.enemySpeed || 1,
                 show_shop: b.showShop !== false, description: b.description || '', difficulty: b.difficulty || '中等',
+                is_public: (b.isPublic !== undefined) ? (b.isPublic === true ? 1 : 0) : (existing.is_public ? 1 : 0),
                 created_at: existing.created_at || now, updated_at: now
             };
             await dbUpsertCloudMaze(m);
@@ -8756,6 +8853,7 @@ app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
             maze: b.maze, size: b.size || { width: b.maze[0].length, height: b.maze.length },
             teleporters: b.teleporters || [], enemy_speed: b.enemySpeed || 1,
             show_shop: b.showShop !== false, description: b.description || '', difficulty: b.difficulty || '中等',
+            is_public: (b.isPublic === true) ? 1 : 0,
             created_at: now, updated_at: now
         };
         await dbUpsertCloudMaze(m);
@@ -8763,6 +8861,25 @@ app.post('/api/cloud-storage/mazes', requireCloudAuth, async (req, res) => {
     } catch (e) {
         console.error('[云储存] 上传失败:', e);
         res.status(500).json({ success: false, message: '上传失败' });
+    }
+});
+
+// 更新云地图公开/私有状态（仅本人；轻量接口，不覆盖整图）
+app.put('/api/cloud-storage/mazes/:id', requireCloudAuth, async (req, res) => {
+    if (!cloudStorageEnabled()) return res.status(403).json({ success: false, message: '云储存功能已关闭' });
+    try {
+        let m = cloudMazes.get(req.params.id);
+        if (!m) { const list = await dbGetCloudMazes(req.cloudUser); m = list.find(x => x.id === req.params.id); }
+        if (!m || m.username !== req.cloudUser) return res.status(404).json({ success: false, message: '地图不存在' });
+        const next = !!(req.body && req.body.isPublic === true);
+        if (m.is_public !== (next ? 1 : 0)) {
+            m.is_public = next ? 1 : 0;
+            await dbUpsertCloudMaze(m);
+        }
+        res.json({ success: true, isPublic: next, message: next ? '已设为公开' : '已设为私密' });
+    } catch (e) {
+        console.error('[云储存] 更新公开状态失败:', e);
+        res.status(500).json({ success: false, message: '更新失败' });
     }
 });
 
@@ -10364,7 +10481,8 @@ app.get('/api/admin/users/:userId/mazes', requireAdminAuth, (req, res) => {
 });
 
 // 公开：获取某玩家的「公开地图」（个人主页展示用，默认私密，仅 isPublic 的可见；避免暴露私密图）
-app.get('/api/users/:clientId/public-mazes', (req, res) => {
+// 数据源 = 工坊「我的迷宫」公开图 + 云储存公开图（通过 cloud_storage_accounts.client_id 关联）
+app.get('/api/users/:clientId/public-mazes', async (req, res) => {
     try {
         const cid = req.params.clientId;
         const list = Array.from(playerMazes.values())
@@ -10376,8 +10494,31 @@ app.get('/api/users/:clientId/public-mazes', (req, res) => {
                 showShop: m.showShop !== false, authorName: m.authorName, playCount: m.playCount || 0,
                 createdAt: m.createdAt, updatedAt: m.updatedAt
             }));
+        // 合并云储存公开图（仅 is_public=1 的）
+        try {
+            if (DB_AVAILABLE && pool) {
+                const [accRows] = await pool.query('SELECT username FROM cloud_storage_accounts WHERE client_id=? LIMIT 1', [cid]);
+                if (accRows && accRows[0]) {
+                    const cloudList = await dbGetCloudMazes(accRows[0].username);
+                    (cloudList || []).forEach(cm => {
+                        if (Number(cm.is_public) !== 1) return;
+                        let grid = (typeof cm.maze === 'string') ? JSON.parse(cm.maze) : cm.maze;
+                        let size = (typeof cm.size === 'string') ? JSON.parse(cm.size) : cm.size;
+                        if (!size && Array.isArray(grid) && grid[0]) size = { width: grid[0].length, height: grid.length };
+                        let tp = (typeof cm.teleporters === 'string') ? JSON.parse(cm.teleporters) : (cm.teleporters || []);
+                        list.push({
+                            id: cm.id, name: cm.name, description: cm.description || '', difficulty: cm.difficulty || '中等',
+                            size: size, maze: grid, teleporters: tp || [], enemySpeed: cm.enemy_speed || 1,
+                            showShop: cm.show_shop !== 0, fromCloud: true, playCount: 0,
+                            createdAt: cm.created_at, updatedAt: cm.updated_at
+                        });
+                    });
+                }
+            }
+        } catch (e) { console.error('[公开地图] 合并云储存公开图失败:', e.message); }
         res.json({ success: true, mazes: list });
     } catch (e) {
+        console.error('[公开地图] 获取失败:', e);
         res.status(500).json({ success: false, message: '获取失败' });
     }
 });
