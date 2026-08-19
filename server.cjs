@@ -4073,6 +4073,9 @@ app.post('/api/friends/gift/cancel', (req, res) => {
 let groups = new Map();
 let groupMessages = new Map();
 let mediaFiles = new Map();
+let polls = new Map();      // 群投票 pollId -> {id,groupId,title,options,votes,createdBy,createdByName,createdAt,endsAt}
+let redpackets = new Map(); // 群红包 rpId -> {id,groupId,fromClientId,fromName,total,count,amounts,grabbed,remaining,status,createdAt}
+const REDPACKET_TTL = 24 * 3600 * 1000; // 红包 24 小时有效，过期未抢完退还
 const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
 function genGroupId() { return 'grp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
 function genGroupMsgId() { return 'gm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
@@ -4083,6 +4086,7 @@ function groupPublic(g, viewerCid) {
         const m = g.members[cid];
         const op = onlinePlayers.get(cid) || {};
         const prof = homeProfiles.get(cid) || {};
+        const gagUntil = m.gagUntil || 0;
         return {
             clientId: cid,
             name: (op.name || prof.name || '玩家').toString(),
@@ -4090,12 +4094,18 @@ function groupPublic(g, viewerCid) {
             color: prof.color || '#4CAF50',
             online: !!onlinePlayers.has(cid),
             role: m.role, nickname: m.nickname || '', muted: !!m.muted,
+            gagged: !!gagUntil && gagUntil > Date.now(), gagUntil,
             joinedAt: m.joinedAt, lastReadAt: m.lastReadAt
         };
     });
     const isMgr = isGroupManager(g, viewerCid);
     return {
-        id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members,
+        id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '',
+        avatar: g.avatar || '👥',
+        pinnedMessage: g.pinnedMessage || null,
+        welcomeMsg: g.welcomeMsg || '',
+        blockedWords: isMgr ? (g.blockedWords || []) : [],
+        members,
         inviteRequiresApproval: !!g.inviteRequiresApproval,
         pendingInvites: isMgr ? (g.pendingInvites || []) : []
     };
@@ -4104,16 +4114,29 @@ function loadGroupsFromJson() {
     try {
         if (fs.existsSync(GROUPS_FILE)) {
             const d = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {};
-            (d.groups || []).forEach(g => { if (g && g.id) groups.set(g.id, { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members || {}, inviteRequiresApproval: !!g.inviteRequiresApproval, pendingInvites: g.pendingInvites || [] }); });
+            (d.groups || []).forEach(g => { if (g && g.id) groups.set(g.id, { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members || {}, inviteRequiresApproval: !!g.inviteRequiresApproval, pendingInvites: g.pendingInvites || [], avatar: g.avatar || '👥', pinnedMessage: g.pinnedMessage || null, welcomeMsg: g.welcomeMsg || '', blockedWords: g.blockedWords || [] }); });
             (d.messages || []).forEach(({ groupId, msgs }) => { if (groupId && Array.isArray(msgs)) groupMessages.set(groupId, msgs); });
+            (d.media || []).forEach(f => { if (f && f.id && !mediaFiles.has(f.id)) mediaFiles.set(f.id, f); });
+            (d.polls || []).forEach(p => { if (p && p.id) polls.set(p.id, p); });
+            (d.redpackets || []).forEach(r => { if (r && r.id) redpackets.set(r.id, r); });
         }
     } catch (e) { console.error('[Groups] JSON 加载失败:', e.message); }
+}
+// 有 DB 时 polls/redpackets 只持久化在 JSON（无对应表），单独补读
+function loadPollsAndRedpacketsFromJson() {
+    try {
+        if (fs.existsSync(GROUPS_FILE)) {
+            const d = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {};
+            (d.polls || []).forEach(p => { if (p && p.id) polls.set(p.id, p); });
+            (d.redpackets || []).forEach(r => { if (r && r.id) redpackets.set(r.id, r); });
+        }
+    } catch (e) {}
 }
 async function dbLoadGroups() {
     if (!pool) return false;
     try {
         const [gs] = await pool.query('SELECT id,name,owner_client_id,created_at,announcement,members FROM chat_groups');
-        gs.forEach(r => { let members = {}; try { members = JSON.parse(r.members || '{}'); } catch (e) {} const inv = !!members.__inviteRequiresApproval; const pend = Array.isArray(members.__pendingInvites) ? members.__pendingInvites : []; delete members.__inviteRequiresApproval; delete members.__pendingInvites; groups.set(r.id, { id: r.id, name: r.name, ownerClientId: r.owner_client_id, createdAt: r.created_at, announcement: r.announcement || '', members, inviteRequiresApproval: inv, pendingInvites: pend }); });
+        gs.forEach(r => { let members = {}; try { members = JSON.parse(r.members || '{}'); } catch (e) {} const inv = !!members.__inviteRequiresApproval; const pend = Array.isArray(members.__pendingInvites) ? members.__pendingInvites : []; const av = members.__avatar; const pin = members.__pinnedMessage || null; const wm = members.__welcomeMsg; const bw = Array.isArray(members.__blockedWords) ? members.__blockedWords : []; delete members.__inviteRequiresApproval; delete members.__pendingInvites; delete members.__avatar; delete members.__pinnedMessage; delete members.__welcomeMsg; delete members.__blockedWords; groups.set(r.id, { id: r.id, name: r.name, ownerClientId: r.owner_client_id, createdAt: r.created_at, announcement: r.announcement || '', members, inviteRequiresApproval: inv, pendingInvites: pend, avatar: av || '👥', pinnedMessage: pin, welcomeMsg: wm || '', blockedWords: bw }); });
         const [ms] = await pool.query('SELECT id,group_id,from_client_id,from_name,message,created_at,recalled,mentions,deleted_for FROM chat_group_messages');
         ms.forEach(r => {
             if (!groupMessages.has(r.group_id)) groupMessages.set(r.group_id, []);
@@ -4127,15 +4150,18 @@ async function dbLoadGroups() {
     } catch (e) { console.error('[Groups][DB] 加载失败:', e.message); return false; }
 }
 async function loadGroups() {
-    if (pool) { const ok = await dbLoadGroups(); if (!ok) loadGroupsFromJson(); }
+    if (pool) { const ok = await dbLoadGroups(); if (!ok) loadGroupsFromJson(); else loadPollsAndRedpacketsFromJson(); }
     else loadGroupsFromJson();
 }
 function saveGroups() {
     ensureDataDir();
     try {
         const data = {
-            groups: Array.from(groups.values()).map(g => ({ id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members, inviteRequiresApproval: !!g.inviteRequiresApproval, pendingInvites: g.pendingInvites || [] })),
-            messages: Array.from(groupMessages.entries()).map(([gid, arr]) => ({ groupId: gid, msgs: arr }))
+            groups: Array.from(groups.values()).map(g => ({ id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members, inviteRequiresApproval: !!g.inviteRequiresApproval, pendingInvites: g.pendingInvites || [], avatar: g.avatar || '👥', pinnedMessage: g.pinnedMessage || null, welcomeMsg: g.welcomeMsg || '', blockedWords: g.blockedWords || [] })),
+            messages: Array.from(groupMessages.entries()).map(([gid, arr]) => ({ groupId: gid, msgs: arr })),
+            media: Array.from(mediaFiles.values()),
+            polls: Array.from(polls.values()),
+            redpackets: Array.from(redpackets.values())
         };
         fs.writeFileSync(GROUPS_FILE, JSON.stringify(data, null, 2));
     } catch (e) { console.error('[Groups] JSON 保存失败:', e.message); }
@@ -4146,7 +4172,7 @@ async function dbSaveGroups() {
     try {
         for (const g of groups.values()) {
             await pool.query('REPLACE INTO chat_groups (id,name,owner_client_id,created_at,announcement,members) VALUES (?,?,?,?,?,?)',
-                [g.id, g.name, g.ownerClientId, g.createdAt, g.announcement || '', JSON.stringify(Object.assign({}, g.members || {}, { __inviteRequiresApproval: !!g.inviteRequiresApproval, __pendingInvites: g.pendingInvites || [] }))]);
+                [g.id, g.name, g.ownerClientId, g.createdAt, g.announcement || '', JSON.stringify(Object.assign({}, g.members || {}, { __inviteRequiresApproval: !!g.inviteRequiresApproval, __pendingInvites: g.pendingInvites || [], __avatar: g.avatar || '👥', __pinnedMessage: g.pinnedMessage || null, __welcomeMsg: g.welcomeMsg || '', __blockedWords: g.blockedWords || [] }))]);
         }
         for (const [gid, arr] of groupMessages.entries()) {
             for (const m of arr) {
@@ -4175,7 +4201,7 @@ app.post('/api/groups/create', (req, res) => {
         for (const cid of list) {
             if (cid && cid !== String(clientId) && !members[cid]) members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: now, lastReadAt: null };
         }
-        const g = { id: genGroupId(), name: nm, ownerClientId: String(clientId), createdAt: now, announcement: '', members, inviteRequiresApproval: false, pendingInvites: [] };
+        const g = { id: genGroupId(), name: nm, ownerClientId: String(clientId), createdAt: now, announcement: '', members, inviteRequiresApproval: false, pendingInvites: [], avatar: '👥', pinnedMessage: null, welcomeMsg: '', blockedWords: [] };
         groups.set(g.id, g);
         saveGroups();
         for (const cid of Object.keys(members)) {
@@ -4184,6 +4210,22 @@ app.post('/api/groups/create', (req, res) => {
         res.json({ success: true, group: groupPublic(g, clientId) });
     } catch (e) { console.error('[Groups] 创建失败:', e); res.status(500).json({ success: false, message: '创建失败' }); }
 });
+
+// 群欢迎语：给新加入成员插入一条系统消息并推送
+function sendGroupWelcome(g, groupId, added) {
+    if (!added.length || !g.welcomeMsg) return;
+    try {
+        for (const cid of added) {
+            const wm = { id: genGroupMsgId(), groupId, fromClientId: 'system', fromName: '📢 系统', message: '👋 欢迎 ' + _resolveFriendName(cid) + ' 加入本群！' + g.welcomeMsg, createdAt: new Date().toISOString(), recalled: false, mentions: [], deletedFor: [] };
+            if (!groupMessages.has(groupId)) groupMessages.set(groupId, []);
+            groupMessages.get(groupId).push(wm);
+            try { pushToNotificationSocket(cid, 'group-message-received', { groupId, message: wm, fromClientId: 'system', fromName: '📢 系统' }); } catch (e) {}
+        }
+        const arr = groupMessages.get(groupId);
+        if (arr.length > 500) groupMessages.set(groupId, arr.slice(-500));
+        saveGroups();
+    } catch (e) { console.error('[Groups] 欢迎语发送失败:', e.message); }
+}
 
 // 邀请成员（群主/管理员可直接邀请；开启「邀请需群主同意」时，非管理员发起的邀请进入待审批队列）
 app.post('/api/groups/invite', (req, res) => {
@@ -4210,6 +4252,7 @@ app.post('/api/groups/invite', (req, res) => {
         if (added.length) {
             saveGroups();
             for (const cid of added) { try { pushToNotificationSocket(cid, 'group-member-added', { group: groupPublic(g, cid) }); } catch (e) {} }
+            sendGroupWelcome(g, groupId, added);
         }
         res.json({ success: true, group: groupPublic(g, clientId) });
     } catch (e) { console.error('[Groups] 邀请失败:', e); res.status(500).json({ success: false, message: '邀请失败' }); }
@@ -4238,21 +4281,27 @@ app.post('/api/groups/leave', (req, res) => {
     } catch (e) { console.error('[Groups] 退群失败:', e); res.status(500).json({ success: false, message: '退群失败' }); }
 });
 
-// 踢人（群主/管理员）
+// 踢人（群主/管理员；支持批量 memberClientIds）
 app.post('/api/groups/kick', (req, res) => {
     try {
-        const { clientId, groupId, targetClientId } = req.body || {};
+        const { clientId, groupId, targetClientId, memberClientIds } = req.body || {};
         const g = groups.get(groupId);
         if (!g) return res.json({ success: false, message: '群不存在' });
         if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '无权限' });
-        if (String(targetClientId) === String(g.ownerClientId)) return res.json({ success: false, message: '不能踢群主' });
-        if (!g.members[targetClientId]) return res.json({ success: false, message: '该成员不在群内' });
-        const target = g.members[targetClientId];
-        if (target.role === 'admin' && !isOwner(g, clientId)) return res.json({ success: false, message: '管理员只能由群主移除' });
-        delete g.members[targetClientId];
+        const targets = Array.isArray(memberClientIds) ? memberClientIds.map(String) : (targetClientId ? [String(targetClientId)] : []);
+        if (!targets.length) return res.json({ success: false, message: '缺少成员' });
+        const kicked = [];
+        for (const t of targets) {
+            if (String(t) === String(g.ownerClientId)) continue;
+            if (!g.members[t]) continue;
+            if (g.members[t].role === 'admin' && !isOwner(g, clientId)) continue;
+            delete g.members[t];
+            kicked.push(t);
+        }
+        if (!kicked.length) return res.json({ success: false, message: targets.some(t => String(t) === String(g.ownerClientId)) ? '不能踢群主' : '没有可移除的成员' });
         saveGroups();
-        try { pushToNotificationSocket(targetClientId, 'group-member-removed', { groupId, byClientId: clientId }); } catch (e) {}
-        res.json({ success: true, group: groupPublic(g, clientId) });
+        for (const t of kicked) { try { pushToNotificationSocket(t, 'group-member-removed', { groupId, byClientId: clientId }); } catch (e) {} }
+        res.json({ success: true, kicked, group: groupPublic(g, clientId) });
     } catch (e) { console.error('[Groups] 踢人失败:', e); res.status(500).json({ success: false, message: '踢人失败' }); }
 });
 
@@ -4298,6 +4347,7 @@ app.post('/api/groups/invite/approve', (req, res) => {
         for (const cid of (pi.toClientIds || [])) { if (cid && !g.members[cid]) { g.members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: new Date().toISOString(), lastReadAt: null }; added.push(cid); } }
         saveGroups();
         for (const cid of added) { try { pushToNotificationSocket(cid, 'group-member-added', { group: groupPublic(g, cid) }); } catch (e) {} }
+        sendGroupWelcome(g, groupId, added);
         res.json({ success: true, group: groupPublic(g, clientId) });
     } catch (e) { console.error('[Groups] 审批失败:', e); res.status(500).json({ success: false, message: '审批失败' }); }
 });
@@ -4380,6 +4430,282 @@ app.post('/api/groups/settings/invite-approval', (req, res) => {
     } catch (e) { console.error('[Groups] 设置失败:', e); res.status(500).json({ success: false, message: '设置失败' }); }
 });
 
+// ===================== 群增强：禁言 / 群内昵称 / 群头像 / 消息置顶 / 欢迎语 / 关键词屏蔽 =====================
+
+// 禁言 / 解除禁言（群主/管理员；管理员只能禁普通成员；最长 7 天）
+app.post('/api/groups/member/gag', (req, res) => {
+    try {
+        const { clientId, groupId, targetClientId, minutes } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '无权限' });
+        const t = g.members[String(targetClientId)];
+        if (!t) return res.json({ success: false, message: '该成员不在群内' });
+        if (String(targetClientId) === String(g.ownerClientId)) return res.json({ success: false, message: '不能禁言群主' });
+        if (t.role === 'admin' && !isOwner(g, clientId)) return res.json({ success: false, message: '管理员只能由群主禁言' });
+        const mins = parseInt(minutes, 10) || 0;
+        t.gagUntil = mins <= 0 ? 0 : Date.now() + Math.min(mins, 10080) * 60000;
+        saveGroups();
+        const gagged = !!t.gagUntil && t.gagUntil > Date.now();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-member-gagged', { groupId, targetClientId: String(targetClientId), gagged, until: t.gagUntil, byClientId: String(clientId) }); } catch (e) {} }
+        res.json({ success: true, gagged, until: t.gagUntil, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 禁言失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 设置自己在群内的专属昵称
+app.put('/api/groups/member/nickname', (req, res) => {
+    try {
+        const { clientId, groupId, nickname } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g || !g.members[clientId]) return res.json({ success: false, message: '无权限' });
+        g.members[clientId].nickname = (nickname || '').toString().trim().slice(0, 12);
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-nickname-updated', { groupId, clientId: String(clientId), nickname: g.members[clientId].nickname }); } catch (e) {} }
+        res.json({ success: true, nickname: g.members[clientId].nickname, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 昵称设置失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 设置群头像（群主/管理员）
+app.post('/api/groups/avatar', (req, res) => {
+    try {
+        const { clientId, groupId, avatar } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可设置' });
+        g.avatar = (avatar || '👥').toString().trim().slice(0, 8) || '👥';
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-avatar-updated', { groupId, avatar: g.avatar }); } catch (e) {} }
+        res.json({ success: true, avatar: g.avatar, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 头像设置失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 置顶 / 取消置顶群消息（群主/管理员；再次置顶同一条即取消）
+app.post('/api/groups/message/pin', (req, res) => {
+    try {
+        const { clientId, groupId, messageId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可置顶' });
+        const arr = groupMessages.get(groupId) || [];
+        const m = arr.find(x => x.id === String(messageId));
+        if (!m) return res.json({ success: false, message: '消息不存在' });
+        if (g.pinnedMessage && g.pinnedMessage.id === m.id) { g.pinnedMessage = null; }
+        else { g.pinnedMessage = { id: m.id, fromClientId: m.fromClientId, fromName: m.fromName, message: m.recalled ? '' : m.message, createdAt: m.createdAt }; }
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-message-pinned', { groupId, pinned: g.pinnedMessage }); } catch (e) {} }
+        res.json({ success: true, pinned: g.pinnedMessage });
+    } catch (e) { console.error('[Groups] 置顶失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 设置群欢迎语（群主/管理员）
+app.put('/api/groups/welcome', (req, res) => {
+    try {
+        const { clientId, groupId, welcomeMsg } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可设置' });
+        g.welcomeMsg = (welcomeMsg || '').toString().slice(0, 200);
+        saveGroups();
+        res.json({ success: true, welcomeMsg: g.welcomeMsg });
+    } catch (e) { console.error('[Groups] 欢迎语设置失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 设置关键词屏蔽（群主/管理员）；支持数组或逗号/换行分隔字符串
+app.post('/api/groups/blocked-words', (req, res) => {
+    try {
+        const { clientId, groupId, words } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可设置' });
+        let list = [];
+        if (Array.isArray(words)) list = words.map(String).map(s => s.trim()).filter(Boolean);
+        else if (typeof words === 'string') list = words.split(/[,，\n]/).map(s => s.trim()).filter(Boolean);
+        g.blockedWords = list.slice(0, 50);
+        saveGroups();
+        res.json({ success: true, blockedWords: g.blockedWords });
+    } catch (e) { console.error('[Groups] 屏蔽词设置失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// ===================== 群投票 =====================
+function genPollId() { return 'pol_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
+function pollPublic(p, viewerCid) {
+    const ended = Date.now() >= (p.endsAt || 0);
+    const counts = p.options.map((_, i) => Object.values(p.votes).filter(v => v === i).length);
+    return {
+        id: p.id, groupId: p.groupId, title: p.title, options: p.options,
+        createdAt: p.createdAt, endsAt: p.endsAt, ended,
+        createdBy: p.createdBy, createdByName: p.createdByName,
+        myVote: (p.votes[String(viewerCid)] !== undefined) ? p.votes[String(viewerCid)] : -1,
+        counts, total: Object.keys(p.votes).length
+    };
+}
+// 发起投票（所有群成员可发起；选项 2-8 个；截止 1 分钟 - 7 天）
+app.post('/api/groups/poll/create', (req, res) => {
+    try {
+        const { clientId, groupId, title, options, endsInMinutes } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        const t = (title || '').toString().trim().slice(0, 60);
+        const opts = Array.isArray(options) ? options.map(String).map(s => s.trim()).filter(Boolean).slice(0, 8) : [];
+        if (!t) return res.json({ success: false, message: '标题不能为空' });
+        if (opts.length < 2) return res.json({ success: false, message: '至少需要 2 个选项' });
+        const mins = Math.max(1, Math.min(parseInt(endsInMinutes, 10) || 1440, 10080));
+        const p = { id: genPollId(), groupId, title: t, options: opts, votes: {}, createdBy: String(clientId), createdByName: _resolveFriendName(clientId), createdAt: new Date().toISOString(), endsAt: Date.now() + mins * 60000 };
+        polls.set(p.id, p);
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-poll-created', { groupId, poll: pollPublic(p, cid) }); } catch (e) {} }
+        res.json({ success: true, poll: pollPublic(p, clientId) });
+    } catch (e) { console.error('[Groups] 投票创建失败:', e); res.status(500).json({ success: false, message: '创建失败' }); }
+});
+// 投票列表（截止后返回统计）
+app.get('/api/groups/polls', (req, res) => {
+    try {
+        const a = (req.query.clientId || '').toString();
+        const gid = (req.query.groupId || '').toString();
+        const g = groups.get(gid);
+        if (!g || !g.members[a]) return res.json({ success: true, polls: [] });
+        const out = [];
+        for (const p of polls.values()) { if (p.groupId === gid) out.push(pollPublic(p, a)); }
+        out.sort((x, y) => String(y.createdAt).localeCompare(String(x.createdAt)));
+        res.json({ success: true, polls: out });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+// 投票 / 改投（截止前一人一票可改）
+app.post('/api/groups/poll/vote', (req, res) => {
+    try {
+        const { clientId, groupId, pollId, option } = req.body || {};
+        const g = groups.get(groupId);
+        const p = polls.get(pollId);
+        if (!g || !p) return res.json({ success: false, message: '投票不存在' });
+        if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        if (p.groupId !== groupId) return res.json({ success: false, message: '投票不属于该群' });
+        if (Date.now() >= (p.endsAt || 0)) return res.json({ success: false, message: '投票已结束' });
+        const idx = parseInt(option, 10);
+        if (isNaN(idx) || idx < 0 || idx >= p.options.length) return res.json({ success: false, message: '无效选项' });
+        p.votes[String(clientId)] = idx;
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-poll-voted', { groupId, pollId, poll: pollPublic(p, cid) }); } catch (e) {} }
+        res.json({ success: true, poll: pollPublic(p, clientId) });
+    } catch (e) { console.error('[Groups] 投票失败:', e); res.status(500).json({ success: false, message: '投票失败' }); }
+});
+// 删除投票（群主/管理员或发起人）
+app.post('/api/groups/poll/delete', (req, res) => {
+    try {
+        const { clientId, groupId, pollId } = req.body || {};
+        const g = groups.get(groupId);
+        const p = polls.get(pollId);
+        if (!g || !p) return res.json({ success: false, message: '投票不存在' });
+        if (p.groupId !== groupId) return res.json({ success: false, message: '投票不属于该群' });
+        const mgr = isGroupManager(g, clientId);
+        if (!mgr && p.createdBy !== String(clientId)) return res.json({ success: false, message: '无权限删除' });
+        polls.delete(pollId);
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-poll-deleted', { groupId, pollId }); } catch (e) {} }
+        res.json({ success: true });
+    } catch (e) { console.error('[Groups] 删除投票失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// ===================== 群红包（星星货币）=====================
+function genRpId() { return 'rp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
+function splitRedPacketAmounts(total, count) {
+    const res = [];
+    let remaining = total, remCount = count;
+    for (let i = 0; i < count - 1; i++) {
+        const max = Math.max(1, Math.floor(remaining / remCount) * 2);
+        const amt = max <= 1 ? 1 : 1 + Math.floor(Math.random() * (max - 1));
+        res.push(amt);
+        remaining -= amt; remCount--;
+    }
+    res.push(remaining);
+    return res;
+}
+function redpacketPublic(rp, viewerCid) {
+    const expired = rp.status === 'expired' || (rp.status === 'active' && Date.now() - new Date(rp.createdAt).getTime() > REDPACKET_TTL);
+    const st = expired ? 'expired' : (rp.remaining <= 0 ? 'done' : rp.status);
+    return {
+        id: rp.id, groupId: rp.groupId, fromClientId: rp.fromClientId, fromName: rp.fromName,
+        total: rp.total, count: rp.count,
+        grabbedCount: rp.grabbed.length, remaining: rp.remaining,
+        status: st, createdAt: rp.createdAt,
+        mine: rp.grabbed.find(x => x.clientId === String(viewerCid)) || null
+    };
+}
+// 发红包（星星货币，服务端账本差额模型：发=扣账，抢=入账）
+app.post('/api/groups/redpacket', (req, res) => {
+    try {
+        const { clientId, groupId, total, count } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        const tot = parseInt(total, 10);
+        const cnt = parseInt(count, 10);
+        if (isNaN(tot) || tot < 1 || tot > 500) return res.json({ success: false, message: '红包金额需为 1-500 星星' });
+        if (isNaN(cnt) || cnt < 1 || cnt > 50) return res.json({ success: false, message: '红包个数需为 1-50' });
+        if (cnt > tot) return res.json({ success: false, message: '红包个数不能超过星星总数' });
+        // 服务端账本扣账（星星走差额模型，客户端 fetchMyStars 对账）
+        userStars.set(String(clientId), (userStars.get(String(clientId)) || 0) - tot);
+        const amounts = splitRedPacketAmounts(tot, cnt);
+        const rp = { id: genRpId(), groupId, fromClientId: String(clientId), fromName: _resolveFriendName(clientId), total: tot, count: cnt, amounts, grabbed: [], remaining: tot, status: 'active', createdAt: new Date().toISOString() };
+        redpackets.set(rp.id, rp);
+        // 红包卡片消息（REDPACKET: 前缀，前端渲染为 🧧 卡片）
+        const msg = { id: 'gm_rp_' + rp.id, groupId, fromClientId: String(clientId), fromName: _resolveFriendName(clientId), message: 'REDPACKET:' + JSON.stringify({ rpId: rp.id, total: tot, count: cnt }), createdAt: new Date().toISOString(), recalled: false, mentions: [], deletedFor: [] };
+        if (!groupMessages.has(groupId)) groupMessages.set(groupId, []);
+        groupMessages.get(groupId).push(msg);
+        const arr = groupMessages.get(groupId);
+        if (arr.length > 500) groupMessages.set(groupId, arr.slice(-500));
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-redpacket-sent', { groupId, rp: redpacketPublic(rp, cid) }); pushToNotificationSocket(cid, 'group-message-received', { groupId, message: msg, fromClientId: msg.fromClientId, fromName: msg.fromName }); } catch (e) {} }
+        res.json({ success: true, rp: redpacketPublic(rp, clientId) });
+    } catch (e) { console.error('[Groups] 发红包失败:', e); res.status(500).json({ success: false, message: '发送失败' }); }
+});
+// 抢红包（防重；随机分配；抢完即止）
+app.post('/api/groups/redpacket/grab', (req, res) => {
+    try {
+        const { clientId, groupId, rpId } = req.body || {};
+        const rp = redpackets.get(rpId);
+        const g = groups.get(groupId);
+        if (!rp || !g) return res.json({ success: false, message: '红包不存在' });
+        if (rp.groupId !== groupId) return res.json({ success: false, message: '红包不属于该群' });
+        if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        if (rp.remaining <= 0 || rp.status !== 'active') return res.json({ success: false, message: '红包已被抢完' });
+        if (Date.now() - new Date(rp.createdAt).getTime() > REDPACKET_TTL) { rp.status = 'expired'; return res.json({ success: false, message: '红包已过期' }); }
+        if (rp.grabbed.find(x => x.clientId === String(clientId))) return res.json({ success: false, message: '你已经抢过这个红包了' });
+        const idx = Math.floor(Math.random() * rp.amounts.length);
+        const amount = rp.amounts.splice(idx, 1)[0];
+        rp.grabbed.push({ clientId: String(clientId), name: _resolveFriendName(clientId), amount, at: new Date().toISOString() });
+        rp.remaining -= amount;
+        if (rp.remaining <= 0) rp.status = 'done';
+        // 服务端账本入账
+        userStars.set(String(clientId), (userStars.get(String(clientId)) || 0) + amount);
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-redpacket-grabbed', { groupId, rpId, clientId: String(clientId), name: _resolveFriendName(clientId), amount }); } catch (e) {} }
+        res.json({ success: true, amount, rp: redpacketPublic(rp, clientId) });
+    } catch (e) { console.error('[Groups] 抢红包失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+// 红包列表（惰性结算：过期的退还未抢完的金额给发送者）
+app.get('/api/groups/redpackets', (req, res) => {
+    try {
+        const a = (req.query.clientId || '').toString();
+        const gid = (req.query.groupId || '').toString();
+        const g = groups.get(gid);
+        if (!g || !g.members[a]) return res.json({ success: true, redpackets: [] });
+        let changed = false;
+        const out = [];
+        for (const rp of redpackets.values()) {
+            if (rp.groupId !== gid) continue;
+            if (rp.status === 'active' && Date.now() - new Date(rp.createdAt).getTime() > REDPACKET_TTL) {
+                if (rp.remaining > 0) { userStars.set(rp.fromClientId, (userStars.get(rp.fromClientId) || 0) + rp.remaining); rp.remaining = 0; }
+                rp.status = 'expired'; changed = true;
+            }
+            out.push(redpacketPublic(rp, a));
+        }
+        if (changed) saveGroups();
+        out.sort((x, y) => String(y.createdAt).localeCompare(String(x.createdAt)));
+        res.json({ success: true, redpackets: out });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
 // 群发消息（含 @提及）
 app.post('/api/groups/message', (req, res) => {
     try {
@@ -4387,8 +4713,17 @@ app.post('/api/groups/message', (req, res) => {
         const g = groups.get(groupId);
         if (!g) return res.json({ success: false, message: '群不存在' });
         if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        const myM = g.members[clientId];
+        if (myM.gagUntil && myM.gagUntil > Date.now()) {
+            const mins = Math.ceil((myM.gagUntil - Date.now()) / 60000);
+            return res.json({ success: false, message: '你已被禁言，约 ' + (mins > 60 ? Math.ceil(mins / 60) + ' 小时' : mins + ' 分钟') + '后解禁' });
+        }
         const text = (message || '').toString();
         if (!text.trim()) return res.json({ success: false, message: '消息为空' });
+        // 屏蔽词检查
+        if (Array.isArray(g.blockedWords) && g.blockedWords.length) {
+            for (const w of g.blockedWords) { if (w && text.includes(w)) return res.json({ success: false, message: '消息包含被屏蔽的词：「' + w + '」' }); }
+        }
         const id = clientMsgId ? ('gm_' + String(clientMsgId)) : genGroupMsgId();
         if (groupMessages.has(groupId) && groupMessages.get(groupId).some(m => m.id === id)) {
             return res.json({ success: true, message: { id, duplicate: true } });
@@ -4508,14 +4843,34 @@ app.post('/api/chat/media', (req, res) => {
         res.json({ success: true, fileId: id });
     } catch (e) { console.error('[Chat] 媒体上传失败:', e); res.status(500).json({ success: false, message: '上传失败' }); }
 });
-app.get('/api/chat/media/:fileId', (req, res) => {
+app.get('/api/chat/media/:fileId', async (req, res) => {
     try {
-        const f = mediaFiles.get(req.params.fileId);
+        let f = mediaFiles.get(req.params.fileId);
+        // 内存被淘汰或实例重启后，依次回退：MySQL 单条查询 → JSON 文件，并补回内存
+        if (!f && pool) {
+            try {
+                const [rows] = await pool.query('SELECT id,owner_client_id,chat_type,chat_id,name,content,created_at FROM chat_media WHERE id = ?', [req.params.fileId]);
+                if (rows && rows[0]) { f = { id: rows[0].id, ownerClientId: rows[0].owner_client_id, chatType: rows[0].chat_type, chatId: rows[0].chat_id, name: rows[0].name, content: rows[0].content, createdAt: rows[0].created_at }; mediaFiles.set(f.id, f); }
+            } catch (e) {}
+        }
+        if (!f) f = _readMediaFromJsonFile(req.params.fileId);
         if (!f) return res.status(404).json({ success: false, message: '文件不存在或已失效' });
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.send(f.content);
     } catch (e) { res.status(500).json({ success: false, message: '下载失败' }); }
 });
+// 从 JSON 文件兜底读取单条媒体（无 DB / DB 未落库时也能服务）
+function _readMediaFromJsonFile(fileId) {
+    try {
+        if (fs.existsSync(GROUPS_FILE)) {
+            const d = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {};
+            const arr = d.media || [];
+            const hit = arr.find(f => f && f.id === fileId);
+            if (hit) { mediaFiles.set(hit.id, hit); return hit; }
+        }
+    } catch (e) {}
+    return null;
+}
 
 // 个人主页：管理员修改 / 禁用某玩家的主页
 app.put('/api/admin/users/:userId/profile', requireAdminAuth, (req, res) => {
