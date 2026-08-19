@@ -4758,36 +4758,72 @@ function splitRedPacketAmounts(total, count) {
     res.push(remaining);
     return res;
 }
+// 固定金额红包（普通红包）：每人相同金额，要求总额能被个数整除
+function fixedRedPacketAmounts(total, count) {
+    const per = total / count;
+    return new Array(count).fill(per);
+}
 function redpacketPublic(rp, viewerCid) {
     const expired = rp.status === 'expired' || (rp.status === 'active' && Date.now() - new Date(rp.createdAt).getTime() > REDPACKET_TTL);
     const st = expired ? 'expired' : (rp.remaining <= 0 ? 'done' : rp.status);
     return {
         id: rp.id, groupId: rp.groupId, fromClientId: rp.fromClientId, fromName: rp.fromName,
-        total: rp.total, count: rp.count,
+        total: rp.total, count: rp.count, mode: rp.mode || 'lucky', type: rp.type || 'stars',
+        skinId: rp.skinId || null, skinName: rp.skinName || null, skinIcon: rp.skinIcon || null,
+        skinWinnerName: rp.skinWinnerName || null, claimedBy: rp.claimedBy || null, refunded: !!rp.refunded,
         grabbedCount: rp.grabbed.length, remaining: rp.remaining,
         status: st, createdAt: rp.createdAt,
         mine: rp.grabbed.find(x => x.clientId === String(viewerCid)) || null
     };
 }
-// 发红包（星星货币，服务端账本差额模型：发=扣账，抢=入账）
+// 发红包（星星/金币走服务端账本差额模型：发=扣账，抢=入账；皮肤红包随机赠送给群内一位成员）
+// type: stars|coins|skin；mode: lucky 拼手气 / fixed 普通（skin 强制随机单人，忽略 mode）
 app.post('/api/groups/redpacket', (req, res) => {
     try {
-        const { clientId, groupId, total, count } = req.body || {};
+        const { clientId, groupId, total, count, mode, type, skinId, skinName, skinIcon } = req.body || {};
         const g = groups.get(groupId);
         if (!g) return res.json({ success: false, message: '群不存在' });
         if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        const rpType = (type === 'coins' || type === 'skin') ? type : 'stars';
+        const fromName = _resolveFriendName(clientId);
+        if (rpType === 'skin') {
+            // 皮肤红包：1 个皮肤，服务端随机抽一位群成员为得主（排除发送者），先到先领
+            if (!skinId || typeof skinId !== 'string' || !skinId.trim()) return res.json({ success: false, message: '请选择要赠送的皮肤' });
+            const others = Object.keys(g.members).filter(c => c !== String(clientId));
+            if (!others.length) return res.json({ success: false, message: '群里只有你一个人，无法发送皮肤红包' });
+            const winnerCid = others[Math.floor(Math.random() * others.length)];
+            const rp = { id: genRpId(), groupId, fromClientId: String(clientId), fromName, type: 'skin', total: 1, count: 1, mode: 'lucky',
+                skinId: String(skinId).trim().slice(0, 40), skinName: String(skinName || '皮肤').slice(0, 30), skinIcon: String(skinIcon || '🎨').slice(0, 4),
+                skinWinner: winnerCid, skinWinnerName: _resolveFriendName(winnerCid), claimedBy: null, refunded: false,
+                amounts: [1], grabbed: [], remaining: 1, status: 'active', createdAt: new Date().toISOString() };
+            redpackets.set(rp.id, rp);
+            const msg = { id: 'gm_rp_' + rp.id, groupId, fromClientId: String(clientId), fromName, message: 'REDPACKET:' + JSON.stringify({ rpId: rp.id, type: 'skin', total: 1, count: 1, skinId: rp.skinId, skinName: rp.skinName, skinIcon: rp.skinIcon }), createdAt: new Date().toISOString(), recalled: false, mentions: [], deletedFor: [] };
+            if (!groupMessages.has(groupId)) groupMessages.set(groupId, []);
+            groupMessages.get(groupId).push(msg);
+            const arr = groupMessages.get(groupId);
+            if (arr.length > 500) groupMessages.set(groupId, arr.slice(-500));
+            saveGroups();
+            for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-redpacket-sent', { groupId, rp: redpacketPublic(rp, cid) }); pushToNotificationSocket(cid, 'group-message-received', { groupId, message: msg, fromClientId: msg.fromClientId, fromName: msg.fromName }); } catch (e) {} }
+            return res.json({ success: true, rp: redpacketPublic(rp, clientId) });
+        }
+        // 星星/金币红包
         const tot = parseInt(total, 10);
         const cnt = parseInt(count, 10);
-        if (isNaN(tot) || tot < 1 || tot > 500) return res.json({ success: false, message: '红包金额需为 1-500 星星' });
+        const maxTot = rpType === 'coins' ? 5000 : 500;
+        const curName = rpType === 'coins' ? '金币' : '星星';
+        if (isNaN(tot) || tot < 1 || tot > maxTot) return res.json({ success: false, message: '红包金额需为 1-' + maxTot + ' ' + curName });
         if (isNaN(cnt) || cnt < 1 || cnt > 50) return res.json({ success: false, message: '红包个数需为 1-50' });
-        if (cnt > tot) return res.json({ success: false, message: '红包个数不能超过星星总数' });
-        // 服务端账本扣账（星星走差额模型，客户端 fetchMyStars 对账）
-        userStars.set(String(clientId), (userStars.get(String(clientId)) || 0) - tot);
-        const amounts = splitRedPacketAmounts(tot, cnt);
-        const rp = { id: genRpId(), groupId, fromClientId: String(clientId), fromName: _resolveFriendName(clientId), total: tot, count: cnt, amounts, grabbed: [], remaining: tot, status: 'active', createdAt: new Date().toISOString() };
+        if (cnt > tot) return res.json({ success: false, message: '红包个数不能超过' + curName + '总数' });
+        const rpMode = mode === 'fixed' ? 'fixed' : 'lucky';
+        if (rpMode === 'fixed' && tot % cnt !== 0) return res.json({ success: false, message: '固定红包金额需能被个数整除（每人金额相同）' });
+        // 服务端账本扣账（星星/金币走差额模型，客户端 fetchMyStars/fetchMyCoins 对账）
+        const ledger = rpType === 'coins' ? userCoins : userStars;
+        ledger.set(String(clientId), (ledger.get(String(clientId)) || 0) - tot);
+        const amounts = rpMode === 'fixed' ? fixedRedPacketAmounts(tot, cnt) : splitRedPacketAmounts(tot, cnt);
+        const rp = { id: genRpId(), groupId, fromClientId: String(clientId), fromName, type: rpType, total: tot, count: cnt, mode: rpMode, amounts, grabbed: [], remaining: tot, status: 'active', createdAt: new Date().toISOString() };
         redpackets.set(rp.id, rp);
         // 红包卡片消息（REDPACKET: 前缀，前端渲染为 🧧 卡片）
-        const msg = { id: 'gm_rp_' + rp.id, groupId, fromClientId: String(clientId), fromName: _resolveFriendName(clientId), message: 'REDPACKET:' + JSON.stringify({ rpId: rp.id, total: tot, count: cnt }), createdAt: new Date().toISOString(), recalled: false, mentions: [], deletedFor: [] };
+        const msg = { id: 'gm_rp_' + rp.id, groupId, fromClientId: String(clientId), fromName, message: 'REDPACKET:' + JSON.stringify({ rpId: rp.id, type: rpType, total: tot, count: cnt, mode: rpMode }), createdAt: new Date().toISOString(), recalled: false, mentions: [], deletedFor: [] };
         if (!groupMessages.has(groupId)) groupMessages.set(groupId, []);
         groupMessages.get(groupId).push(msg);
         const arr = groupMessages.get(groupId);
@@ -4797,7 +4833,7 @@ app.post('/api/groups/redpacket', (req, res) => {
         res.json({ success: true, rp: redpacketPublic(rp, clientId) });
     } catch (e) { console.error('[Groups] 发红包失败:', e); res.status(500).json({ success: false, message: '发送失败' }); }
 });
-// 抢红包（防重；随机分配；抢完即止）
+// 抢红包（防重；随机分配/皮肤抽奖；抢完即止）
 app.post('/api/groups/redpacket/grab', (req, res) => {
     try {
         const { clientId, groupId, rpId } = req.body || {};
@@ -4806,16 +4842,28 @@ app.post('/api/groups/redpacket/grab', (req, res) => {
         if (!rp || !g) return res.json({ success: false, message: '红包不存在' });
         if (rp.groupId !== groupId) return res.json({ success: false, message: '红包不属于该群' });
         if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
-        if (rp.remaining <= 0 || rp.status !== 'active') return res.json({ success: false, message: '红包已被抢完' });
         if (Date.now() - new Date(rp.createdAt).getTime() > REDPACKET_TTL) { rp.status = 'expired'; return res.json({ success: false, message: '红包已过期' }); }
         if (rp.grabbed.find(x => x.clientId === String(clientId))) return res.json({ success: false, message: '你已经抢过这个红包了' });
+        // 皮肤红包：只有服务端随机抽中的得主能领，其他人提示被谁抢走
+        if (rp.type === 'skin') {
+            if (rp.claimedBy || String(clientId) !== rp.skinWinner) return res.json({ success: false, message: '皮肤已被 ' + (rp.skinWinnerName || '其他成员') + ' 抢走' });
+            rp.claimedBy = String(clientId);
+            rp.grabbed.push({ clientId: String(clientId), name: _resolveFriendName(clientId), amount: 0, at: new Date().toISOString() });
+            rp.remaining = 0; rp.status = 'done';
+            saveGroups();
+            for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-redpacket-grabbed', { groupId, rpId, clientId: String(clientId), name: _resolveFriendName(clientId), amount: 0, skin: { id: rp.skinId, name: rp.skinName, icon: rp.skinIcon } }); } catch (e) {} }
+            return res.json({ success: true, skin: { id: rp.skinId, name: rp.skinName, icon: rp.skinIcon }, rp: redpacketPublic(rp, clientId) });
+        }
+        // 星星/金币红包
+        if (rp.remaining <= 0 || rp.status !== 'active') return res.json({ success: false, message: '红包已被抢完' });
         const idx = Math.floor(Math.random() * rp.amounts.length);
         const amount = rp.amounts.splice(idx, 1)[0];
         rp.grabbed.push({ clientId: String(clientId), name: _resolveFriendName(clientId), amount, at: new Date().toISOString() });
         rp.remaining -= amount;
         if (rp.remaining <= 0) rp.status = 'done';
-        // 服务端账本入账
-        userStars.set(String(clientId), (userStars.get(String(clientId)) || 0) + amount);
+        // 服务端账本入账（按类型）
+        const ledger = rp.type === 'coins' ? userCoins : userStars;
+        ledger.set(String(clientId), (ledger.get(String(clientId)) || 0) + amount);
         saveGroups();
         for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-redpacket-grabbed', { groupId, rpId, clientId: String(clientId), name: _resolveFriendName(clientId), amount }); } catch (e) {} }
         res.json({ success: true, amount, rp: redpacketPublic(rp, clientId) });
@@ -4833,7 +4881,17 @@ app.get('/api/groups/redpackets', (req, res) => {
         for (const rp of redpackets.values()) {
             if (rp.groupId !== gid) continue;
             if (rp.status === 'active' && Date.now() - new Date(rp.createdAt).getTime() > REDPACKET_TTL) {
-                if (rp.remaining > 0) { userStars.set(rp.fromClientId, (userStars.get(rp.fromClientId) || 0) + rp.remaining); rp.remaining = 0; }
+                if (rp.type === 'skin') {
+                    // 皮肤红包过期未领取：通知发送者（前端恢复皮肤）
+                    if (!rp.claimedBy && !rp.refunded) {
+                        rp.refunded = true;
+                        try { pushToNotificationSocket(rp.fromClientId, 'group-redpacket-refund', { groupId: gid, rpId: rp.id, skinId: rp.skinId, skinName: rp.skinName, skinIcon: rp.skinIcon }); } catch (e) {}
+                    }
+                } else if (rp.remaining > 0) {
+                    const ledger = rp.type === 'coins' ? userCoins : userStars;
+                    ledger.set(rp.fromClientId, (ledger.get(rp.fromClientId) || 0) + rp.remaining);
+                    rp.remaining = 0;
+                }
                 rp.status = 'expired'; changed = true;
             }
             out.push(redpacketPublic(rp, a));
