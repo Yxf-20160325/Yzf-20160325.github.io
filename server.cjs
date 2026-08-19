@@ -4167,7 +4167,6 @@ app.post('/api/groups/create', (req, res) => {
         members[String(clientId)] = { role: 'owner', nickname: '', muted: false, joinedAt: now, lastReadAt: now };
         const list = Array.isArray(memberClientIds) ? memberClientIds.map(String) : [];
         for (const cid of list) {
-            cid = String(cid);
             if (cid && cid !== String(clientId) && !members[cid]) members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: now, lastReadAt: null };
         }
         const g = { id: genGroupId(), name: nm, ownerClientId: String(clientId), createdAt: now, announcement: '', members };
@@ -4190,7 +4189,6 @@ app.post('/api/groups/invite', (req, res) => {
         const list = Array.isArray(memberClientIds) ? memberClientIds.map(String) : [];
         const added = [];
         for (const cid of list) {
-            cid = String(cid);
             if (cid && !g.members[cid]) { g.members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: new Date().toISOString(), lastReadAt: null }; added.push(cid); }
         }
         if (added.length) {
