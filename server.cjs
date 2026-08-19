@@ -4691,8 +4691,15 @@ app.post('/api/groups/poll/create', (req, res) => {
         const mins = Math.max(1, Math.min(parseInt(endsInMinutes, 10) || 1440, 10080));
         const p = { id: genPollId(), groupId, title: t, options: opts, votes: {}, createdBy: String(clientId), createdByName: _resolveFriendName(clientId), createdAt: new Date().toISOString(), endsAt: Date.now() + mins * 60000 };
         polls.set(p.id, p);
+        // 在群聊中发一条投票卡片消息（让创建人在群里"发送信息"）
+        const pollMsg = { id: 'gm_poll_' + p.id, groupId, fromClientId: String(clientId), fromName: _resolveFriendName(clientId), message: 'POLL:' + JSON.stringify({ pollId: p.id, title: p.title, options: p.options, createdByName: p.createdByName, endsAt: p.endsAt }), createdAt: new Date().toISOString(), recalled: false, mentions: [], deletedFor: [] };
+        if (!groupMessages.has(groupId)) groupMessages.set(groupId, []);
+        groupMessages.get(groupId).push(pollMsg);
+        const _parr = groupMessages.get(groupId);
+        if (_parr.length > 500) groupMessages.set(groupId, _parr.slice(-500));
         saveGroups();
         for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-poll-created', { groupId, poll: pollPublic(p, cid) }); } catch (e) {} }
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-message-received', { groupId, message: pollMsg, fromClientId: pollMsg.fromClientId, fromName: pollMsg.fromName }); } catch (e) {} }
         res.json({ success: true, poll: pollPublic(p, clientId) });
     } catch (e) { console.error('[Groups] 投票创建失败:', e); res.status(500).json({ success: false, message: '创建失败' }); }
 });
@@ -4812,7 +4819,7 @@ app.post('/api/groups/redpacket', (req, res) => {
         const maxTot = rpType === 'coins' ? 5000 : 500;
         const curName = rpType === 'coins' ? '金币' : '星星';
         if (isNaN(tot) || tot < 1 || tot > maxTot) return res.json({ success: false, message: '红包金额需为 1-' + maxTot + ' ' + curName });
-        if (isNaN(cnt) || cnt < 1 || cnt > 50) return res.json({ success: false, message: '红包个数需为 1-50' });
+        if (isNaN(cnt) || cnt < 1 || cnt > 200) return res.json({ success: false, message: '红包个数需为 1-200' });
         if (cnt > tot) return res.json({ success: false, message: '红包个数不能超过' + curName + '总数' });
         const rpMode = mode === 'fixed' ? 'fixed' : 'lucky';
         if (rpMode === 'fixed' && tot % cnt !== 0) return res.json({ success: false, message: '固定红包金额需能被个数整除（每人金额相同）' });
