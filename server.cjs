@@ -3701,6 +3701,144 @@ app.put('/api/admin/friends/:a/:b/messages/:id', requireAdminAuth, (req, res) =>
     }
 });
 
+// ===== 群聊监管（管理员：查看全部群 / 聊天记录 / 编辑删除消息 / 代发 / 解散群）=====
+// 所有群列表（含成员数、最近消息；支持按群名/群主筛选）
+app.get('/api/admin/groups', requireAdminAuth, (req, res) => {
+    try {
+        const q = (req.query.q || '').toString().trim().toLowerCase();
+        const out = [];
+        for (const g of groups.values()) {
+            const members = Object.keys(g.members || {});
+            const msgs = groupMessages.get(g.id) || [];
+            const lastMsg = msgs.length ? msgs[msgs.length - 1] : null;
+            if (q) {
+                const ownerName = _resolveFriendName(g.ownerClientId);
+                const hay = (g.id + ' ' + g.name + ' ' + g.ownerClientId + ' ' + ownerName).toLowerCase();
+                if (hay.indexOf(q) < 0) continue;
+            }
+            out.push({
+                id: g.id, name: g.name, avatar: g.avatar || '👥',
+                ownerClientId: g.ownerClientId, ownerName: _resolveFriendName(g.ownerClientId),
+                createdAt: g.createdAt, memberCount: members.length,
+                messageCount: msgs.length,
+                lastMessageAt: lastMsg ? lastMsg.createdAt : null,
+                announcement: g.announcement || ''
+            });
+        }
+        out.sort((x, y) => (y.createdAt || '').localeCompare(x.createdAt || ''));
+        res.json({ success: true, groups: out, total: out.length });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 群聊天记录（管理员监管，不要求是群成员）
+app.get('/api/admin/groups/:groupId/messages', requireAdminAuth, (req, res) => {
+    try {
+        const gid = req.params.groupId;
+        const g = groups.get(gid);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        const arr = (groupMessages.get(gid) || []).slice();
+        arr.sort((x, y) => (x.createdAt || '').localeCompare(y.createdAt || ''));
+        const out = arr.map(m => ({
+            id: m.id, fromClientId: m.fromClientId, fromName: m.fromName || _resolveFriendName(m.fromClientId),
+            message: m.recalled ? '' : m.message, createdAt: m.createdAt, recalled: !!m.recalled,
+            mentions: m.mentions || [], admin: !!m.admin, edited: !!m.edited
+        }));
+        const members = Object.keys(g.members).map(cid => ({ clientId: cid, name: _resolveFriendName(cid) }));
+        res.json({ success: true, messages: out, group: { id: g.id, name: g.name, members } });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 管理员代发群消息（以群内某成员身份发送，标记 admin）
+app.post('/api/admin/groups/:groupId/message', requireAdminAuth, (req, res) => {
+    try {
+        const gid = req.params.groupId;
+        const g = groups.get(gid);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        const { fromClientId, message } = req.body || {};
+        if (!fromClientId || !g.members[String(fromClientId)]) return res.json({ success: false, message: '发送者必须是该群成员' });
+        const text = (message || '').toString();
+        if (!text.trim()) return res.json({ success: false, message: '消息不能为空' });
+        const msg = {
+            id: genGroupMsgId(), groupId: gid, fromClientId: String(fromClientId),
+            fromName: _resolveFriendName(fromClientId),
+            message: text.slice(0, 2000), createdAt: new Date().toISOString(),
+            recalled: false, mentions: [], deletedFor: [], admin: true
+        };
+        if (!groupMessages.has(gid)) groupMessages.set(gid, []);
+        groupMessages.get(gid).push(msg);
+        const arr = groupMessages.get(gid);
+        if (arr.length > 500) groupMessages.set(gid, arr.slice(-500));
+        saveGroups();
+        for (const cid of Object.keys(g.members)) {
+            try { pushToNotificationSocket(cid, 'group-message-received', { groupId: gid, message: msg, fromClientId: msg.fromClientId, fromName: msg.fromName, admin: true }); } catch (e) {}
+        }
+        res.json({ success: true, message: msg });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '发送失败' });
+    }
+});
+
+// 管理员删除群消息（按 id）
+app.delete('/api/admin/groups/:groupId/messages/:id', requireAdminAuth, (req, res) => {
+    try {
+        const gid = req.params.groupId;
+        const id = req.params.id;
+        if (!groups.has(gid)) return res.json({ success: false, message: '群不存在' });
+        const arr = groupMessages.get(gid);
+        if (!arr) return res.json({ success: false, message: '无聊天记录' });
+        const idx = arr.findIndex(m => m.id === id);
+        if (idx < 0) return res.json({ success: false, message: '消息不存在' });
+        arr.splice(idx, 1);
+        saveGroups();
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 管理员编辑群消息
+app.put('/api/admin/groups/:groupId/messages/:id', requireAdminAuth, (req, res) => {
+    try {
+        const gid = req.params.groupId;
+        const id = req.params.id;
+        const text = (req.body && req.body.message || '').toString();
+        if (!text.trim()) return res.json({ success: false, message: '消息不能为空' });
+        if (!groups.has(gid)) return res.json({ success: false, message: '群不存在' });
+        const arr = groupMessages.get(gid);
+        if (!arr) return res.json({ success: false, message: '无聊天记录' });
+        const m = arr.find(x => x.id === id);
+        if (!m) return res.json({ success: false, message: '消息不存在' });
+        m.message = text.slice(0, 2000);
+        m.edited = true;
+        m.editedAt = new Date().toISOString();
+        saveGroups();
+        res.json({ success: true, message: m });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '编辑失败' });
+    }
+});
+
+// 管理员解散群（删除群与聊天记录，通知所有成员）
+app.delete('/api/admin/groups/:groupId', requireAdminAuth, (req, res) => {
+    try {
+        const gid = req.params.groupId;
+        const g = groups.get(gid);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        const members = Object.keys(g.members);
+        groups.delete(gid);
+        groupMessages.delete(gid);
+        saveGroups();
+        for (const cid of members) { try { pushToNotificationSocket(cid, 'group-dissolved', { groupId: gid, byAdmin: true }); } catch (e) {} }
+        res.json({ success: true, message: '群已删除' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
 // 查询两人关系（用于个人主页按钮状态）
 app.get('/api/friends/relation', (req, res) => {
     try {
@@ -4824,6 +4962,24 @@ app.post('/api/groups/message/recall', (req, res) => {
         for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-message-recalled', { groupId: gid, messageId: found.id }); } catch (e) {} }
         res.json({ success: true });
     } catch (e) { console.error('[Groups] 撤回失败:', e); res.status(500).json({ success: false, message: '撤回失败' }); }
+});
+
+// 群消息「仅自己删除」：把 clientId 加入 deletedFor（仅自己可见，群内其他人不受影响；本人可删自己的，群主/管理员可删任意成员消息）
+app.post('/api/groups/message/delete', (req, res) => {
+    try {
+        const { clientId, messageId } = req.body || {};
+        if (!clientId || !messageId) return res.json({ success: false, message: '缺少参数' });
+        let found = null, gid = null;
+        for (const [k, arr] of groupMessages) { const m = arr.find(x => x.id === String(messageId)); if (m) { found = m; gid = k; break; } }
+        if (!found) return res.json({ success: false, message: '消息不存在' });
+        const g = groups.get(gid);
+        const isManager = g && isGroupManager(g, clientId);
+        if (found.fromClientId !== String(clientId) && !isManager) return res.json({ success: false, message: '只能删除自己发送的消息' });
+        found.deletedFor = found.deletedFor || [];
+        if (!found.deletedFor.includes(String(clientId))) found.deletedFor.push(String(clientId));
+        saveGroups();
+        res.json({ success: true });
+    } catch (e) { console.error('[Groups] 删除消息失败:', e); res.status(500).json({ success: false, message: '删除失败' }); }
 });
 
 // 上传聊天富媒体（图片等，content=base64）。好友或群成员可上传到对应会话。
