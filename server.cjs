@@ -4077,6 +4077,7 @@ const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
 function genGroupId() { return 'grp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
 function genGroupMsgId() { return 'gm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
 function isGroupManager(g, clientId) { const m = g.members[String(clientId)]; return !!m && (m.role === 'owner' || m.role === 'admin'); }
+function isOwner(g, clientId) { return g.ownerClientId === String(clientId); }
 function groupPublic(g, viewerCid) {
     const members = Object.keys(g.members).map(cid => {
         const m = g.members[cid];
@@ -4092,13 +4093,18 @@ function groupPublic(g, viewerCid) {
             joinedAt: m.joinedAt, lastReadAt: m.lastReadAt
         };
     });
-    return { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members };
+    const isMgr = isGroupManager(g, viewerCid);
+    return {
+        id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members,
+        inviteRequiresApproval: !!g.inviteRequiresApproval,
+        pendingInvites: isMgr ? (g.pendingInvites || []) : []
+    };
 }
 function loadGroupsFromJson() {
     try {
         if (fs.existsSync(GROUPS_FILE)) {
             const d = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {};
-            (d.groups || []).forEach(g => { if (g && g.id) groups.set(g.id, { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members || {} }); });
+            (d.groups || []).forEach(g => { if (g && g.id) groups.set(g.id, { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members || {}, inviteRequiresApproval: !!g.inviteRequiresApproval, pendingInvites: g.pendingInvites || [] }); });
             (d.messages || []).forEach(({ groupId, msgs }) => { if (groupId && Array.isArray(msgs)) groupMessages.set(groupId, msgs); });
         }
     } catch (e) { console.error('[Groups] JSON 加载失败:', e.message); }
@@ -4107,7 +4113,7 @@ async function dbLoadGroups() {
     if (!pool) return false;
     try {
         const [gs] = await pool.query('SELECT id,name,owner_client_id,created_at,announcement,members FROM chat_groups');
-        gs.forEach(r => { let members = {}; try { members = JSON.parse(r.members || '{}'); } catch (e) {} groups.set(r.id, { id: r.id, name: r.name, ownerClientId: r.owner_client_id, createdAt: r.created_at, announcement: r.announcement || '', members }); });
+        gs.forEach(r => { let members = {}; try { members = JSON.parse(r.members || '{}'); } catch (e) {} const inv = !!members.__inviteRequiresApproval; const pend = Array.isArray(members.__pendingInvites) ? members.__pendingInvites : []; delete members.__inviteRequiresApproval; delete members.__pendingInvites; groups.set(r.id, { id: r.id, name: r.name, ownerClientId: r.owner_client_id, createdAt: r.created_at, announcement: r.announcement || '', members, inviteRequiresApproval: inv, pendingInvites: pend }); });
         const [ms] = await pool.query('SELECT id,group_id,from_client_id,from_name,message,created_at,recalled,mentions,deleted_for FROM chat_group_messages');
         ms.forEach(r => {
             if (!groupMessages.has(r.group_id)) groupMessages.set(r.group_id, []);
@@ -4128,7 +4134,7 @@ function saveGroups() {
     ensureDataDir();
     try {
         const data = {
-            groups: Array.from(groups.values()).map(g => ({ id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members })),
+            groups: Array.from(groups.values()).map(g => ({ id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members, inviteRequiresApproval: !!g.inviteRequiresApproval, pendingInvites: g.pendingInvites || [] })),
             messages: Array.from(groupMessages.entries()).map(([gid, arr]) => ({ groupId: gid, msgs: arr }))
         };
         fs.writeFileSync(GROUPS_FILE, JSON.stringify(data, null, 2));
@@ -4140,7 +4146,7 @@ async function dbSaveGroups() {
     try {
         for (const g of groups.values()) {
             await pool.query('REPLACE INTO chat_groups (id,name,owner_client_id,created_at,announcement,members) VALUES (?,?,?,?,?,?)',
-                [g.id, g.name, g.ownerClientId, g.createdAt, g.announcement || '', JSON.stringify(g.members || {})]);
+                [g.id, g.name, g.ownerClientId, g.createdAt, g.announcement || '', JSON.stringify(Object.assign({}, g.members || {}, { __inviteRequiresApproval: !!g.inviteRequiresApproval, __pendingInvites: g.pendingInvites || [] }))]);
         }
         for (const [gid, arr] of groupMessages.entries()) {
             for (const m of arr) {
@@ -4169,7 +4175,7 @@ app.post('/api/groups/create', (req, res) => {
         for (const cid of list) {
             if (cid && cid !== String(clientId) && !members[cid]) members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: now, lastReadAt: null };
         }
-        const g = { id: genGroupId(), name: nm, ownerClientId: String(clientId), createdAt: now, announcement: '', members };
+        const g = { id: genGroupId(), name: nm, ownerClientId: String(clientId), createdAt: now, announcement: '', members, inviteRequiresApproval: false, pendingInvites: [] };
         groups.set(g.id, g);
         saveGroups();
         for (const cid of Object.keys(members)) {
@@ -4179,18 +4185,28 @@ app.post('/api/groups/create', (req, res) => {
     } catch (e) { console.error('[Groups] 创建失败:', e); res.status(500).json({ success: false, message: '创建失败' }); }
 });
 
-// 邀请成员（群主/管理员）
+// 邀请成员（群主/管理员可直接邀请；开启「邀请需群主同意」时，非管理员发起的邀请进入待审批队列）
 app.post('/api/groups/invite', (req, res) => {
     try {
         const { clientId, groupId, memberClientIds } = req.body || {};
         const g = groups.get(groupId);
         if (!g) return res.json({ success: false, message: '群不存在' });
-        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可邀请' });
+        if (!clientId) return res.json({ success: false, message: '缺少账号' });
+        const mgr = isGroupManager(g, clientId);
         const list = Array.isArray(memberClientIds) ? memberClientIds.map(String) : [];
-        const added = [];
-        for (const cid of list) {
-            if (cid && !g.members[cid]) { g.members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: new Date().toISOString(), lastReadAt: null }; added.push(cid); }
+        const filtered = list.filter(cid => cid && !g.members[cid]);
+        if (filtered.length === 0) return res.json({ success: true, group: groupPublic(g, clientId), noChange: true });
+        // 开启审批且非管理员发起 → 进入待审批队列
+        if (g.inviteRequiresApproval && !mgr) {
+            if (!g.pendingInvites) g.pendingInvites = [];
+            g.pendingInvites.push({ id: 'pi_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6), fromClientId: String(clientId), toClientIds: filtered, createdAt: new Date().toISOString() });
+            saveGroups();
+            for (const cid of Object.keys(g.members)) { const mm = g.members[cid]; if (mm.role === 'owner' || mm.role === 'admin') { try { pushToNotificationSocket(cid, 'group-invite-pending', { groupId, group: groupPublic(g, cid) }); } catch (e) {} } }
+            return res.json({ success: true, pending: true, group: groupPublic(g, clientId) });
         }
+        if (!mgr) return res.json({ success: false, message: '只有群主/管理员可邀请' });
+        const added = [];
+        for (const cid of filtered) { if (!g.members[cid]) { g.members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: new Date().toISOString(), lastReadAt: null }; added.push(cid); } }
         if (added.length) {
             saveGroups();
             for (const cid of added) { try { pushToNotificationSocket(cid, 'group-member-added', { group: groupPublic(g, cid) }); } catch (e) {} }
@@ -4231,6 +4247,8 @@ app.post('/api/groups/kick', (req, res) => {
         if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '无权限' });
         if (String(targetClientId) === String(g.ownerClientId)) return res.json({ success: false, message: '不能踢群主' });
         if (!g.members[targetClientId]) return res.json({ success: false, message: '该成员不在群内' });
+        const target = g.members[targetClientId];
+        if (target.role === 'admin' && !isOwner(g, clientId)) return res.json({ success: false, message: '管理员只能由群主移除' });
         delete g.members[targetClientId];
         saveGroups();
         try { pushToNotificationSocket(targetClientId, 'group-member-removed', { groupId, byClientId: clientId }); } catch (e) {}
@@ -4262,6 +4280,104 @@ app.post('/api/groups/member/mute', (req, res) => {
         saveGroups();
         res.json({ success: true, muted: g.members[clientId].muted });
     } catch (e) { console.error('[Groups] 免打扰设置失败:', e); res.status(500).json({ success: false, message: '设置失败' }); }
+});
+
+// 批准待审批邀请（群主/管理员）
+app.post('/api/groups/invite/approve', (req, res) => {
+    try {
+        const { clientId, groupId, pendingId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可审批' });
+        if (!g.pendingInvites) g.pendingInvites = [];
+        const idx = g.pendingInvites.findIndex(p => p.id === pendingId);
+        if (idx < 0) return res.json({ success: false, message: '邀请已处理或不存在' });
+        const pi = g.pendingInvites[idx];
+        g.pendingInvites.splice(idx, 1);
+        const added = [];
+        for (const cid of (pi.toClientIds || [])) { if (cid && !g.members[cid]) { g.members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: new Date().toISOString(), lastReadAt: null }; added.push(cid); } }
+        saveGroups();
+        for (const cid of added) { try { pushToNotificationSocket(cid, 'group-member-added', { group: groupPublic(g, cid) }); } catch (e) {} }
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 审批失败:', e); res.status(500).json({ success: false, message: '审批失败' }); }
+});
+
+// 拒绝待审批邀请（群主/管理员）
+app.post('/api/groups/invite/reject', (req, res) => {
+    try {
+        const { clientId, groupId, pendingId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可审批' });
+        if (!g.pendingInvites) g.pendingInvites = [];
+        const idx = g.pendingInvites.findIndex(p => p.id === pendingId);
+        if (idx < 0) return res.json({ success: false, message: '邀请已处理或不存在' });
+        g.pendingInvites.splice(idx, 1);
+        saveGroups();
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 拒绝失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 设置 / 取消管理员（仅群主）
+function setAdminRole(g, clientId, targetClientId, makeAdmin) {
+    if (!isOwner(g, clientId)) return { ok: false, message: '只有群主可管理管理员' };
+    if (!g.members[targetClientId]) return { ok: false, message: '该成员不在群内' };
+    if (targetClientId === g.ownerClientId) return { ok: false, message: '群主已是最高权限' };
+    g.members[targetClientId].role = makeAdmin ? 'admin' : 'member';
+    return { ok: true };
+}
+app.post('/api/groups/admin/set', (req, res) => {
+    try {
+        const { clientId, groupId, targetClientId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        const r = setAdminRole(g, clientId, targetClientId, true);
+        if (!r.ok) return res.json({ success: false, message: r.message });
+        saveGroups();
+        try { pushToNotificationSocket(targetClientId, 'group-role-changed', { groupId, role: 'admin' }); } catch (e) {}
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 设管理员失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+app.post('/api/groups/admin/unset', (req, res) => {
+    try {
+        const { clientId, groupId, targetClientId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        const r = setAdminRole(g, clientId, targetClientId, false);
+        if (!r.ok) return res.json({ success: false, message: r.message });
+        saveGroups();
+        try { pushToNotificationSocket(targetClientId, 'group-role-changed', { groupId, role: 'member' }); } catch (e) {}
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 取消管理员失败:', e); res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 解散群（仅群主）：移除所有成员并删除群与消息
+app.post('/api/groups/disband', (req, res) => {
+    try {
+        const { clientId, groupId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!isOwner(g, clientId)) return res.json({ success: false, message: '只有群主可解散群' });
+        const members = Object.keys(g.members);
+        groups.delete(groupId);
+        groupMessages.delete(groupId);
+        saveGroups();
+        for (const cid of members) { try { pushToNotificationSocket(cid, 'group-dissolved', { groupId }); } catch (e) {} }
+        res.json({ success: true });
+    } catch (e) { console.error('[Groups] 解散失败:', e); res.status(500).json({ success: false, message: '解散失败' }); }
+});
+
+// 设置「邀请需群主同意」开关（仅群主）
+app.post('/api/groups/settings/invite-approval', (req, res) => {
+    try {
+        const { clientId, groupId, requireApproval } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!isOwner(g, clientId)) return res.json({ success: false, message: '只有群主可修改此设置' });
+        g.inviteRequiresApproval = !!requireApproval;
+        saveGroups();
+        res.json({ success: true, inviteRequiresApproval: g.inviteRequiresApproval });
+    } catch (e) { console.error('[Groups] 设置失败:', e); res.status(500).json({ success: false, message: '设置失败' }); }
 });
 
 // 群发消息（含 @提及）
