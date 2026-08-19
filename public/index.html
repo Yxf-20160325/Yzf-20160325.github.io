@@ -3312,6 +3312,12 @@
 </head>
 
 <body>
+    <!-- 页面级加载遮罩：浏览器刷新/打开页面时显示，游戏初始化完成后移除（防止白屏/未加载完的页面被误点） -->
+    <div id="pageLoadingOverlay" style="position:fixed;top:0;left:0;width:100%;height:100%;background:#14142b;z-index:2147483647;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;">
+        <div style="width:46px;height:46px;border:4px solid rgba(255,255,255,0.15);border-top-color:#b388ff;border-radius:50%;animation:pageLoadSpin 0.8s linear infinite;"></div>
+        <div style="color:#cfd3e0;font-size:14px;">正在加载…</div>
+    </div>
+    <style>@keyframes pageLoadSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}</style>
     <!-- 手柄按键说明弹窗 -->
     <div id="gamepadHelpModal" class="settings-modal hidden">
         <h2>🎮 手柄按键说明</h2>
@@ -6690,6 +6696,15 @@ function connectNotificationSocket() {
             if (el) { try { _replaceBubbleWithRecalled(el, false); } catch (e) {} }
         });
 
+        // 群消息被撤回（实时推送，后端已推 group-message-recalled）
+        notificationSocket.on('group-message-recalled', (data) => {
+            if (!data || !data.messageId) return;
+            const el = document.querySelector('#friendChatLog [data-mid="' + String(data.messageId).replace(/"/g, '\\"') + '"]');
+            if (el && el.getAttribute('data-recalled') !== '1') {
+                try { _replaceBubbleWithRecalled(el, false); el.setAttribute('data-recalled', '1'); } catch (e) {}
+            }
+        });
+
         // 对方已读了我发的消息（实时推送）：聊天内所有「未读」标记改为「已读」
         notificationSocket.on('friend-message-read', (data) => {
             if (!data || !data.fromClientId) return;
@@ -6764,6 +6779,125 @@ function connectNotificationSocket() {
             if (typeof showNotification === 'function') showNotification('⚠️ 你所在的群聊已被群主解散', 2200);
             try { loadGroupList(); } catch (e) {}
             try { updateGroupUnreadBadgeFromServer(me); } catch (e) {}
+        });
+
+        // 成员被禁言/解禁
+        notificationSocket.on('group-member-gagged', (data) => {
+            if (!data || !data.groupId) return;
+            const me = gameState.clientId || '';
+            if (String(data.targetClientId) === me) {
+                if (typeof showNotification === 'function') showNotification(data.gagged ? '🔇 你已被禁言，暂时无法在群里发言' : '🔊 你已被解除禁言', 3000);
+            }
+            // 正在看该群聊天则刷新输入状态
+            if (_currentChat && _currentChat.type === 'group' && String(_currentChat.id) === String(data.groupId) && _currentGroup) {
+                const myM = (_currentGroup.members || []).find(m => m.clientId === me);
+                if (myM) myM.gagged = data.gagged;
+                const input = document.getElementById('friendChatInput');
+                if (input) { input.disabled = !!data.gagged; input.placeholder = data.gagged ? '你已被禁言，无法发言' : '输入消息，回车发送…'; }
+                const sendBtn = document.getElementById('friendChatModal') && document.getElementById('friendChatModal').querySelector('button[onclick="sendFriendChatMessage()"]');
+                if (sendBtn) sendBtn.disabled = !!data.gagged;
+            }
+            const sm = document.getElementById('groupSettingsModal');
+            if (sm && data.groupId) { try { showGroupSettingsModal(String(data.groupId)); } catch (e) {} }
+        });
+
+        // 群头像更新
+        notificationSocket.on('group-avatar-updated', (data) => {
+            if (!data || !data.groupId) return;
+            if (data.avatar) _groupAvatarCache[String(data.groupId)] = data.avatar;
+            if (_currentChat && _currentChat.type === 'group' && String(_currentChat.id) === String(data.groupId)) {
+                const avEl = document.getElementById('groupChatAvatar');
+                if (avEl) avEl.textContent = data.avatar || '👥';
+            }
+            try { loadGroupList(); } catch (e) {}
+        });
+
+        // 消息置顶/取消置顶
+        notificationSocket.on('group-message-pinned', (data) => {
+            if (!data || !data.groupId) return;
+            if (_currentChat && _currentChat.type === 'group' && String(_currentChat.id) === String(data.groupId)) {
+                if (_currentGroup) _currentGroup.pinnedMessage = data.pinned || null;
+                updateGroupPinnedBar(_currentGroup);
+                // 同步气泡上的置顶按钮文字
+                const log = document.getElementById('friendChatLog');
+                if (log) log.querySelectorAll('[data-mid]').forEach(e => {
+                    const mid = e.getAttribute('data-mid');
+                    e.querySelectorAll('span').forEach(s => {
+                        if (s.textContent === '📌 置顶' || s.textContent === '📌 取消置顶') s.textContent = (data.pinned && data.pinned.id === mid) ? '📌 取消置顶' : '📌 置顶';
+                    });
+                });
+            }
+        });
+
+        // 群内昵称更新
+        notificationSocket.on('group-nickname-updated', (data) => {
+            if (!data || !data.groupId || !data.clientId) return;
+            const gid = String(data.groupId);
+            if (!_groupNicknameCache[gid]) _groupNicknameCache[gid] = {};
+            if (data.nickname) _groupNicknameCache[gid][String(data.clientId)] = data.nickname; else delete _groupNicknameCache[gid][String(data.clientId)];
+            const sm = document.getElementById('groupSettingsModal');
+            if (sm) { try { showGroupSettingsModal(gid); } catch (e) {} }
+        });
+
+        // 群投票：新投票 / 有人投票 / 删除
+        notificationSocket.on('group-poll-created', (data) => {
+            if (!data || !data.groupId) return;
+            const gName = (typeof getGroupName === 'function') ? getGroupName(data.groupId) : '群聊';
+            showGroupNotifyToast('poll', String(data.groupId), '📊 群「' + gName + '」发起了投票', (data.poll && data.poll.title) || '新投票', '去看看', () => { try { showGroupPollModal(String(data.groupId)); } catch (e) {} });
+        });
+        const _refreshPollModal = (data) => {
+            const m = document.getElementById('groupPollModal');
+            if (m && data && data.groupId) { const gid = m.getAttribute('data-gid'); if (gid === String(data.groupId)) { try { loadGroupPolls(gid); } catch (e) {} } }
+        };
+        notificationSocket.on('group-poll-voted', _refreshPollModal);
+        notificationSocket.on('group-poll-deleted', _refreshPollModal);
+
+        // 群红包：发出 / 被抢
+        notificationSocket.on('group-redpacket-sent', (data) => {
+            if (!data || !data.groupId) return;
+            const gName = (typeof getGroupName === 'function') ? getGroupName(data.groupId) : '群聊';
+            const rp = data.rp || {};
+            const body = rp.type === 'skin'
+                ? (rp.fromName || '') + ' 发了皮肤红包「' + (rp.skinName || '皮肤') + '」，随机送给一位成员'
+                : (rp.fromName || '') + ' 发了 ' + (rp.total || 0) + (rp.type === 'coins' ? ' 金币' : ' 星星') + (rp.mode === 'fixed' ? '普通红包' : '拼手气红包') + '（' + (rp.count || 0) + ' 个）';
+            showGroupNotifyToast('redpacket', String(data.groupId), '🧧 群「' + gName + '」有人发红包', body, '去抢', () => { try { openGroupChatByGid(String(data.groupId)); } catch (e) {} });
+        });
+        notificationSocket.on('group-redpacket-grabbed', (data) => {
+            if (!data || !data.groupId) return;
+            const me = gameState.clientId || '';
+            if (String(data.clientId) === me) {
+                if (data.skin) {
+                    try {
+                        const skins = gameState.playerData && gameState.playerData.skins;
+                        if (skins && Array.isArray(skins.unlocked) && skins.unlocked.indexOf(data.skin.id) < 0) {
+                            skins.unlocked.push(data.skin.id);
+                            if (typeof saveSkinData === 'function') saveSkinData();
+                            if (typeof updateSkinShop === 'function') updateSkinShop();
+                        }
+                    } catch (e) {}
+                    if (typeof showNotification === 'function') showNotification('🎨 抢到了皮肤「' + (data.skin.name || '') + '」！', 3000);
+                } else {
+                    if (typeof showNotification === 'function') showNotification('🧧 抢到 ' + (data.amount || 0) + ' 星星红包！', 2500);
+                }
+                try { if (typeof fetchMyStars === 'function') fetchMyStars(); } catch (e) {}
+            } else {
+                const gName = (typeof getGroupName === 'function') ? getGroupName(data.groupId) : '群聊';
+                if (data.skin) { if (typeof showNotification === 'function') showNotification('🎨 ' + (data.name || '') + ' 在「' + gName + '」抢到了皮肤红包', 2000); }
+                else { if (typeof showNotification === 'function') showNotification('🧧 ' + (data.name || '') + ' 在「' + gName + '」抢到了红包', 2000); }
+            }
+        });
+        // 皮肤红包过期无人领取：退还皮肤给发送者（本地恢复）
+        notificationSocket.on('group-redpacket-refund', (data) => {
+            if (!data || !data.skinId) return;
+            try {
+                const skins = gameState.playerData && gameState.playerData.skins;
+                if (skins && Array.isArray(skins.unlocked) && skins.unlocked.indexOf(data.skinId) < 0) {
+                    skins.unlocked.push(data.skinId);
+                    if (typeof saveSkinData === 'function') saveSkinData();
+                    if (typeof updateSkinShop === 'function') updateSkinShop();
+                }
+            } catch (e) {}
+            if (typeof showNotification === 'function') showNotification('↩️ 皮肤红包无人领取，皮肤「' + (data.skinName || '') + '」已退回', 3000);
         });
 
         // 游戏内管理员/超级管理员踢人结果反馈
@@ -7438,6 +7572,12 @@ let _groupChatTimer = null;
 let _chatUnreadLineInserted = false; // 打开聊天后，是否已插入过"以下为新消息"分隔线
 let _chatOpenLastTs = 0; // 打开聊天时刻（ms），用于未读线判断
 let _groupNameCache = {}; // groupId -> 群名（来自 loadGroupList，供 toast 文案使用）
+let _groupAvatarCache = {}; // groupId -> 群头像
+let _groupNicknameCache = {}; // groupId -> { cid: 群内昵称 }
+let _groupBatchMode = false; // 批量管理模式开关
+let _groupBatchSel = {}; // 批量管理勾选：cid -> true
+const GROUP_AVATAR_CHOICES = ['👥', '🎮', '⚔️', '🏆', '🔥', '⭐', '🌙', '🚀', '🐱', '🎯', '🎲', '👑', '💎', '🦊'];
+const REDPACKET_SHARE_PREFIX = 'REDPACKET:'; // 红包消息前缀（后接 JSON {rpId,total,count}）
 
 // ---- 群列表 ----
 async function loadGroupList() {
@@ -7454,7 +7594,7 @@ async function loadGroupList() {
             fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/unread?clientId=' + encodeURIComponent(me)).then(r => r.json()).catch(() => ({ success: false }))
         ]);
         const list = (d && d.success && Array.isArray(d.groups)) ? d.groups : [];
-        list.forEach(g => { if (g && g.id) _groupNameCache[String(g.id)] = g.name; });
+        list.forEach(g => { if (g && g.id) { _groupNameCache[String(g.id)] = g.name; _groupAvatarCache[String(g.id)] = g.avatar || '👥'; if (g.members) { const nm = {}; g.members.forEach(m => { if (m.nickname) nm[m.clientId] = m.nickname; }); _groupNicknameCache[String(g.id)] = nm; } } });
         if (list.length === 0) { box.innerHTML = '<div style="font-size:13px;color:#999;padding:10px 0;">还没有群聊，点上方「➕ 创建群聊」</div>'; updateGroupUnreadBadge(0); return; }
         const unreadMap = (ud && ud.success && ud.unread) ? ud.unread : {};
         const pinned = getFriendPinnedList();
@@ -7473,8 +7613,9 @@ async function loadGroupList() {
             const muteFlag = muted ? '<span style="font-size:11px;color:#999;margin-left:4px;">🔕</span>' : '';
             const pinFlag = pinned.indexOf(String(g.id)) >= 0 ? '<span style="font-size:11px;color:#f57c00;margin-left:4px;">📌</span>' : '';
             const cnt = g.members.length;
+            const gAvatar = g.avatar || '👥';
             return '<div class="group-list-item" data-gid="' + _friendEsc(g.id) + '" data-nm="' + _friendEsc(g.name) + '" style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #eee;border-radius:10px;margin-bottom:8px;cursor:pointer;">' +
-                '<div style="width:44px;height:44px;line-height:44px;text-align:center;font-size:22px;border-radius:50%;background:#7E57C2;color:#fff;flex-shrink:0;">👥</div>' +
+                '<div style="width:44px;height:44px;line-height:44px;text-align:center;font-size:22px;border-radius:50%;background:#7E57C2;color:#fff;flex-shrink:0;">' + _friendEsc(gAvatar) + '</div>' +
                 '<div style="flex:1;min-width:0;"><div style="font-weight:bold;color:#222;">' + pinFlag + _friendEsc(g.name) + muteFlag + ' <span style="font-size:11px;color:#999;font-weight:normal;">(' + cnt + '人)</span>' + unreadBadge + '</div></div>' +
                 '<button class="group-chat-btn" data-gid="' + _friendEsc(g.id) + '" data-nm="' + _friendEsc(g.name) + '" style="padding:6px 14px;background:#2196F3;color:#fff;border:none;border-radius:8px;cursor:pointer;flex-shrink:0;">💬 聊天</button>' +
                 '<div class="group-actions-menu" style="position:relative;flex-shrink:0;">' +
@@ -7577,7 +7718,7 @@ function showCreateGroupModal() {
             <h3 style="margin:0 0 12px;">➕ 创建群聊</h3>
             <div style="margin-bottom:12px;">
                 <label style="font-size:13px;font-weight:bold;">群名称：</label>
-                <input id="createGroupName" type="text" maxlength="30" placeholder="例如：周末开黑小队" style="width:100%;padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-top:6px;">
+                <input id="createGroupName" type="text" maxlength="30" placeholder="输入群名称" style="width:100%;padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-top:6px;">
             </div>
             <div style="font-size:13px;font-weight:bold;margin-bottom:6px;">选择好友（至少 1 位）：</div>
             <div id="createGroupFriendList" style="max-height:40vh;overflow-y:auto;border:1px solid #eee;border-radius:8px;padding:8px;"></div>
@@ -7622,6 +7763,7 @@ async function createGroup() {
 // 群设置（公告 / 成员管理 / 邀请 / 踢人）
 async function showGroupSettingsModal(gid) {
     gid = String(gid);
+    _groupBatchMode = false; _groupBatchSel = {};
     const me = gameState.clientId || '';
     if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
     const existing = document.getElementById('groupSettingsModal'); if (existing) existing.remove();
@@ -7657,19 +7799,30 @@ async function showGroupSettingsModal(gid) {
             const av = m.avatar || '😀'; const col = m.color || '#4CAF50'; const nm = _friendEsc(m.name || '玩家');
             const roleTag = m.role === 'owner' ? '👑 群主' : (m.role === 'admin' ? '🛡 管理员' : '');
             const muteTag = m.muted ? '🔕' : '';
+            const gagTag = m.gagged ? '<span style="font-size:11px;color:#e53935;margin-left:4px;" title="被禁言中">🔇</span>' : '';
+            const nickTag = m.nickname ? '<span style="font-size:11px;color:#9575cd;margin-left:4px;">「' + _friendEsc(m.nickname) + '」</span>' : '';
+            const batchCb = (m.clientId !== me && (isOwnerMe || (isAdminMe && m.role === 'member')))
+                ? '<input type="checkbox" class="group-batch-cb" data-cid="' + _friendEsc(m.clientId) + '" style="width:16px;height:16px;flex-shrink:0;display:' + (_groupBatchMode ? 'inline-block' : 'none') + ';cursor:pointer;">' : '';
             let actions = '';
             if (m.clientId !== me) {
                 if (isOwnerMe) {
                     if (m.role === 'admin') actions += '<button class="group-admin-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" data-action="unset" style="padding:4px 9px;background:#fff3e0;color:#ef6c00;border:1px solid #ffe0b2;border-radius:6px;cursor:pointer;font-size:12px;margin-right:6px;">取消管理员</button>';
                     else if (m.role === 'member') actions += '<button class="group-admin-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" data-action="set" style="padding:4px 9px;background:#e8f5e9;color:#2e7d32;border:1px solid #c8e6c9;border-radius:6px;cursor:pointer;font-size:12px;margin-right:6px;">设为管理员</button>';
-                    actions += '<button class="group-kick-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" style="padding:4px 10px;background:#ffebee;color:#e53935;border:1px solid #ffcdd2;border-radius:6px;cursor:pointer;font-size:12px;">踢出</button>';
+                    actions += '<button class="group-kick-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" style="padding:4px 10px;background:#ffebee;color:#e53935;border:1px solid #ffcdd2;border-radius:6px;cursor:pointer;font-size:12px;margin-right:6px;">踢出</button>';
                 } else if (isAdminMe && m.role === 'member') {
-                    actions += '<button class="group-kick-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" style="padding:4px 10px;background:#ffebee;color:#e53935;border:1px solid #ffcdd2;border-radius:6px;cursor:pointer;font-size:12px;">踢出</button>';
+                    actions += '<button class="group-kick-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" style="padding:4px 10px;background:#ffebee;color:#e53935;border:1px solid #ffcdd2;border-radius:6px;cursor:pointer;font-size:12px;margin-right:6px;">踢出</button>';
                 }
+                // 禁言（群主可禁所有人，管理员可禁普通成员）
+                const canGag = isOwnerMe ? (m.role !== 'owner') : (isAdminMe && m.role === 'member');
+                if (canGag) actions += '<button class="group-gag-btn" data-gid="' + _friendEsc(g.id) + '" data-cid="' + _friendEsc(m.clientId) + '" style="padding:4px 10px;background:#ede7f6;color:#5e35b1;border:1px solid #d1c4e9;border-radius:6px;cursor:pointer;font-size:12px;">' + (m.gagged ? '🔊 解禁' : '🔇 禁言') + '</button>';
+            } else {
+                // 自己：可设置群内昵称
+                actions += '<button class="group-self-nick" data-gid="' + _friendEsc(g.id) + '" style="padding:4px 10px;background:#e3f2fd;color:#1565c0;border:1px solid #bbdefb;border-radius:6px;cursor:pointer;font-size:12px;">✏️ 群昵称</button>';
             }
             return '<div class="group-member-item" data-cid="' + _friendEsc(m.clientId) + '" style="display:flex;align-items:center;gap:8px;padding:7px;border-bottom:1px solid #f5f5f5;">' +
+                batchCb +
                 '<div style="width:32px;height:32px;line-height:32px;text-align:center;font-size:17px;border-radius:50%;background:' + _friendEsc(col) + ';flex-shrink:0;">' + _friendEsc(av) + '</div>' +
-                '<div style="flex:1;min-width:0;"><span style="font-size:14px;color:#222;">' + nm + '</span> <span style="font-size:11px;color:#888;">' + roleTag + ' ' + muteTag + '</span></div>' +
+                '<div style="flex:1;min-width:0;"><span style="font-size:14px;color:#222;">' + nm + nickTag + '</span> <span style="font-size:11px;color:#888;">' + roleTag + muteTag + gagTag + '</span></div>' +
                 actions + '</div>';
         }).join('');
 
@@ -7687,17 +7840,37 @@ async function showGroupSettingsModal(gid) {
             pendingHtml = '<div style="margin:12px 0;"><div style="font-size:13px;font-weight:bold;margin-bottom:4px;">待审批邀请 (' + pend.length + ')</div><div style="border:1px solid #eee;border-radius:8px;padding:4px 6px;background:#fffde7;">' + items + '</div></div>';
         }
 
-        // 公告区（管理员可编辑，成员只读）
-        const announceHtml = canEditAnnounce
-            ? '<textarea id="groupAnnounceInput" maxlength="500" placeholder="发布群公告…" style="width:100%;height:54px;padding:8px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;resize:none;margin-bottom:8px;">' + _friendEsc(g.announcement || '') + '</textarea>' +
-              '<button id="groupAnnounceSave" style="width:100%;padding:9px;background:#7E57C2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;margin-bottom:14px;">保存公告</button>'
-            : '<div style="width:100%;min-height:40px;padding:9px 10px;border:1px solid #eee;border-radius:8px;font-size:14px;color:#444;background:#fafafa;margin-bottom:14px;white-space:pre-wrap;">' + (g.announcement ? _friendEsc(g.announcement) : '<span style="color:#bbb;">暂无公告</span>') + '</div>';
+        // 公告入口按钮（点击弹出独立编辑/查看 modal）
+        const announceBtnHtml = '<button onclick="showGroupAnnounceModal(\'' + _friendEsc(g.id) + '\')" style="width:100%;padding:9px;background:#7E57C2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;margin-bottom:14px;">📢 ' + (canEditAnnounce ? '编辑群公告' : '查看群公告') + '</button>';
 
         // 邀请审批开关（仅群主可见）
         const approvalHtml = canManageAdmins
             ? '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid #eee;border-radius:8px;margin-bottom:12px;background:#fafafa;">' +
               '<span style="font-size:13px;color:#333;">邀请需群主/管理员同意</span>' +
               '<label style="display:flex;align-items:center;cursor:pointer;"><input type="checkbox" id="groupApprovalToggle" ' + (g.inviteRequiresApproval ? 'checked' : '') + ' style="width:18px;height:18px;"> <span style="font-size:12px;color:#888;margin-left:6px;">' + (g.inviteRequiresApproval ? '已开启' : '已关闭') + '</span></label></div>'
+            : '';
+
+        // 群头像 / 欢迎语 / 屏蔽词 设置（仅群主/管理员可见）
+        const avatarHtml = isManager
+            ? '<div style="padding:10px 12px;border:1px solid #eee;border-radius:8px;margin-bottom:10px;background:#fafafa;">' +
+              '<div style="font-size:13px;color:#333;margin-bottom:6px;">🖼️ 群头像：' +
+              '<span class="group-avatar-current" style="font-size:18px;cursor:pointer;padding:0 6px;">' + _friendEsc(g.avatar || '👥') + '</span> ' +
+              '<button class="group-avatar-pick" style="padding:3px 10px;background:#fff;border:1px solid #ccc;border-radius:6px;cursor:pointer;font-size:12px;">更换</button></div>' +
+              '<div class="group-avatar-choices" style="display:none;flex-wrap:wrap;gap:4px;margin-top:4px;">' +
+              GROUP_AVATAR_CHOICES.map(a => '<span class="group-avatar-choice" data-av="' + _friendEsc(a) + '" style="font-size:20px;cursor:pointer;padding:2px 5px;border-radius:6px;border:1px solid transparent;">' + a + '</span>').join('') +
+              '</div></div>'
+            : '';
+        const welcomeHtml = isManager
+            ? '<div style="padding:10px 12px;border:1px solid #eee;border-radius:8px;margin-bottom:10px;background:#fafafa;">' +
+              '<div style="font-size:13px;color:#333;margin-bottom:6px;">📣 欢迎语（新人入群自动发送）</div>' +
+              '<input id="groupWelcomeInput" maxlength="200" placeholder="设置进群欢迎语（选填）" value="' + _friendEsc(g.welcomeMsg || '') + '" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:13px;margin-bottom:6px;">' +
+              '<button id="groupWelcomeSave" style="padding:6px 14px;background:#7E57C2;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">保存欢迎语</button></div>'
+            : '';
+        const blockedHtml = isManager
+            ? '<div style="padding:10px 12px;border:1px solid #eee;border-radius:8px;margin-bottom:10px;background:#fafafa;">' +
+              '<div style="font-size:13px;color:#333;margin-bottom:6px;">🚫 关键词屏蔽（含这些词的群消息将被拒绝发送，逗号分隔）</div>' +
+              '<input id="groupBlockedInput" maxlength="300" placeholder="输入屏蔽词，用英文逗号分隔" value="' + _friendEsc((g.blockedWords || []).join(',')) + '" style="width:100%;padding:7px 9px;border:1px solid #ddd;border-radius:6px;font-size:13px;margin-bottom:6px;">' +
+              '<button id="groupBlockedSave" style="padding:6px 14px;background:#7E57C2;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;">保存屏蔽词</button></div>'
             : '';
 
         // 解散群（仅群主可见）
@@ -7707,30 +7880,33 @@ async function showGroupSettingsModal(gid) {
 
         modal.querySelector('div').innerHTML = `
             <button onclick="closeGroupSettingsModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
-            <h3 style="margin:0 0 4px;">⚙️ ${_friendEsc(g.name)}</h3>
-            <div style="font-size:12px;color:#999;margin-bottom:12px;">${g.members.length} 位成员</div>
-            <div style="font-size:13px;font-weight:bold;margin-bottom:4px;">群公告：</div>
-            ${announceHtml}
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+                <div style="width:46px;height:46px;line-height:46px;text-align:center;font-size:24px;border-radius:50%;background:#7E57C2;color:#fff;flex-shrink:0;">${_friendEsc(g.avatar || '👥')}</div>
+                <div style="min-width:0;"><h3 style="margin:0;">⚙️ ${_friendEsc(g.name)}</h3>
+                <div style="font-size:12px;color:#999;">${g.members.length} 位成员</div></div>
+            </div>
+            ${announceBtnHtml}
             ${approvalHtml}
+            ${avatarHtml}
+            ${welcomeHtml}
+            ${blockedHtml}
             ${pendingHtml}
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
                 <span style="font-size:13px;font-weight:bold;">成员 (${g.members.length})</span>
-                ${showInviteBtn ? '<button onclick="showGroupInviteModal(\'' + _friendEsc(g.id) + '\')" style="padding:5px 12px;background:#4CAF50;color:#fff;border:none;border-radius:7px;cursor:pointer;font-size:12px;">➕ 邀请</button>' : ''}
+                <span style="display:flex;gap:6px;align-items:center;">
+                    ${isManager ? '<button id="groupBatchToggle" style="padding:5px 12px;background:' + (_groupBatchMode ? '#ef6c00' : '#fff') + ';color:' + (_groupBatchMode ? '#fff' : '#333') + ';border:1px solid #ddd;border-radius:7px;cursor:pointer;font-size:12px;">' + (_groupBatchMode ? '✓ 批量管理中' : '☑️ 批量管理') + '</button>' : ''}
+                    ${showInviteBtn ? '<button onclick="showGroupInviteModal(\'' + _friendEsc(g.id) + '\')" style="padding:5px 12px;background:#4CAF50;color:#fff;border:none;border-radius:7px;cursor:pointer;font-size:12px;">➕ 邀请</button>' : ''}
+                </span>
             </div>
-            <div id="groupMemberList" style="max-height:34vh;overflow-y:auto;border:1px solid #eee;border-radius:8px;padding:6px;">${membersHtml}</div>
+            <div id="groupMemberList" style="max-height:30vh;overflow-y:auto;border:1px solid #eee;border-radius:8px;padding:6px;">${membersHtml}</div>
+            <div id="groupBatchBar" style="display:none;margin-top:8px;gap:8px;align-items:center;">
+                <span id="groupBatchCount" style="font-size:12px;color:#666;"></span>
+                <button id="groupBatchKick" style="flex:1;padding:8px;background:#e53935;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:bold;">🗑️ 踢出选中</button>
+                <button id="groupBatchClear" style="padding:8px 12px;background:#eee;color:#555;border:none;border-radius:8px;cursor:pointer;font-size:13px;">取消</button>
+            </div>
             ${disbandHtml}
         `;
 
-        // 公告保存
-        if (canEditAnnounce) {
-            const saveBtn = modal.querySelector('#groupAnnounceSave');
-            if (saveBtn) saveBtn.addEventListener('click', async () => {
-                const txt = modal.querySelector('#groupAnnounceInput').value;
-                const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/announcement', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, announcement: txt }) }).then(r => r.json()).catch(() => ({}));
-                if (r && r.success) { if (typeof showNotification === 'function') showNotification('✅ 公告已更新', 1500); showGroupSettingsModal(gid); }
-                else if (typeof showNotification === 'function') showNotification('⚠️ 更新失败', 1800);
-            });
-        }
         // 邀请审批开关
         if (canManageAdmins) {
             const tg = modal.querySelector('#groupApprovalToggle');
@@ -7771,6 +7947,89 @@ async function showGroupSettingsModal(gid) {
             if (r && r.success) { if (typeof showNotification === 'function') showNotification('已拒绝', 1500); showGroupSettingsModal(gid); }
             else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '操作失败'), 2000);
         }));
+        // 群头像选择（群主/管理员）
+        modal.querySelectorAll('.group-avatar-choice').forEach(ch => ch.addEventListener('click', async () => {
+            const av = ch.getAttribute('data-av');
+            const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/avatar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, avatar: av }) }).then(r => r.json()).catch(() => ({}));
+            if (r && r.success) { if (typeof showNotification === 'function') showNotification('✅ 群头像已更新', 1500); showGroupSettingsModal(gid); }
+            else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '设置失败'), 2000);
+        }));
+        modal.querySelectorAll('.group-avatar-pick').forEach(btn => btn.addEventListener('click', () => {
+            const box = modal.querySelector('.group-avatar-choices');
+            if (box) box.style.display = box.style.display === 'flex' ? 'none' : 'flex';
+        }));
+        // 欢迎语保存
+        const welSave = modal.querySelector('#groupWelcomeSave');
+        if (welSave) welSave.addEventListener('click', async () => {
+            const v = modal.querySelector('#groupWelcomeInput').value;
+            const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/welcome', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, welcomeMsg: v }) }).then(r => r.json()).catch(() => ({}));
+            if (r && r.success) { if (typeof showNotification === 'function') showNotification('✅ 欢迎语已保存', 1500); showGroupSettingsModal(gid); }
+            else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '保存失败'), 2000);
+        });
+        // 屏蔽词保存
+        const bwSave = modal.querySelector('#groupBlockedSave');
+        if (bwSave) bwSave.addEventListener('click', async () => {
+            const v = modal.querySelector('#groupBlockedInput').value;
+            const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/blocked-words', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, words: v }) }).then(r => r.json()).catch(() => ({}));
+            if (r && r.success) { if (typeof showNotification === 'function') showNotification('✅ 屏蔽词已保存', 1500); showGroupSettingsModal(gid); }
+            else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '保存失败'), 2000);
+        });
+        // 禁言 / 解禁
+        modal.querySelectorAll('.group-gag-btn').forEach(btn => btn.addEventListener('click', async () => {
+            const cid = btn.getAttribute('data-cid');
+            const nm = btn.closest('.group-member-item').querySelector('span').textContent;
+            const gagged = btn.textContent.indexOf('解禁') >= 0;
+            let minutes = 0;
+            if (!gagged) {
+                const mins = prompt('将「' + nm + '」禁言多久？（分钟数，最大 10080=7 天）', '60');
+                if (mins === null) return;
+                minutes = parseInt(mins, 10);
+                if (isNaN(minutes) || minutes <= 0) { if (typeof showNotification === 'function') showNotification('请输入有效分钟数', 1800); return; }
+            } else {
+                if (!confirm('解除「' + nm + '」的禁言？')) return;
+            }
+            const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/member/gag', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, targetClientId: cid, minutes }) }).then(r => r.json()).catch(() => ({}));
+            if (r && r.success) { if (typeof showNotification === 'function') showNotification(gagged ? '已解除禁言' : '已禁言 ' + minutes + ' 分钟', 1800); showGroupSettingsModal(gid); }
+            else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '操作失败'), 2000);
+        }));
+        // 自己设置群昵称
+        modal.querySelectorAll('.group-self-nick').forEach(btn => btn.addEventListener('click', async () => {
+            const cur = (g.members.find(m => m.clientId === me) || {}).nickname || '';
+            const v = prompt('设置你在本群的昵称（留空恢复为玩家名，最多 12 字）', cur);
+            if (v === null) return;
+            const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/member/nickname', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, nickname: v }) }).then(r => r.json()).catch(() => ({}));
+            if (r && r.success) { if (typeof showNotification === 'function') showNotification('✅ 群昵称已更新', 1500); showGroupSettingsModal(gid); }
+            else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '设置失败'), 2000);
+        }));
+        // 批量管理：开关 / 勾选 / 踢出
+        const batchToggle = modal.querySelector('#groupBatchToggle');
+        if (batchToggle) batchToggle.addEventListener('click', () => {
+            _groupBatchMode = !_groupBatchMode;
+            _groupBatchSel = {};
+            showGroupSettingsModal(gid);
+        });
+        modal.querySelectorAll('.group-batch-cb').forEach(cb => cb.addEventListener('change', () => {
+            const cid = cb.getAttribute('data-cid');
+            if (cb.checked) _groupBatchSel[cid] = true; else delete _groupBatchSel[cid];
+            const bar = modal.querySelector('#groupBatchBar');
+            if (bar) {
+                const n = Object.keys(_groupBatchSel).length;
+                bar.style.display = n > 0 ? 'flex' : 'none';
+                const cnt = modal.querySelector('#groupBatchCount');
+                if (cnt) cnt.textContent = '已选 ' + n + ' 人';
+            }
+        }));
+        const batchKick = modal.querySelector('#groupBatchKick');
+        if (batchKick) batchKick.addEventListener('click', async () => {
+            const ids = Object.keys(_groupBatchSel);
+            if (!ids.length) return;
+            if (!confirm('将选中的 ' + ids.length + ' 人移出群聊？')) return;
+            const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/kick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, memberClientIds: ids }) }).then(r => r.json()).catch(() => ({}));
+            if (r && r.success) { if (typeof showNotification === 'function') showNotification('已移除 ' + (r.kicked || ids).length + ' 人', 1800); _groupBatchMode = false; _groupBatchSel = {}; showGroupSettingsModal(gid); }
+            else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((r && r.message) || '操作失败'), 2000);
+        });
+        const batchClear = modal.querySelector('#groupBatchClear');
+        if (batchClear) batchClear.addEventListener('click', () => { _groupBatchSel = {}; showGroupSettingsModal(gid); });
         // 解散群
         if (canDisband) {
             const db = modal.querySelector('#groupDisbandBtn');
@@ -7788,6 +8047,52 @@ function closeGroupChatIfGroup(gid) {
     try { if (_currentChat && _currentChat.type === 'group' && _currentChat.id === String(gid)) closeFriendChatModal(); } catch (e) {}
 }
 function closeGroupSettingsModal() { _restoreParentModalAfterChild(); const m = document.getElementById('groupSettingsModal'); if (m) m.remove(); }
+// 群公告编辑/查看弹窗（独立于群设置，点击群设置里的「群公告」按钮打开）
+async function showGroupAnnounceModal(gid) {
+    gid = String(gid);
+    const me = gameState.clientId || '';
+    if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
+    const existing = document.getElementById('groupAnnounceModal'); if (existing) existing.remove();
+    _hideParentModalForChild();
+    const modal = document.createElement('div');
+    modal.id = 'groupAnnounceModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000002;display:flex;align-items:center;justify-content:center;';
+    document.body.appendChild(modal);
+    modal.innerHTML = '<div style="background:#fff;color:#222;border-radius:12px;max-width:440px;width:92%;padding:22px;position:relative;box-shadow:0 8px 30px rgba(0,0,0,0.3);">加载中…</div>';
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeGroupAnnounceModal(); });
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/list?clientId=' + encodeURIComponent(me)).then(r => r.json());
+        const g = (d && d.success && Array.isArray(d.groups)) ? d.groups.find(x => x.id === gid) : null;
+        if (!g) { modal.querySelector('div').innerHTML = '群聊不存在或已解散'; return; }
+        const meM = g.members.find(m => m.clientId === me) || {};
+        const isManager = g.ownerClientId === me || meM.role === 'admin'; // 仅群主/管理员可编辑
+        const box = modal.querySelector('div');
+        if (isManager) {
+            box.innerHTML = `
+                <button onclick="closeGroupAnnounceModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
+                <h3 style="margin:0 0 10px;">📢 编辑群公告</h3>
+                <textarea id="groupAnnounceInput" maxlength="500" placeholder="发布群公告…（留空则清空公告）" style="width:100%;height:120px;padding:8px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;resize:none;margin-bottom:10px;">${_friendEsc(g.announcement || '')}</textarea>
+                <div style="display:flex;gap:8px;">
+                    <button id="groupAnnounceSave" style="flex:1;padding:10px;background:#7E57C2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">保存公告</button>
+                    <button onclick="closeGroupAnnounceModal()" style="padding:10px 14px;background:#eee;color:#555;border:none;border-radius:8px;cursor:pointer;font-size:14px;">取消</button>
+                </div>`;
+            const saveBtn = box.querySelector('#groupAnnounceSave');
+            if (saveBtn) saveBtn.addEventListener('click', async () => {
+                const txt = box.querySelector('#groupAnnounceInput').value;
+                const r = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/announcement', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, announcement: txt }) }).then(r => r.json()).catch(() => ({}));
+                if (r && r.success) { if (typeof showNotification === 'function') showNotification('✅ 公告已更新', 1500); closeGroupAnnounceModal(); if (typeof showGroupSettingsModal === 'function') showGroupSettingsModal(gid); }
+                else if (typeof showNotification === 'function') showNotification('⚠️ 更新失败', 1800);
+            });
+        } else {
+            box.innerHTML = `
+                <button onclick="closeGroupAnnounceModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>
+                <h3 style="margin:0 0 10px;">📢 群公告</h3>
+                <div style="width:100%;min-height:80px;max-height:50vh;overflow-y:auto;padding:12px;border:1px solid #eee;border-radius:8px;font-size:14px;line-height:1.6;color:#333;background:#fafafa;white-space:pre-wrap;">${g.announcement ? _friendEsc(g.announcement) : '<span style="color:#bbb;">暂无公告</span>'}</div>
+                <button onclick="closeGroupAnnounceModal()" style="width:100%;margin-top:12px;padding:10px;background:#7E57C2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">关闭</button>`;
+        }
+    } catch (e) { modal.querySelector('div').innerHTML = '加载失败'; }
+}
+function closeGroupAnnounceModal() { _restoreParentModalAfterChild(); const m = document.getElementById('groupAnnounceModal'); if (m) m.remove(); }
 async function showGroupInviteModal(gid) {
     gid = String(gid);
     const me = gameState.clientId || '';
@@ -7848,11 +8153,17 @@ function showGroupChatModal(groupId, groupName) {
     modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
     modal.innerHTML = `
         <div style="background:#fff;color:#222;border-radius:12px;max-width:460px;width:92%;height:80vh;max-height:80vh;display:flex;flex-direction:column;position:relative;overflow:hidden;">
-            <button onclick="closeFriendChatModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;z-index:2;">×</button>
-            <div style="padding:14px 16px;border-bottom:1px solid #eee;font-weight:bold;font-size:16px;display:flex;align-items:center;gap:8px;">
-                <span id="groupChatTitle">💬 ${_friendEsc(groupName)}</span>
-                <button onclick="showGroupSettingsModal('${_friendEsc(groupId)}')" style="margin-left:auto;padding:4px 10px;background:#7E57C2;color:#fff;border:none;border-radius:7px;cursor:pointer;font-size:12px;">⚙️ 群设置</button>
+            <button onclick="closeFriendChatModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;z-index:10;">×</button>
+            <div style="padding:12px 16px;border-bottom:1px solid #eee;font-size:16px;display:flex;align-items:center;gap:8px;">
+                <span id="groupChatAvatar" style="width:34px;height:34px;line-height:34px;text-align:center;font-size:18px;border-radius:50%;background:#7E57C2;color:#fff;flex-shrink:0;">👥</span>
+                <span id="groupChatTitle" style="font-weight:bold;">💬 ${_friendEsc(groupName)}</span>
+                <span style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-shrink:0;margin-right:36px;">
+                    <button onclick="showGroupPollModal('${_friendEsc(groupId)}')" title="群投票" style="padding:4px 9px;background:#fff;border:1px solid #ddd;border-radius:7px;cursor:pointer;font-size:12px;">📊 投票</button>
+                    <button onclick="showRedPacketModal('${_friendEsc(groupId)}')" title="发红包" style="padding:4px 9px;background:#fff;border:1px solid #ddd;border-radius:7px;cursor:pointer;font-size:12px;">🧧 红包</button>
+                    <button onclick="showGroupSettingsModal('${_friendEsc(groupId)}')" style="padding:4px 10px;background:#7E57C2;color:#fff;border:none;border-radius:7px;cursor:pointer;font-size:12px;">⚙️ 群设置</button>
+                </span>
             </div>
+            <div id="groupPinnedBar" style="display:none;align-items:center;gap:8px;padding:7px 12px;background:#fff8e1;border-bottom:1px solid #ffe0b2;font-size:12px;color:#8d6e63;"></div>
             <div id="chatSearchBar" style="display:none;align-items:center;gap:6px;padding:6px 12px;background:#fafafa;border-bottom:1px solid #eee;">
                 <input id="chatSearchInput" type="text" placeholder="搜索聊天记录…" style="flex:1;min-width:0;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;">
                 <span id="chatSearchCount" style="font-size:12px;color:#666;min-width:42px;text-align:center;flex-shrink:0;"></span>
@@ -7884,12 +8195,440 @@ function showGroupChatModal(groupId, groupName) {
     const me = gameState.clientId || '';
     fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/list?clientId=' + encodeURIComponent(me)).then(r => r.json()).catch(() => ({ success: false })).then(d => {
         const g = (d && d.success && Array.isArray(d.groups)) ? d.groups.find(x => x.id === groupId) : null;
-        if (g) { _currentGroup = g; const title = document.getElementById('groupChatTitle'); if (title) title.textContent = '💬 ' + (g.name || groupName); }
+        if (g) {
+            _currentGroup = g;
+            const title = document.getElementById('groupChatTitle'); if (title) title.textContent = '💬 ' + (g.name || groupName);
+            const avEl = document.getElementById('groupChatAvatar'); if (avEl) avEl.textContent = g.avatar || '👥';
+            const nm = {}; (g.members || []).forEach(m => { if (m.nickname) nm[m.clientId] = m.nickname; }); _groupNicknameCache[String(groupId)] = nm;
+            updateGroupPinnedBar(g);
+            // 被禁言则禁用输入
+            const myM = (g.members || []).find(m => m.clientId === me);
+            if (myM && myM.gagged) {
+                const input = document.getElementById('friendChatInput');
+                if (input) { input.disabled = true; input.placeholder = '你已被禁言，无法发言'; }
+                const sendBtn = modal.querySelector('button[onclick="sendFriendChatMessage()"]');
+                if (sendBtn) sendBtn.disabled = true;
+            }
+        }
     });
     markGroupChatRead(groupId);
     _chatOpenLastTs = Date.now();
     loadGroupChatHistory(groupId);
     startGroupChatPolling(groupId);
+}
+// 渲染置顶消息条（pinnedMessage；管理员可点击取消）
+function updateGroupPinnedBar(g) {
+    const bar = document.getElementById('groupPinnedBar');
+    if (!bar) return;
+    const pin = (g && g.pinnedMessage) ? g.pinnedMessage : null;
+    if (!pin || !pin.id) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+    const me = gameState.clientId || '';
+    const isMgr = g && (g.ownerClientId === me || ((g.members || []).find(m => m.clientId === me) || {}).role === 'admin');
+    const txt = (pin.message || '').toString();
+    const disp = txt.indexOf('MEDIA:') === 0 || txt.indexOf('REDPACKET:') === 0 ? '[卡片消息]' : (txt.slice(0, 40) + (txt.length > 40 ? '…' : ''));
+    bar.style.display = 'flex';
+    bar.innerHTML = '';
+    const lb = document.createElement('span');
+    lb.style.cssText = 'flex-shrink:0;';
+    lb.textContent = '📌 置顶：';
+    const ct = document.createElement('span');
+    ct.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#5d4037;';
+    ct.textContent = (pin.fromName || '成员') + '：' + disp;
+    bar.appendChild(lb); bar.appendChild(ct);
+    if (isMgr) {
+        const un = document.createElement('button');
+        un.style.cssText = 'flex-shrink:0;padding:2px 8px;background:#fff;border:1px solid #e0c9a6;border-radius:6px;cursor:pointer;font-size:11px;color:#8d6e63;';
+        un.textContent = '取消置顶';
+        un.onclick = () => {
+            const gid = (g && g.id) || '';
+            fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/message/pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: gid, messageId: pin.id }) }).then(r => r.json()).then(dd => { if (dd && dd.success) { if (g) { g.pinnedMessage = null; } updateGroupPinnedBar(g); } }).catch(() => {});
+        };
+        bar.appendChild(un);
+    }
+}
+
+// ===================== 群红包（前端）=====================
+// 渲染红包卡片消息（REDPACKET: 前缀；type=stars|coins|skin；card.mode=lucky 拼手气 / fixed 普通，缺省按拼手气）
+function _renderRedPacketCard(bubble, card, mine) {
+    bubble.style.cssText = 'max-width:75%;padding:0;border-radius:14px;overflow:hidden;cursor:pointer;' + (mine ? 'background:#7E57C2;' : 'background:#fff;border:1px solid #eee;');
+    const gid = (_currentChat && _currentChat.id) || (card && card.gid) || '';
+    bubble.onclick = () => grabGroupRedPacket(card.rpId, gid, bubble);
+    const isFixed = card.mode === 'fixed';
+    const isSkin = card.type === 'skin';
+    const curName = card.type === 'coins' ? '金币' : (card.type === 'skin' ? '皮肤' : '星星');
+    const subText = isSkin
+        ? '🎨 皮肤红包 · 随机个人赠送 ·「' + (card.skinName || '皮肤') + '」'
+        : (isFixed ? '普通红包' : '拼手气红包') + ' · ' + (card.count || 0) + ' 个 · 共 ' + (card.total || 0) + ' ' + curName;
+    const inner = document.createElement('div');
+    inner.style.cssText = 'display:flex;align-items:center;gap:10px;padding:12px 14px;';
+    inner.innerHTML =
+        '<span style="font-size:30px;flex-shrink:0;">' + (isSkin ? (card.skinIcon || '🎨') : '🧧') + '</span>' +
+        '<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:bold;color:' + (mine ? '#fff' : '#7E57C2') + ';">恭喜发财，大吉大利</div>' +
+        '<div style="font-size:11px;color:' + (mine ? 'rgba(255,255,255,0.85)' : '#999') + ';">' + subText + '</div></div>' +
+        '<span style="font-size:12px;color:' + (mine ? '#fff' : '#7E57C2') + ';border:1px solid ' + (mine ? 'rgba(255,255,255,0.6)' : '#d1c4e9') + ';border-radius:8px;padding:4px 10px;flex-shrink:0;">开</span>';
+    bubble.appendChild(inner);
+}
+// 抢红包
+async function grabGroupRedPacket(rpId, gid, bubble) {
+    const me = gameState.clientId || '';
+    if (!me || !rpId || !gid) return;
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/redpacket/grab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(gid), rpId: String(rpId) }) }).then(r => r.json());
+        if (d && d.success) {
+            // 皮肤红包：得主写入皮肤
+            if (d.skin) {
+                try {
+                    const skins = gameState.playerData && gameState.playerData.skins;
+                    if (skins && Array.isArray(skins.unlocked) && skins.unlocked.indexOf(d.skin.id) < 0) {
+                        skins.unlocked.push(d.skin.id);
+                        if (typeof saveSkinData === 'function') saveSkinData();
+                        if (typeof updateSkinShop === 'function') updateSkinShop();
+                    }
+                } catch (e) {}
+                if (typeof showNotification === 'function') showNotification('🎨 抢到了皮肤「' + (d.skin.name || '') + '」！', 3000);
+                if (bubble) {
+                    const inner = bubble.querySelector('div');
+                    if (inner) {
+                        const t = inner.querySelector('div div:first-child');
+                        if (t) t.textContent = '已获得皮肤「' + (d.skin.name || '') + '」';
+                        const op = inner.querySelector('span:last-child');
+                        if (op) op.textContent = '✓';
+                    }
+                    bubble.style.cursor = 'default';
+                }
+                return;
+            }
+            const curName = (d.rp && d.rp.type === 'coins') ? '金币' : '星星';
+            if (typeof showNotification === 'function') showNotification('🧧 抢到 ' + d.amount + ' ' + curName + '！', 2500);
+            try { if (curName === '金币' ? typeof fetchMyCoins === 'function' : typeof fetchMyStars === 'function') { if (curName === '金币') fetchMyCoins(); else fetchMyStars(); } } catch (e) {}
+            if (bubble) {
+                const inner = bubble.querySelector('div');
+                if (inner) {
+                    const t = inner.querySelector('div div:first-child');
+                    if (t) t.textContent = '已领取 ' + d.amount + ' ' + curName;
+                    const op = inner.querySelector('span:last-child');
+                    if (op) op.textContent = '✓';
+                }
+                bubble.style.cursor = 'default';
+            }
+        } else {
+            const msg = (d && d.message) || '抢红包失败';
+            if (typeof showNotification === 'function') showNotification('⚠️ ' + msg, 2500);
+            if (bubble && (/抢完|过期|抢走/.test(msg))) {
+                const inner = bubble.querySelector('div');
+                if (inner) {
+                    const t = inner.querySelector('div div:first-child');
+                    if (t) t.textContent = /抢走/.test(msg) ? msg : '红包已被抢完';
+                    const op = inner.querySelector('span:last-child');
+                    if (op) op.textContent = '×';
+                }
+                bubble.style.cursor = 'default';
+            }
+        }
+    } catch (e) { if (typeof showNotification === 'function') showNotification('抢红包失败', 2000); }
+}
+// 发红包弹窗
+function showRedPacketModal(gid) {
+    gid = String(gid);
+    const existing = document.getElementById('redPacketModal'); if (existing) existing.remove();
+    _hideParentModalForChild();
+    const modal = document.createElement('div');
+    modal.id = 'redPacketModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000002;display:flex;align-items:center;justify-content:center;';
+    // 皮肤下拉选项：已解锁皮肤（排除默认）
+    const skList = ((gameState.playerData && gameState.playerData.skins && gameState.playerData.skins.available) || []).filter(s => s.id !== 'default' && (gameState.playerData.skins.unlocked || []).indexOf(s.id) >= 0);
+    const skinOpts = skList.length
+        ? skList.map(s => '<option value="' + _friendEsc(s.id) + '">' + (s.icon || '🎨') + ' ' + _friendEsc(s.name) + '</option>').join('')
+        : '<option value="">（暂无已解锁的非默认皮肤）</option>';
+    modal.innerHTML = '<div style="background:#fff;color:#222;border-radius:12px;max-width:360px;width:92%;padding:22px;position:relative;box-shadow:0 8px 30px rgba(0,0,0,0.3);">' +
+        '<button onclick="closeRedPacketModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>' +
+        '<h3 style="margin:0 0 12px;">🧧 发群红包</h3>' +
+        '<div id="rpTypeTip" style="font-size:12px;color:#999;margin-bottom:10px;">用星星货币发红包，群成员都能抢；24 小时未抢完自动退还</div>' +
+        '<div style="display:flex;gap:6px;margin-bottom:12px;">' +
+        '<button id="rpTypeStars" style="flex:1;padding:8px 0;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #e53935;background:#e53935;color:#fff;font-weight:bold;">⭐ 星星</button>' +
+        '<button id="rpTypeCoins" style="flex:1;padding:8px 0;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #ddd;background:#fff;color:#666;">🪙 金币</button>' +
+        '<button id="rpTypeSkin" style="flex:1;padding:8px 0;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #ddd;background:#fff;color:#666;">🎨 皮肤</button></div>' +
+        '<div id="rpMoneyArea">' +
+        '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
+        '<button id="rpModeLucky" style="flex:1;padding:8px 0;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #e53935;background:#e53935;color:#fff;font-weight:bold;">🧧 拼手气</button>' +
+        '<button id="rpModeFixed" style="flex:1;padding:8px 0;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #ddd;background:#fff;color:#666;">🎁 普通红包</button></div>' +
+        '<div id="rpModeTip" style="font-size:12px;color:#888;margin:-2px 0 10px;">金额随机分配，人人有份，手气最佳拿最多</div>' +
+        '<div id="rpCurLabel" style="font-size:13px;color:#333;margin-bottom:4px;">星星总额（1-500）</div>' +
+        '<input id="rpTotalInput" type="number" min="1" max="500" value="10" style="width:100%;padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:10px;">' +
+        '<div style="font-size:13px;color:#333;margin-bottom:4px;">红包个数（1-50）</div>' +
+        '<input id="rpCountInput" type="number" min="1" max="50" value="5" style="width:100%;padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:14px;">' +
+        '</div>' +
+        '<div id="rpSkinArea" style="display:none;">' +
+        '<div style="font-size:13px;color:#333;margin-bottom:4px;">选择要赠送的皮肤</div>' +
+        '<select id="rpSkinSelect" style="width:100%;padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:8px;">' + skinOpts + '</select>' +
+        '<div style="font-size:12px;color:#888;margin-bottom:14px;">🎲 随机赠送给群内一位成员（除你之外）；发出后自己不再拥有该皮肤</div>' +
+        '</div>' +
+        '<button id="rpSendBtn" style="width:100%;padding:11px;background:#e53935;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:bold;">🧧 塞钱进红包</button></div>';
+    document.body.appendChild(modal);
+    modal.setAttribute('data-rp-type', 'stars');
+    modal.setAttribute('data-rp-mode', 'lucky');
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeRedPacketModal(); });
+    modal.querySelector('#rpSendBtn').addEventListener('click', () => sendGroupRedPacket(gid));
+    const box = modal.querySelector('div > div');
+    const balTip = document.createElement('div');
+    balTip.id = 'rpBalanceTip';
+    balTip.style.cssText = 'font-size:12px;color:#888;margin:-6px 0 10px;';
+    balTip.textContent = '我的星星：' + (gameState.stars || 0);
+    box.insertBefore(balTip, box.querySelector('#rpMoneyArea'));
+    // 红包类型切换：stars / coins / skin
+    let rpType = 'stars';
+    const btnStars = modal.querySelector('#rpTypeStars');
+    const btnCoins = modal.querySelector('#rpTypeCoins');
+    const btnSkin = modal.querySelector('#rpTypeSkin');
+    const typeTip = modal.querySelector('#rpTypeTip');
+    const moneyArea = modal.querySelector('#rpMoneyArea');
+    const skinArea = modal.querySelector('#rpSkinArea');
+    const curLabel = modal.querySelector('#rpCurLabel');
+    const syncTypeUI = () => {
+        modal.setAttribute('data-rp-type', rpType);
+        const paint = (btn, on, color) => { btn.style.background = on ? '#e53935' : '#fff'; btn.style.color = on ? '#fff' : '#666'; btn.style.borderColor = on ? '#e53935' : '#ddd'; btn.style.fontWeight = on ? 'bold' : 'normal'; };
+        paint(btnStars, rpType === 'stars', '#e53935');
+        paint(btnCoins, rpType === 'coins', '#e53935');
+        paint(btnSkin, rpType === 'skin', '#e53935');
+        const isSkin = rpType === 'skin';
+        moneyArea.style.display = isSkin ? 'none' : 'block';
+        skinArea.style.display = isSkin ? 'block' : 'none';
+        if (isSkin) {
+            typeTip.textContent = '用自己已拥有的皮肤发红包，随机赠送给群内一位成员（皮肤不能普通/平分）';
+            balTip.textContent = '我的皮肤：已解锁 ' + ((gameState.playerData && gameState.playerData.skins && gameState.playerData.skins.unlocked) || ['default']).length + ' 款';
+        } else {
+            const curName = rpType === 'coins' ? '金币' : '星星';
+            const maxTot = rpType === 'coins' ? 5000 : 500;
+            typeTip.textContent = '用' + curName + '货币发红包，群成员都能抢；24 小时未抢完自动退还';
+            curLabel.textContent = curName + '总额（1-' + maxTot + '）';
+            const tot = modal.querySelector('#rpTotalInput');
+            tot.max = maxTot;
+            balTip.textContent = '我的' + curName + '：' + (rpType === 'coins' ? (gameState.coins || 0) : (gameState.stars || 0));
+        }
+        updateRpModeTip();
+    };
+    // 红包模式切换：lucky 拼手气 / fixed 普通（每人同额）
+    let rpMode = 'lucky';
+    const btnLucky = modal.querySelector('#rpModeLucky');
+    const btnFixed = modal.querySelector('#rpModeFixed');
+    const modeTip = modal.querySelector('#rpModeTip');
+    const syncModeUI = () => {
+        modal.setAttribute('data-rp-mode', rpMode);
+        const isFixed = rpMode === 'fixed';
+        btnLucky.style.background = isFixed ? '#fff' : '#e53935';
+        btnLucky.style.color = isFixed ? '#666' : '#fff';
+        btnLucky.style.borderColor = isFixed ? '#ddd' : '#e53935';
+        btnFixed.style.background = isFixed ? '#e53935' : '#fff';
+        btnFixed.style.color = isFixed ? '#fff' : '#666';
+        btnFixed.style.borderColor = isFixed ? '#e53935' : '#ddd';
+        updateRpModeTip();
+    };
+    const curName = () => rpType === 'coins' ? '金币' : '星星';
+    const updateRpModeTip = () => {
+        if (!modeTip) return;
+        if (rpMode === 'fixed') {
+            const t = parseInt(modal.querySelector('#rpTotalInput').value, 10);
+            const c = parseInt(modal.querySelector('#rpCountInput').value, 10);
+            if (!isNaN(t) && !isNaN(c) && c > 0) {
+                if (t % c === 0) modeTip.textContent = '每人金额相同：' + (t / c) + ' ' + curName() + ' / 人';
+                else modeTip.textContent = '固定红包金额需能被个数整除（当前余 ' + (t % c) + '）';
+            } else modeTip.textContent = '每人金额相同，总额需能被个数整除';
+        } else {
+            modeTip.textContent = '金额随机分配，人人有份，手气最佳拿最多';
+        }
+    };
+    btnStars.addEventListener('click', () => { rpType = 'stars'; syncTypeUI(); });
+    btnCoins.addEventListener('click', () => { rpType = 'coins'; syncTypeUI(); });
+    btnSkin.addEventListener('click', () => { rpType = 'skin'; rpMode = 'lucky'; syncTypeUI(); syncModeUI(); });
+    btnLucky.addEventListener('click', () => { rpMode = 'lucky'; syncModeUI(); });
+    btnFixed.addEventListener('click', () => { rpMode = 'fixed'; syncModeUI(); });
+    const cntInput = modal.querySelector('#rpCountInput');
+    if (cntInput) cntInput.addEventListener('input', () => {
+        const t = parseInt(modal.querySelector('#rpTotalInput').value, 10);
+        const c = parseInt(cntInput.value, 10);
+        if (!isNaN(t) && !isNaN(c) && c > t) cntInput.value = t;
+        updateRpModeTip();
+    });
+    const totInput = modal.querySelector('#rpTotalInput');
+    if (totInput) totInput.addEventListener('input', () => {
+        const t = parseInt(totInput.value, 10);
+        const c = parseInt(cntInput.value, 10);
+        if (!isNaN(t) && !isNaN(c) && c > t) cntInput.value = t;
+        updateRpModeTip();
+    });
+}
+function closeRedPacketModal() { _restoreParentModalAfterChild(); const m = document.getElementById('redPacketModal'); if (m) m.remove(); }
+async function sendGroupRedPacket(gid) {
+    const me = gameState.clientId || '';
+    const modal = document.getElementById('redPacketModal');
+    const rpType = modal ? (modal.getAttribute('data-rp-type') || 'stars') : 'stars';
+    // 皮肤红包：随机赠送给群内一位成员（只能随机，不能普通/平分）
+    if (rpType === 'skin') {
+        const sel = document.getElementById('rpSkinSelect');
+        const skinId = sel ? sel.value : '';
+        const sk = ((gameState.playerData && gameState.playerData.skins && gameState.playerData.skins.available) || []).find(s => s.id === skinId);
+        if (!skinId || !sk) { if (typeof showNotification === 'function') showNotification('请先选择要赠送的皮肤', 2000); return; }
+        if (!confirm('确定送出皮肤「' + sk.name + '」？将随机赠送给群内一位成员，发出后自己不再拥有该皮肤')) return;
+        try {
+            const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/redpacket', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(gid), type: 'skin', skinId: sk.id, skinName: sk.name, skinIcon: sk.icon || '🎨' }) }).then(r => r.json());
+            if (d && d.success) {
+                closeRedPacketModal();
+                // 本地移除皮肤（皮肤红包已送出）
+                const skins = gameState.playerData && gameState.playerData.skins;
+                if (skins && Array.isArray(skins.unlocked)) {
+                    const i = skins.unlocked.indexOf(sk.id);
+                    if (i >= 0) skins.unlocked.splice(i, 1);
+                    if (skins.current === sk.id) skins.current = 'default';
+                }
+                if (typeof saveSkinData === 'function') saveSkinData();
+                if (typeof updateSkinShop === 'function') updateSkinShop();
+                if (typeof showNotification === 'function') showNotification('🎨 皮肤红包已发出！', 1800);
+            } else { if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '发送失败'), 2200); }
+        } catch (e) { if (typeof showNotification === 'function') showNotification('发送失败', 2000); }
+        return;
+    }
+    // 星星/金币红包
+    const total = parseInt(document.getElementById('rpTotalInput').value, 10);
+    const count = parseInt(document.getElementById('rpCountInput').value, 10);
+    const mode = (modal && modal.getAttribute('data-rp-mode')) === 'fixed' ? 'fixed' : 'lucky';
+    const curName = rpType === 'coins' ? '金币' : '星星';
+    const maxTot = rpType === 'coins' ? 5000 : 500;
+    const bal = rpType === 'coins' ? (gameState.coins || 0) : (gameState.stars || 0);
+    if (isNaN(total) || total < 1 || total > maxTot) { if (typeof showNotification === 'function') showNotification('金额需为 1-' + maxTot + ' ' + curName, 1800); return; }
+    if (isNaN(count) || count < 1 || count > 50) { if (typeof showNotification === 'function') showNotification('个数需为 1-50', 1800); return; }
+    if (count > total) { if (typeof showNotification === 'function') showNotification('红包个数不能超过' + curName + '总数', 1800); return; }
+    if (mode === 'fixed' && total % count !== 0) { if (typeof showNotification === 'function') showNotification('固定红包金额需能被个数整除（每人金额相同）', 2200); return; }
+    if (bal < total) { if (typeof showNotification === 'function') showNotification(curName + '不足！当前 ' + bal, 2200); return; }
+    if (!confirm('确定发送 ' + total + ' ' + curName + (mode === 'fixed' ? '普通红包（每人 ' + (total / count) + ' ' + curName + '，共 ' + count + ' 个）' : '拼手气红包（' + count + ' 个）') + '？')) return;
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/redpacket', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(gid), total, count, mode, type: rpType }) }).then(r => r.json());
+        if (d && d.success) {
+            closeRedPacketModal();
+            if (typeof showNotification === 'function') showNotification('🧧 红包已发出！', 1800);
+            try { if (rpType === 'coins' ? typeof fetchMyCoins === 'function' : typeof fetchMyStars === 'function') { if (rpType === 'coins') fetchMyCoins(); else fetchMyStars(); } } catch (e) {}
+        } else { if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '发送失败'), 2200); }
+    } catch (e) { if (typeof showNotification === 'function') showNotification('发送失败', 2000); }
+}
+
+// ===================== 群投票（前端）=====================
+function showGroupPollModal(gid) {
+    gid = String(gid);
+    const existing = document.getElementById('groupPollModal'); if (existing) existing.remove();
+    _hideParentModalForChild();
+    const modal = document.createElement('div');
+    modal.id = 'groupPollModal';
+    modal.setAttribute('data-gid', gid);
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000002;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = '<div style="background:#fff;color:#222;border-radius:12px;max-width:420px;width:92%;max-height:84vh;overflow-y:auto;padding:22px;position:relative;box-shadow:0 8px 30px rgba(0,0,0,0.3);">加载中…</div>';
+    document.body.appendChild(modal);
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeGroupPollModal(); });
+    loadGroupPolls(gid);
+}
+function closeGroupPollModal() { _restoreParentModalAfterChild(); const m = document.getElementById('groupPollModal'); if (m) m.remove(); }
+async function loadGroupPolls(gid) {
+    const modal = document.getElementById('groupPollModal');
+    if (!modal) return;
+    const me = gameState.clientId || '';
+    const box = modal.querySelector('div');
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/polls?clientId=' + encodeURIComponent(me) + '&groupId=' + encodeURIComponent(gid)).then(r => r.json());
+        const list = (d && d.success && Array.isArray(d.polls)) ? d.polls : [];
+        const _isMgr = _currentGroup && (_currentGroup.ownerClientId === me || ((_currentGroup.members || []).find(m => m.clientId === me) || {}).role === 'admin');
+        const cards = list.map(p => {
+            const isEnded = p.ended;
+            const optsHtml = p.options.map((o, i) => {
+                const count = (p.counts && p.counts[i]) || 0;
+                const pct = p.total > 0 ? Math.round(count / p.total * 100) : 0;
+                const mineVote = p.myVote === i;
+                if (isEnded) {
+                    return '<div style="margin-bottom:6px;font-size:13px;color:#222;"><div style="display:flex;justify-content:space-between;gap:6px;"><span>' + _friendEsc(o) + (mineVote ? ' <span style="color:#e53935;">✓</span>' : '') + '</span><span style="color:#999;flex-shrink:0;">' + count + ' 票 (' + pct + '%)</span></div>' +
+                        '<div style="height:6px;background:#f0f0f0;border-radius:3px;margin-top:3px;overflow:hidden;"><div style="height:100%;width:' + pct + '%;background:#7E57C2;"></div></div></div>';
+                }
+                return '<button class="poll-opt" data-poll="' + _friendEsc(p.id) + '" data-opt="' + i + '" style="display:block;width:100%;text-align:left;padding:8px 10px;margin-bottom:6px;border:1px solid ' + (mineVote ? '#7E57C2' : '#ddd') + ';border-radius:8px;background:' + (mineVote ? '#ede7f6' : '#fff') + ';color:#222;cursor:pointer;font-size:13px;">' + _friendEsc(o) + (mineVote ? ' <span style="color:#7E57C2;">（我的选择）</span>' : '') + '</button>';
+            }).join('');
+            const delBtn = (_isMgr || p.createdBy === me) ? '<button class="poll-del" data-poll="' + _friendEsc(p.id) + '" style="margin-top:8px;font-size:11px;color:#e53935;background:none;border:none;cursor:pointer;">🗑️ 删除投票</button>' : '';
+            return '<div style="border:1px solid #eee;border-radius:10px;padding:12px;margin-bottom:10px;">' +
+                '<div style="font-size:14px;font-weight:bold;color:#222;margin-bottom:2px;">' + _friendEsc(p.title) + '</div>' +
+                '<div style="font-size:11px;color:#999;margin-bottom:8px;">' + _friendEsc(p.createdByName || '') + ' 发起 · ' + (isEnded ? '已结束' : '截止 ' + new Date(p.endsAt).toLocaleString()) + ' · ' + p.total + ' 人参与</div>' +
+                optsHtml + delBtn + '</div>';
+        }).join('');
+        box.innerHTML =
+            '<button onclick="closeGroupPollModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>' +
+            '<h3 style="margin:0 0 12px;">📊 群投票</h3>' +
+            '<button onclick="showPollCreateForm()" style="width:100%;padding:9px;background:#7E57C2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;margin-bottom:12px;">➕ 发起投票</button>' +
+            (list.length ? cards : '<div style="font-size:13px;color:#999;text-align:center;padding:16px 0;">还没有投票，点上方发起一个吧～</div>');
+        modal.querySelectorAll('.poll-opt').forEach(btn => btn.addEventListener('click', () => voteGroupPoll(btn.getAttribute('data-poll'), parseInt(btn.getAttribute('data-opt'), 10), gid)));
+        modal.querySelectorAll('.poll-del').forEach(btn => btn.addEventListener('click', () => deleteGroupPoll(btn.getAttribute('data-poll'), gid)));
+    } catch (e) { box.innerHTML = '加载失败'; }
+}
+function showPollCreateForm() {
+    const modal = document.getElementById('groupPollModal');
+    if (!modal) return;
+    const box = modal.querySelector('div');
+    const gid = modal.getAttribute('data-gid');
+    box.innerHTML =
+        '<button onclick="closeGroupPollModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;">×</button>' +
+        '<h3 style="margin:0 0 12px;">📊 发起投票</h3>' +
+        '<div style="font-size:13px;color:#333;margin-bottom:4px;">投票标题</div>' +
+        '<input id="pollTitleInput" maxlength="60" placeholder="输入投票标题" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:10px;">' +
+        '<div id="pollOptsBox"></div>' +
+        '<button id="pollAddOpt" style="padding:6px 12px;background:#eee;color:#555;border:none;border-radius:7px;cursor:pointer;font-size:12px;margin-bottom:10px;">➕ 添加选项</button>' +
+        '<div style="font-size:13px;color:#333;margin-bottom:4px;">截止时间</div>' +
+        '<select id="pollEndSel" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:12px;">' +
+        '<option value="30">30 分钟后</option><option value="60">1 小时后</option><option value="180">3 小时后</option><option value="1440" selected>24 小时后</option><option value="4320">3 天后</option><option value="10080">7 天后</option></select>' +
+        '<div style="display:flex;gap:8px;"><button id="pollCreateBtn" style="flex:1;padding:10px;background:#7E57C2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">发布投票</button>' +
+        '<button onclick="loadGroupPolls(\'' + _friendEsc(gid) + '\')" style="padding:10px 14px;background:#eee;color:#555;border:none;border-radius:8px;cursor:pointer;font-size:14px;">返回</button></div>';
+    const addOpt = (val) => {
+        const box2 = modal.querySelector('#pollOptsBox');
+        const n = box2.querySelectorAll('.poll-opt-in').length;
+        if (n >= 8) { if (typeof showNotification === 'function') showNotification('最多 8 个选项', 1500); return; }
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
+        row.innerHTML = '<input class="poll-opt-in" maxlength="30" placeholder="选项 ' + (n + 1) + '" value="' + (val || '') + '" style="flex:1;padding:7px 9px;border:1px solid #ddd;border-radius:7px;font-size:13px;">' +
+            '<button style="padding:4px 9px;background:#ffebee;color:#e53935;border:1px solid #ffcdd2;border-radius:6px;cursor:pointer;font-size:12px;">✕</button>';
+        row.querySelector('button').onclick = () => row.remove();
+        box2.appendChild(row);
+    };
+    addOpt(''); addOpt('');
+    modal.querySelector('#pollAddOpt').onclick = () => addOpt('');
+    modal.querySelector('#pollCreateBtn').onclick = () => createGroupPoll(modal.getAttribute('data-gid'));
+}
+async function createGroupPoll(gid) {
+    const me = gameState.clientId || '';
+    const title = document.getElementById('pollTitleInput').value.trim();
+    const opts = Array.from(document.querySelectorAll('.poll-opt-in')).map(i => i.value.trim()).filter(Boolean);
+    const endsInMinutes = parseInt(document.getElementById('pollEndSel').value, 10) || 1440;
+    if (!title) { if (typeof showNotification === 'function') showNotification('请输入标题', 1500); return; }
+    if (opts.length < 2) { if (typeof showNotification === 'function') showNotification('至少需要 2 个选项', 1500); return; }
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/poll/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(gid), title, options: opts, endsInMinutes }) }).then(r => r.json());
+        if (d && d.success) { if (typeof showNotification === 'function') showNotification('✅ 投票已发布', 1500); loadGroupPolls(gid); }
+        else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '创建失败'), 2000);
+    } catch (e) { if (typeof showNotification === 'function') showNotification('创建失败', 2000); }
+}
+async function voteGroupPoll(pollId, option, gid) {
+    const me = gameState.clientId || '';
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/poll/vote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(gid), pollId, option }) }).then(r => r.json());
+        if (d && d.success) { if (typeof showNotification === 'function') showNotification('✅ 已投票', 1200); loadGroupPolls(gid); }
+        else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '投票失败'), 2000);
+    } catch (e) { if (typeof showNotification === 'function') showNotification('投票失败', 2000); }
+}
+async function deleteGroupPoll(pollId, gid) {
+    const me = gameState.clientId || '';
+    if (!confirm('删除这个投票？')) return;
+    try {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/poll/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(gid), pollId }) }).then(r => r.json());
+        if (d && d.success) { if (typeof showNotification === 'function') showNotification('已删除', 1200); loadGroupPolls(gid); }
+        else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '操作失败'), 2000);
+    } catch (e) { if (typeof showNotification === 'function') showNotification('操作失败', 2000); }
+}
+// 从 toast 跳转到某个群的聊天窗口
+function openGroupChatByGid(gid) {
+    gid = String(gid);
+    const nm = _groupNameCache[gid] || '群聊';
+    try { closeFriendChatModal(); } catch (e) {}
+    showGroupChatModal(gid, nm);
 }
 async function markGroupChatRead(groupId) {
     const me = gameState.clientId || '';
@@ -7935,12 +8674,32 @@ async function pollGroupChatMessages(groupId) {
     try {
         const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/messages?clientId=' + encodeURIComponent(me) + '&groupId=' + encodeURIComponent(groupId)).then(r => r.json());
         const list = (d && d.success && Array.isArray(d.messages)) ? d.messages : [];
-        list.forEach(m => { if (m.id) { const ex = log.querySelector('[data-mid="' + String(m.id).replace(/"/g, '\\"') + '"]'); if (ex) ex.remove(); } });
-        const have = new Set();
-        log.querySelectorAll('[data-mid]').forEach(e => { const id = e.getAttribute('data-mid'); if (id) have.add(id); });
-        let appended = false;
-        list.forEach(m => { if (m.id && have.has(m.id)) return; _appendFriendChatMsg(m, me, { group: true }); appended = true; });
-        if (appended) { const tip = log.querySelector('[data-emptytip]'); if (tip) tip.remove(); }
+        // 增量更新（不重建已有气泡，避免图片/内容闪烁）：
+        // 已渲染的真实消息 id（乐观临时气泡 data-tmp 不算）
+        const rendered = new Set();
+        log.querySelectorAll('[data-mid]').forEach(e => { const id = e.getAttribute('data-mid'); if (id && e.getAttribute('data-tmp') !== '1') rendered.add(id); });
+        const serverIds = new Set();
+        list.forEach(m => { if (m.id) serverIds.add(String(m.id)); });
+        let changed = false;
+        // 1) 服务端已不存在的消息（被删除/已过滤）：移除本地气泡
+        rendered.forEach(id => {
+            if (!serverIds.has(id)) {
+                const el = log.querySelector('[data-mid="' + id.replace(/"/g, '\\"') + '"]');
+                if (el) { el.remove(); changed = true; }
+            }
+        });
+        // 2) 被撤回的消息：本地气泡替换为撤回占位
+        list.forEach(m => {
+            if (m.recalled && m.id && rendered.has(String(m.id))) {
+                const el = log.querySelector('[data-mid="' + String(m.id).replace(/"/g, '\\"') + '"]');
+                if (el && el.getAttribute('data-recalled') !== '1') {
+                    try { _replaceBubbleWithRecalled(el, String(m.fromClientId) === me); el.setAttribute('data-recalled', '1'); changed = true; } catch (e) {}
+                }
+            }
+        });
+        // 3) 新消息 append（_appendFriendChatMsg 内部按 id 去重 + 自动替换乐观临时气泡）
+        list.forEach(m => { if (m.id && rendered.has(String(m.id))) return; _appendFriendChatMsg(m, me, { group: true }); changed = true; });
+        if (changed) { const tip = log.querySelector('[data-emptytip]'); if (tip) tip.remove(); }
     } catch (e) {}
 }
 // @ 群成员：弹出成员列表，选中后往输入框插入 @@CID:xxx@@ 标记
@@ -7985,6 +8744,7 @@ async function sendChatMedia(chatType, chatId, file) {
         }).then(r => r.json());
         if (!d || !d.success) { if (typeof showNotification === 'function') showNotification('⚠️ ' + ((d && d.message) || '上传失败'), 2200); return; }
         const card = { fileId: d.fileId, name: file.name || 'image.png', type: (file.type || 'image') };
+        _mediaCache[d.fileId] = dataUrl; // 本地缓存，发送方立即可见，无需回拉
         _friendChatSendText(MEDIA_SHARE_PREFIX + JSON.stringify(card));
         if (typeof showNotification === 'function') showNotification('🖼️ 图片已发送', 1400);
     } catch (e) { if (typeof showNotification === 'function') showNotification('发送失败', 1800); }
@@ -7999,18 +8759,58 @@ async function _groupOnImagePicked(ev) {
 }
 // 聊天图片/媒体卡前缀（后接 JSON：{fileId,name,type}）；图片转 base64 经 /api/chat/media 上传
 const MEDIA_SHARE_PREFIX = 'MEDIA:';
+// 发送方本地图片缓存：刚上传的图片直接用本地 dataURL 渲染，无需回拉服务器（避免裂图/网络抖动）
+const _mediaCache = {};
 // 聊天图片/媒体卡渲染：图片异步加载（fileId → /api/chat/media），其他类型渲染为下载链接
+// 注入图片加载转圈的 CSS keyframes（聊天气泡图片与预览弹窗共用）
+function _ensureImgSpin() {
+    if (typeof document === 'undefined') return;
+    if (!document.getElementById('imgPreviewSpinKeyframes')) {
+        const st = document.createElement('style');
+        st.id = 'imgPreviewSpinKeyframes';
+        st.textContent = '@keyframes imgPreviewSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+        document.head.appendChild(st);
+    }
+}
 function _renderMediaCard(bubble, media, mine) {
     const isImage = /^image\//.test(media.type || '') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(media.name || '');
     if (isImage) {
         const img = document.createElement('img');
-        img.style.cssText = 'max-width:220px;max-height:240px;border-radius:8px;display:block;cursor:pointer;';
+        img.style.cssText = 'max-width:220px;max-height:240px;border-radius:8px;display:none;cursor:pointer;';
         img.alt = media.name || '图片';
-        img.onclick = () => openChatMedia(media.fileId, media.name);
+        img.onclick = () => showImagePreviewModal(media.fileId, media.name);
         bubble.appendChild(img);
-        if (GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0) {
-            fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/chat/media/' + encodeURIComponent(media.fileId)).then(r => r.text()).then(txt => { if (txt) img.src = txt; }).catch(() => {});
-        }
+        // 加载中提示（请求发出但服务器未响应时持续显示，直到收到响应/重试结束）
+        const loadTip = document.createElement('div');
+        loadTip.style.cssText = 'font-size:12px;color:' + (mine ? 'rgba(255,255,255,0.85)' : '#999') + ';padding:4px 0;display:flex;align-items:center;gap:6px;';
+        loadTip.innerHTML = '<span style="width:12px;height:12px;border:2px solid ' + (mine ? 'rgba(255,255,255,0.4)' : '#ccc') + ';border-top-color:#7E57C2;border-radius:50%;display:inline-block;animation:imgPreviewSpin 0.8s linear infinite;"></span><span>加载中…</span>';
+        bubble.appendChild(loadTip);
+        _ensureImgSpin();
+        const showImg = (txt) => { img.src = txt; img.style.display = 'block'; if (loadTip.parentNode) loadTip.remove(); };
+        const failImg = (msg) => { if (loadTip.parentNode) loadTip.remove(); const ph = _mediaFailedPlaceholder(media, mine, msg); if (img.parentNode) img.parentNode.replaceChild(ph, img); };
+        const tryLoad = (attempt) => {
+            if (!img.parentNode) return; // 气泡已被移除/关闭
+            // 优先用本地缓存（发送方刚上传的图片，立即可见）
+            if (_mediaCache[media.fileId]) { showImg(_mediaCache[media.fileId]); return; }
+            if (!(GAME_SERVER_URL && GAME_SERVER_URL.indexOf('http') === 0)) { loadTip.innerHTML = '无法连接服务器'; return; }
+            fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/chat/media/' + encodeURIComponent(media.fileId))
+                .then(r => r.text().then(txt => ({ ok: r.ok, txt })))
+                .then(({ ok, txt }) => {
+                    // 收到响应：成功显示 / 明确失败给占位
+                    if (ok && txt && txt.indexOf('data:') === 0) { _mediaCache[media.fileId] = txt; showImg(txt); }
+                    else { failImg(); }
+                })
+                .catch(() => {
+                    // 服务器无响应：保持「加载中」提示并自动重试（最多 3 次，间隔 2s）
+                    if (attempt < 3) {
+                        loadTip.innerHTML = '<span style="width:12px;height:12px;border:2px solid ' + (mine ? 'rgba(255,255,255,0.4)' : '#ccc') + ';border-top-color:#7E57C2;border-radius:50%;display:inline-block;animation:imgPreviewSpin 0.8s linear infinite;"></span><span>服务器无响应，重试中…</span>';
+                        setTimeout(() => tryLoad(attempt + 1), 2000);
+                    } else {
+                        failImg('🖼️ 服务器无响应（点击重试）');
+                    }
+                });
+        };
+        tryLoad(0);
     } else {
         const a = document.createElement('a');
         a.textContent = '📎 ' + (media.name || '文件');
@@ -8020,12 +8820,66 @@ function _renderMediaCard(bubble, media, mine) {
         bubble.appendChild(a);
     }
 }
+// 图片加载失败时的占位（点击重试，弹 modal 重新加载），替代浏览器裂图
+function _mediaFailedPlaceholder(media, mine, msg) {
+    const span = document.createElement('span');
+    span.textContent = msg || '🖼️ 图片已失效（点击重试）';
+    span.title = media.name || '图片';
+    span.style.cssText = 'display:inline-block;padding:8px 10px;background:' + (mine ? 'rgba(255,255,255,.18)' : '#f0f0f0') + ';color:' + (mine ? '#fff' : '#888') + ';border-radius:8px;font-size:12px;cursor:pointer;';
+    span.onclick = () => { try { showImagePreviewModal(media.fileId, media.name); } catch (e) {} };
+    return span;
+}
+// 聊天图片预览弹窗：点击图片弹出 modal 展示原图（替代新窗口）；加载中显示提示，随时可点关闭
+function showImagePreviewModal(fileId, name) {
+    const existing = document.getElementById('imagePreviewModal'); if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'imagePreviewModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:2147483645;display:flex;align-items:center;justify-content:center;flex-direction:column;';
+    const img = document.createElement('img');
+    img.style.cssText = 'max-width:92vw;max-height:82vh;border-radius:8px;box-shadow:0 6px 30px rgba(0,0,0,0.5);';
+    img.alt = name || '图片';
+    const title = document.createElement('div');
+    title.style.cssText = 'color:#ddd;font-size:13px;margin-top:12px;max-width:90vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    title.textContent = name || '';
+    const close = document.createElement('button');
+    close.textContent = '✕';
+    close.style.cssText = 'position:absolute;top:12px;right:16px;background:rgba(255,255,255,0.15);border:none;color:#fff;font-size:20px;width:38px;height:38px;border-radius:50%;cursor:pointer;z-index:2;';
+    const tip = document.createElement('div');
+    tip.style.cssText = 'color:#aaa;font-size:13px;margin-bottom:10px;display:flex;align-items:center;gap:8px;';
+    tip.innerHTML = '<span style="width:14px;height:14px;border:2px solid #888;border-top-color:#fff;border-radius:50%;display:inline-block;animation:imgPreviewSpin 0.8s linear infinite;"></span><span>正在加载…</span>';
+    _ensureImgSpin();
+    modal.appendChild(close); modal.appendChild(tip); modal.appendChild(img); modal.appendChild(title);
+    document.body.appendChild(modal);
+    close.onclick = () => modal.remove();
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+    const setTip = (t) => { tip.innerHTML = '<span style="width:14px;height:14px;border:2px solid #888;border-top-color:#fff;border-radius:50%;display:inline-block;animation:imgPreviewSpin 0.8s linear infinite;"></span><span>' + t + '</span>'; };
+    const tryLoad = (attempt) => {
+        if (document.getElementById('imagePreviewModal') !== modal) return; // 已关闭
+        // 优先本地缓存（已加载过的图片直接展示，不重复下载）
+        if (_mediaCache[fileId]) { tip.style.display = 'none'; img.src = _mediaCache[fileId]; return; }
+        if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) { tip.innerHTML = '无法连接服务器（点击空白关闭）'; return; }
+        fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/chat/media/' + encodeURIComponent(fileId))
+            .then(r => r.text().then(txt => ({ ok: r.ok, txt })))
+            .then(({ ok, txt }) => {
+                // 收到响应：成功显示 / 明确失败给提示
+                if (ok && txt && txt.indexOf('data:') === 0) { _mediaCache[fileId] = txt; img.src = txt; tip.style.display = 'none'; }
+                else { tip.innerHTML = '图片已失效或加载失败（点击空白关闭）'; }
+            })
+            .catch(() => {
+                // 服务器无响应：保持「正在加载」并自动重试（最多 3 次，间隔 2s）
+                if (attempt < 3) { setTip('服务器无响应，正在重试…（' + (attempt + 1) + '/3）'); setTimeout(() => tryLoad(attempt + 1), 2000); }
+                else { tip.innerHTML = '服务器无响应（点击空白关闭后重试）'; }
+            });
+    };
+    tryLoad(0);
+}
 function openChatMedia(fileId, name) {
     if (!GAME_SERVER_URL || GAME_SERVER_URL.indexOf('http') !== 0) return;
-    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/chat/media/' + encodeURIComponent(fileId)).then(r => r.text()).then(txt => {
-        if (!txt) return;
+    fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/chat/media/' + encodeURIComponent(fileId)).then(r => r.text().then(txt => ({ ok: r.ok, txt }))).then(({ ok, txt }) => {
+        if (!ok || !txt || txt.indexOf('data:') !== 0) { if (typeof showNotification === 'function') showNotification('图片已失效或加载失败', 1800); return; }
+        _mediaCache[fileId] = txt;
         try { const w = window.open('', '_blank'); if (w) { w.document.open(); w.document.write('<title>' + (name || 'media') + '</title><body style="margin:0;background:#111;display:flex;justify-content:center;align-items:center;"><img src="' + txt + '" style="max-width:100%;max-height:100vh;"></body>'); w.document.close(); } } catch (e) {}
-    }).catch(() => {});
+    }).catch(() => { if (typeof showNotification === 'function') showNotification('图片加载失败', 1800); });
 }
 // 转义用于 innerHTML 拼接的任意文本
 function _friendEsc(v) {
@@ -9171,7 +10025,7 @@ function showFriendChatModal(friendClientId, friendName) {
     modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;';
     modal.innerHTML = `
         <div style="background:#fff;color:#222;border-radius:12px;max-width:460px;width:92%;height:80vh;max-height:80vh;display:flex;flex-direction:column;position:relative;overflow:hidden;">
-            <button onclick="closeFriendChatModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;z-index:2;">×</button>
+            <button onclick="closeFriendChatModal()" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:24px;cursor:pointer;color:#666;z-index:10;">×</button>
             <div style="padding:14px 16px;border-bottom:1px solid #eee;font-weight:bold;font-size:16px;">💬 与 ${_friendEsc(_dispFriendName)} 聊天</div>
             <div id="chatSearchBar" style="display:none;align-items:center;gap:6px;padding:6px 12px;background:#fafafa;border-bottom:1px solid #eee;">
                 <input id="chatSearchInput" type="text" placeholder="搜索聊天记录…" style="flex:1;min-width:0;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;">
@@ -9643,7 +10497,10 @@ function _appendFriendChatMsg(msg, me, opts) {
     let senderName = '';
     try {
         if (opts.group) {
-            senderName = msg.fromName || '群友';
+            // 群内昵称优先，其次玩家名
+            const _gid = _currentChat && _currentChat.id;
+            const _nmap = _gid ? (_groupNicknameCache[String(_gid)] || {}) : {};
+            senderName = (msg.fromClientId && _nmap[msg.fromClientId]) || msg.fromName || '群友';
         } else if (msg.fromClientId === me) {
             senderName = gameState.playerName || '我';
         } else {
@@ -9719,6 +10576,20 @@ function _appendFriendChatMsg(msg, me, opts) {
         wrap.appendChild(bubble);
         wrap.setAttribute('data-contentkey', contentKey);
         wrap.setAttribute('data-msgkey', (msg.id || '') + '|' + (msg.createdAt || '') + '|' + (msg.fromClientId || '') + '|' + (msg.message || ''));
+        // 图片/附件也支持撤回、删除（好友与群聊通用）
+        _appendMsgOps(wrap, msg, mine, opts, me);
+        log.appendChild(wrap);
+        log.scrollTop = log.scrollHeight;
+        return wrap;
+    }
+    // 群红包卡片：前缀 REDPACKET: 后接 JSON（{rpId,total,count}），点一下抢红包
+    let rpCard = null;
+    if (_txt.indexOf(REDPACKET_SHARE_PREFIX) === 0) { try { rpCard = JSON.parse(_txt.slice(REDPACKET_SHARE_PREFIX.length)); } catch (e) {} }
+    if (rpCard && rpCard.rpId) {
+        _renderRedPacketCard(bubble, rpCard, mine);
+        wrap.appendChild(bubble);
+        wrap.setAttribute('data-contentkey', contentKey);
+        wrap.setAttribute('data-msgkey', (msg.id || '') + '|' + (msg.createdAt || '') + '|' + (msg.fromClientId || '') + '|' + (msg.message || ''));
         log.appendChild(wrap);
         log.scrollTop = log.scrollHeight;
         return wrap;
@@ -9750,7 +10621,13 @@ function _appendFriendChatMsg(msg, me, opts) {
             const cid = rest.slice(idx + 6, end);
             if (idx > 0) frag.appendChild(document.createTextNode(rest.slice(0, idx)));
             let nm = '群友';
-            try { if (opts.group && _currentGroup) { const mm = _currentGroup.members.find(m => m.clientId === cid); if (mm) nm = mm.name; } else if (typeof friendDisplayName === 'function') nm = friendDisplayName(cid); } catch (e) {}
+            try {
+                if (opts.group) {
+                    const _gid = _currentChat && _currentChat.id;
+                    const _nmap = _gid ? (_groupNicknameCache[String(_gid)] || {}) : {};
+                    nm = _nmap[cid] || ((_currentGroup && _currentGroup.members) ? (_currentGroup.members.find(m => m.clientId === cid) || {}).name : '') || '群友';
+                } else if (typeof friendDisplayName === 'function') nm = friendDisplayName(cid);
+            } catch (e) {}
             const span = document.createElement('span');
             span.style.cssText = 'color:#1565c0;font-weight:bold;';
             span.textContent = '@' + nm;
@@ -9767,40 +10644,25 @@ function _appendFriendChatMsg(msg, me, opts) {
         wrap.appendChild(at);
     }
     wrap.appendChild(bubble);
-    // 自己发送的真实消息（有服务器 id）：气泡下方显示「已读/未读」+「撤回/删除」操作（乐观临时气泡等轮询替换为真实 id 后才有）
-    if (mine && msg.id) {
-        const ops = document.createElement('div');
-        ops.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:3px;font-size:11px;color:#999;';
-        if (!opts.group) {
-            const read = document.createElement('span');
-            read.className = 'msg-read-state';
-            read.textContent = msg.readAt ? '已读' : '未读';
-            ops.appendChild(read);
+    // 群管理：置顶 / 取消置顶（仅群主/管理员；对普通文本消息显示）
+    if (opts.group && msg.id && !isTmp && !msg.recalled) {
+        const _gMgr = _currentGroup && (_currentGroup.ownerClientId === me || ((_currentGroup.members || []).find(m => m.clientId === me) || {}).role === 'admin');
+        if (_gMgr) {
+            const pinOp = document.createElement('span');
+            pinOp.style.cssText = 'font-size:11px;color:#f57c00;cursor:pointer;margin-top:3px;';
+            const isPinned = _currentGroup && _currentGroup.pinnedMessage && _currentGroup.pinnedMessage.id === msg.id;
+            pinOp.textContent = isPinned ? '📌 取消置顶' : '📌 置顶';
+            pinOp.onclick = () => {
+                fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/groups/message/pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: me, groupId: String(_currentChat.id), messageId: String(msg.id) }) }).then(r => r.json()).then(dd => {
+                    if (dd && dd.success) { if (_currentGroup) _currentGroup.pinnedMessage = dd.pinned; updateGroupPinnedBar(_currentGroup); }
+                    else if (typeof showNotification === 'function') showNotification('⚠️ ' + ((dd && dd.message) || '操作失败'), 2000);
+                }).catch(() => {});
+            };
+            wrap.appendChild(pinOp);
         }
-        if (!msg.recalled) {
-            let canRecall = false;
-            if (opts.group) {
-                const _isMgr = _currentGroup && (_currentGroup.ownerClientId === me || ((_currentGroup.members.find(m => m.clientId === me) || {}).role === 'admin'));
-                let _self2min = false; try { _self2min = Date.now() - new Date(msg.createdAt).getTime() <= 120000; } catch (e) {}
-                canRecall = !!_isMgr || _self2min;
-            } else {
-                try { canRecall = Date.now() - new Date(msg.createdAt).getTime() <= 120000; } catch (e) {}
-            }
-            if (canRecall) {
-                const rb = document.createElement('span');
-                rb.style.cssText = 'cursor:pointer;color:#ff7043;';
-                rb.textContent = '撤回';
-                rb.onclick = () => recallFriendMessage(msg.id, wrap);
-                ops.appendChild(rb);
-            }
-            const db = document.createElement('span');
-            db.style.cssText = 'cursor:pointer;color:#999;';
-            db.textContent = '删除';
-            db.onclick = () => deleteFriendMessage(msg.id, wrap);
-            ops.appendChild(db);
-        }
-        wrap.appendChild(ops);
     }
+    // 自己发送的真实消息（有服务器 id）：气泡下方显示「已读/未读」+「撤回/删除」操作（乐观临时气泡等轮询替换为真实 id 后才有）
+    _appendMsgOps(wrap, msg, mine, opts, me);
     wrap.setAttribute('data-contentkey', contentKey);
     const key = (msg.id || '') + '|' + (msg.createdAt || '') + '|' + (msg.fromClientId || '') + '|' + (msg.message || '');
     wrap.setAttribute('data-msgkey', key);
@@ -9808,13 +10670,13 @@ function _appendFriendChatMsg(msg, me, opts) {
     log.scrollTop = log.scrollHeight;
     return wrap;
 }
-// 撤回消息（2 分钟内、仅发送方；成功后在本地把气泡替换为撤回占位）
-async function recallFriendMessage(messageId, wrap) {
+// 撤回消息（好友 2 分钟内、仅发送方；群聊：群主/管理员可撤回任意消息，本人 2 分钟内可撤回自己的；成功后在本地把气泡替换为撤回占位）
+async function recallFriendMessage(messageId, wrap, isGroup) {
     const me = gameState.clientId || '';
     if (!me || !messageId) return;
-    if (!confirm('撤回这条消息？（2 分钟内可撤回，双方都将看不到）')) return;
+    if (!confirm(isGroup ? '撤回这条消息？（本人 2 分钟内可撤回；群主/管理员可撤回任意消息，撤回后全群都将看不到）' : '撤回这条消息？（2 分钟内可撤回，双方都将看不到）')) return;
     try {
-        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/message/recall', {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + (isGroup ? '/api/groups/message/recall' : '/api/friends/message/recall'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ messageId: String(messageId), clientId: me })
         }).then(r => r.json());
@@ -9826,13 +10688,13 @@ async function recallFriendMessage(messageId, wrap) {
         }
     } catch (e) { if (typeof showNotification === 'function') showNotification('撤回失败', 2000); }
 }
-// 删除消息（仅自己可见，对方不受影响；仅限自己发送的消息）
-async function deleteFriendMessage(messageId, wrap) {
+// 删除消息（仅自己可见，对方/群内其他人不受影响；仅限自己发送的消息，群主/管理员可删除任意成员消息）
+async function deleteFriendMessage(messageId, wrap, isGroup) {
     const me = gameState.clientId || '';
     if (!me || !messageId) return;
-    if (!confirm('删除这条消息？（仅自己可见，对方不受影响）')) return;
+    if (!confirm(isGroup ? '删除这条消息？（仅自己可见，群内其他人不受影响）' : '删除这条消息？（仅自己可见，对方不受影响）')) return;
     try {
-        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + '/api/friends/message/delete', {
+        const d = await fetch(GAME_SERVER_URL.replace(/\/+$/, '') + (isGroup ? '/api/groups/message/delete' : '/api/friends/message/delete'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ messageId: String(messageId), clientId: me })
         }).then(r => r.json());
@@ -9852,6 +10714,42 @@ function _replaceBubbleWithRecalled(wrap, mine) {
     b.style.cssText = 'padding:6px 12px;border-radius:12px;font-size:13px;color:#999;background:' + (mine ? 'rgba(255,255,255,0.25)' : '#e9e9e9') + ';';
     b.textContent = mine ? '你撤回了一条消息' : '对方撤回了一条消息';
     wrap.appendChild(b);
+}
+// 自己发送的真实消息（有服务器 id）：气泡下方显示「已读/未读」+「撤回/删除」操作（好友与群聊通用，文本/图片/附件等均可；乐观临时气泡等轮询替换为真实 id 后才有）
+function _appendMsgOps(wrap, msg, mine, opts, me) {
+    if (!mine || !msg.id || !wrap) return;
+    opts = opts || {};
+    const ops = document.createElement('div');
+    ops.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:3px;font-size:11px;color:#999;';
+    if (!opts.group) {
+        const read = document.createElement('span');
+        read.className = 'msg-read-state';
+        read.textContent = msg.readAt ? '已读' : '未读';
+        ops.appendChild(read);
+    }
+    if (!msg.recalled) {
+        let canRecall = false;
+        if (opts.group) {
+            const _isMgr = _currentGroup && (_currentGroup.ownerClientId === me || ((_currentGroup.members.find(m => m.clientId === me) || {}).role === 'admin'));
+            let _self2min = false; try { _self2min = Date.now() - new Date(msg.createdAt).getTime() <= 120000; } catch (e) {}
+            canRecall = !!_isMgr || _self2min;
+        } else {
+            try { canRecall = Date.now() - new Date(msg.createdAt).getTime() <= 120000; } catch (e) {}
+        }
+        if (canRecall) {
+            const rb = document.createElement('span');
+            rb.style.cssText = 'cursor:pointer;color:#ff7043;';
+            rb.textContent = '撤回';
+            rb.onclick = () => recallFriendMessage(msg.id, wrap, !!opts.group);
+            ops.appendChild(rb);
+        }
+        const db = document.createElement('span');
+        db.style.cssText = 'cursor:pointer;color:#999;';
+        db.textContent = '删除';
+        db.onclick = () => deleteFriendMessage(msg.id, wrap, !!opts.group);
+        ops.appendChild(db);
+    }
+    wrap.appendChild(ops);
 }
 // 渲染"地图文件卡"（好友聊天里分享云地图）：像文件附件一样，点一下导入自己的工坊并直接试玩
 function _renderMazeShareCard(bubble, card, mine) {
@@ -31336,8 +32234,18 @@ function validateMazeWithFeedback() {
     return ok;
 }
 
+// 移除页面级加载遮罩（浏览器刷新/打开页面时显示的转圈层）
+function removePageLoading() {
+    const el = document.getElementById('pageLoadingOverlay');
+    if (el && el.parentNode) { try { el.parentNode.removeChild(el); } catch (e) {} }
+}
+// 兜底：即使初始化异常/极慢，最迟 6 秒也强制移除遮罩，避免页面被永久挡住
+setTimeout(function () { try { removePageLoading(); } catch (e) {} }, 6000);
+
 // 页面加载完成后的初始化
 document.addEventListener('DOMContentLoaded', () => {
+    // 页面加载遮罩：DOM 就绪即可移除
+    try { removePageLoading(); } catch (e) {}
     // 存档自检已内置：loadSaveStore() 每次读取都会用 isValidSave() 过滤掉损坏的槽，
     // 不再需要启动时全量扫描修复。
     loadSkinData(); // 恢复已购买/已选中的皮肤
