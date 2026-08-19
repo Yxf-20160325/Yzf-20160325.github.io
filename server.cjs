@@ -477,6 +477,9 @@ const DB_TABLES_SQL = [
         to_client_id VARCHAR(64),
         message TEXT,
         created_at VARCHAR(32),
+        read_at VARCHAR(32),
+        recalled TINYINT(1) DEFAULT 0,
+        deleted_for TEXT,
         PRIMARY KEY (chat_id, id),
         INDEX idx_fm_chat (chat_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
@@ -485,6 +488,36 @@ const DB_TABLES_SQL = [
         code VARCHAR(16),
         PRIMARY KEY (client_id),
         UNIQUE INDEX idx_fc_code (code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS chat_groups (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        name VARCHAR(64) NOT NULL,
+        owner_client_id VARCHAR(64),
+        created_at VARCHAR(32),
+        announcement TEXT,
+        members TEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS chat_group_messages (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        group_id VARCHAR(64) NOT NULL,
+        from_client_id VARCHAR(64),
+        from_name VARCHAR(64),
+        message TEXT,
+        created_at VARCHAR(32),
+        recalled TINYINT(1) DEFAULT 0,
+        mentions TEXT,
+        deleted_for TEXT,
+        INDEX idx_cgm_g (group_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS chat_media (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        owner_client_id VARCHAR(64),
+        chat_type VARCHAR(16),
+        chat_id VARCHAR(64),
+        name VARCHAR(128),
+        content MEDIUMTEXT,
+        created_at VARCHAR(32),
+        INDEX idx_cm_chat (chat_type, chat_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -588,6 +621,17 @@ async function initDatabase() {
                 if (!pmCols || pmCols.length === 0) {
                     await pool.query('ALTER TABLE cloud_storage_mazes ADD COLUMN is_public TINYINT(1) NOT NULL DEFAULT 0');
                     console.log('🗄️ 已为 cloud_storage_mazes 表补充 is_public 列（云地图公开/私有）');
+                }
+                // 迁移：friend_messages 表补充 read_at / recalled / deleted_for 列（聊天已读回执 / 撤回 / 仅自己删除）
+                const [fmCols] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='friend_messages' AND COLUMN_NAME='read_at'",
+                    [dbName]
+                );
+                if (!fmCols || fmCols.length === 0) {
+                    await pool.query('ALTER TABLE friend_messages ADD COLUMN read_at VARCHAR(32)');
+                    await pool.query('ALTER TABLE friend_messages ADD COLUMN recalled TINYINT(1) DEFAULT 0');
+                    await pool.query('ALTER TABLE friend_messages ADD COLUMN deleted_for TEXT');
+                    console.log('🗄️ 已为 friend_messages 表补充 read_at/recalled/deleted_for 列（聊天撤回/已读/删除）');
                 }
                 // 补充 cloud_link_accounts 表的 two_factor_enabled 列
                 const [ltfaCols] = await pool.query(
@@ -2960,11 +3004,16 @@ async function dbLoadFriendsAll() {
             id: r.id, fromClientId: r.from_client_id, fromName: r.from_name, toClientId: r.to_client_id,
             toName: r.to_name, status: r.status, message: r.message || '', createdAt: r.created_at, updatedAt: r.updated_at
         }));
-        const [ms] = await pool.query('SELECT chat_id, id, from_client_id, to_client_id, message, created_at FROM friend_messages');
+        const [ms] = await pool.query('SELECT chat_id, id, from_client_id, to_client_id, message, created_at, read_at, recalled, deleted_for FROM friend_messages');
         ms.forEach(m => {
             const k = m.chat_id;
             if (!friendMessages.has(k)) friendMessages.set(k, []);
-            friendMessages.get(k).push({ id: m.id, fromClientId: m.from_client_id, toClientId: m.to_client_id, message: m.message, createdAt: m.created_at });
+            let deletedFor = [];
+            try { deletedFor = m.deleted_for ? JSON.parse(m.deleted_for) : []; } catch (e) {}
+            friendMessages.get(k).push({
+                id: m.id, fromClientId: m.from_client_id, toClientId: m.to_client_id, message: m.message, createdAt: m.created_at,
+                readAt: m.read_at || null, recalled: !!m.recalled, deletedFor
+            });
         });
         return true;
     } catch (e) { console.error('[Friends][DB] 加载失败:', e.message); return false; }
@@ -2981,8 +3030,8 @@ async function dbSaveFriendsAll() {
         }
         for (const [chatId, arr] of friendMessages.entries()) {
             for (const m of arr) {
-                await pool.query('REPLACE INTO friend_messages (chat_id, id, from_client_id, to_client_id, message, created_at) VALUES (?,?,?,?,?,?)',
-                    [chatId, m.id, m.fromClientId, m.toClientId, m.message, m.createdAt]);
+                await pool.query('REPLACE INTO friend_messages (chat_id, id, from_client_id, to_client_id, message, created_at, read_at, recalled, deleted_for) VALUES (?,?,?,?,?,?,?,?,?)',
+                    [chatId, m.id, m.fromClientId, m.toClientId, m.message, m.createdAt, m.readAt || null, m.recalled ? 1 : 0, JSON.stringify(m.deletedFor || [])]);
             }
         }
         return true;
@@ -3674,19 +3723,23 @@ app.get('/api/friends/relation', (req, res) => {
 // 发送好友私聊消息
 app.post('/api/friends/message', (req, res) => {
     try {
-        const { fromClientId, toClientId, message } = req.body || {};
+        const { fromClientId, toClientId, message, clientMsgId } = req.body || {};
         if (!fromClientId || !toClientId) return res.json({ success: false, message: '缺少账号信息' });
         if (!areFriends(fromClientId, toClientId)) return res.json({ success: false, message: '只有好友才能聊天' });
         const text = (message || '').toString();
         if (!text.trim()) return res.json({ success: false, message: '消息不能为空' });
+        // clientMsgId 幂等去重：离线队列重连补发时复用同一 clientMsgId，避免重复落库
+        const id = clientMsgId ? ('fm_' + String(clientMsgId)) : ('fm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6));
+        const k = friendshipKey(fromClientId, toClientId);
+        if (!friendMessages.has(k)) friendMessages.set(k, []);
+        if (friendMessages.get(k).some(m => m.id === id)) {
+            return res.json({ success: true, message: { id, duplicate: true } });
+        }
         const msg = {
-            id: 'fm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
-            fromClientId, toClientId,
+            id, fromClientId, toClientId,
             message: text.slice(0, 2000),
             createdAt: new Date().toISOString()
         };
-        const k = friendshipKey(fromClientId, toClientId);
-        if (!friendMessages.has(k)) friendMessages.set(k, []);
         friendMessages.get(k).push(msg);
         const arr = friendMessages.get(k);
         if (arr.length > 500) friendMessages.set(k, arr.slice(-500));
@@ -3741,7 +3794,7 @@ app.get('/api/friends/file/:fileId', (req, res) => {
     }
 });
 
-// 获取与某好友的聊天记录
+// 获取与某好友的聊天记录（含 readAt/recalled；过滤「仅自己删除」的消息）
 app.get('/api/friends/messages', (req, res) => {
     try {
         const a = (req.query.clientId || '').toString();
@@ -3749,12 +3802,114 @@ app.get('/api/friends/messages', (req, res) => {
         if (!a || !b) return res.json({ success: true, messages: [] });
         const k = friendshipKey(a, b);
         const arr = friendMessages.get(k) || [];
-        const out = arr.slice(-200).map(m => ({
-            id: m.id, fromClientId: m.fromClientId, toClientId: m.toClientId,
-            message: m.message, createdAt: m.createdAt
-        }));
+        const out = arr.slice(-200)
+            .filter(m => !(m.deletedFor || []).includes(a))
+            .map(m => ({
+                id: m.id, fromClientId: m.fromClientId, toClientId: m.toClientId,
+                message: m.recalled ? '' : m.message, createdAt: m.createdAt,
+                recalled: !!m.recalled, readAt: m.readAt || null
+            }));
         res.json({ success: true, messages: out });
     } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// 按 id 查找聊天消息（遍历所有会话）
+function findFriendMessage(messageId) {
+    for (const arr of friendMessages.values()) {
+        for (const m of arr) { if (m.id === messageId) return m; }
+    }
+    return null;
+}
+
+// 撤回消息（2 分钟内、仅发送方；双方都看不到，内容清空）
+app.post('/api/friends/message/recall', (req, res) => {
+    try {
+        const { messageId, clientId } = req.body || {};
+        if (!messageId || !clientId) return res.json({ success: false, message: '缺少参数' });
+        const msg = findFriendMessage(String(messageId));
+        if (!msg) return res.json({ success: false, message: '消息不存在' });
+        if (msg.fromClientId !== clientId) return res.json({ success: false, message: '只能撤回自己发送的消息' });
+        if (msg.recalled) return res.json({ success: false, message: '该消息已撤回' });
+        const created = new Date(msg.createdAt).getTime();
+        if (isNaN(created) || Date.now() - created > 120000) {
+            return res.json({ success: false, message: '超过 2 分钟，无法撤回' });
+        }
+        msg.recalled = true;
+        msg.message = '';
+        saveFriends();
+        try { pushToNotificationSocket(msg.toClientId, 'friend-message-recalled', { messageId: msg.id, fromClientId: msg.fromClientId }); } catch (e) {}
+        res.json({ success: true });
+    } catch (e) {
+        console.error('[Friends] 撤回消息失败:', e);
+        res.status(500).json({ success: false, message: '撤回失败' });
+    }
+});
+
+// 删除消息（仅自己可见，双方记录保留但对方不受影响；仅限自己发送的消息）
+app.post('/api/friends/message/delete', (req, res) => {
+    try {
+        const { messageId, clientId } = req.body || {};
+        if (!messageId || !clientId) return res.json({ success: false, message: '缺少参数' });
+        const msg = findFriendMessage(String(messageId));
+        if (!msg) return res.json({ success: false, message: '消息不存在' });
+        if (msg.fromClientId !== clientId) return res.json({ success: false, message: '只能删除自己发送的消息' });
+        msg.deletedFor = msg.deletedFor || [];
+        if (!msg.deletedFor.includes(clientId)) msg.deletedFor.push(clientId);
+        saveFriends();
+        res.json({ success: true });
+    } catch (e) {
+        console.error('[Friends] 删除消息失败:', e);
+        res.status(500).json({ success: false, message: '删除失败' });
+    }
+});
+
+// 标记已读：对方发给我的消息全部置 readAt（打开聊天窗口时调用）
+app.post('/api/friends/read', (req, res) => {
+    try {
+        const { clientId, friendClientId } = req.body || {};
+        if (!clientId || !friendClientId) return res.json({ success: false, message: '缺少参数' });
+        const k = friendshipKey(clientId, friendClientId);
+        const arr = friendMessages.get(k) || [];
+        const now = new Date().toISOString();
+        let changed = false;
+        for (const m of arr) {
+            if (m.fromClientId === friendClientId && !m.readAt) { m.readAt = now; changed = true; }
+        }
+        if (changed) {
+            saveFriends();
+            // 通知消息发送方：你发的消息已被对方阅读（聊天窗口内实时刷新「已读」）
+            try { pushToNotificationSocket(friendClientId, 'friend-message-read', { fromClientId: clientId }); } catch (e) {}
+        }
+        res.json({ success: true });
+    } catch (e) {
+        console.error('[Friends] 标记已读失败:', e);
+        res.status(500).json({ success: false, message: '操作失败' });
+    }
+});
+
+// 未读统计：对方发给我的未读消息数（按发送方分组；已读=readAt 非空；排除撤回/已删）
+app.get('/api/friends/unread', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, unread: {} });
+        const unread = {};
+        for (const [k, arr] of friendMessages) {
+            const sep = k.indexOf('|');
+            if (sep <= 0 || !Array.isArray(arr)) continue;
+            const a = k.slice(0, sep), b = k.slice(sep + 1);
+            if (a !== clientId && b !== clientId) continue;
+            const other = (a === clientId) ? b : a;
+            for (const m of arr) {
+                if (m.fromClientId !== other) continue; // 只统计对方发的
+                if (m.recalled || (m.deletedFor || []).includes(clientId)) continue;
+                if (!m.readAt) unread[other] = (unread[other] || 0) + 1;
+            }
+        }
+        res.json({ success: true, unread });
+    } catch (e) {
+        console.error('[Friends] 未读统计失败:', e);
         res.status(500).json({ success: false, message: '查询失败' });
     }
 });
@@ -3881,6 +4036,371 @@ app.post('/api/friends/gift/respond', (req, res) => {
         console.error('[Gifts] 处理礼物失败:', e);
         res.status(500).json({ success: false, message: '处理失败' });
     }
+});
+
+// 撤回礼物（仅赠送方；24 小时内且对方未领取；已领取/已拒绝/超时不可撤）
+app.post('/api/friends/gift/cancel', (req, res) => {
+    try {
+        const { giftId, clientId } = req.body || {};
+        if (!giftId || !clientId) return res.json({ success: false, message: '缺少参数' });
+        const gift = gifts.get(giftId);
+        if (!gift) return res.json({ success: false, message: '礼物不存在' });
+        if (gift.fromClientId !== clientId) return res.json({ success: false, message: '只有赠送方可以撤回' });
+        if (gift.status === 'accepted') return res.json({ success: false, message: '对方已领取，无法撤回' });
+        if (gift.status === 'declined') return res.json({ success: false, message: '对方已拒绝，无需撤回' });
+        if (gift.status !== 'pending') return res.json({ success: false, message: '该礼物已处理，无法撤回' });
+        const created = new Date(gift.createdAt).getTime();
+        if (isNaN(created) || Date.now() - created >= 24 * 3600 * 1000) {
+            return res.json({ success: false, message: '已超过 24 小时，无法撤回' });
+        }
+        gift.status = 'cancelled';
+        gift.updatedAt = new Date().toISOString();
+        saveGifts();
+        try { pushToNotificationSocket(gift.toClientId, 'friend-gift-cancelled', { giftId, fromClientId: gift.fromClientId, fromName: gift.fromName }); } catch (e) {}
+        console.log(`[Gifts] ${gift.fromName}(${gift.fromClientId}) 撤回了送给 ${gift.toName}(${gift.toClientId}) 的礼物`);
+        res.json({ success: true, status: 'cancelled' });
+    } catch (e) {
+        console.error('[Gifts] 撤回礼物失败:', e);
+        res.status(500).json({ success: false, message: '撤回失败' });
+    }
+});
+
+// ===================== 群聊（多人聊天室 / 群主管理 / @提醒 / 群公告）=====================
+// 数据模型全走内存 Map + JSON 文件（有 pool 时同步落 MySQL），与好友私聊一致。
+// - groups: Map<groupId, {id,name,ownerClientId,createdAt,announcement,members:{[cid]:{role,nickname,muted,joinedAt,lastReadAt}}}>
+// - groupMessages: Map<groupId, [msg]>
+// - mediaFiles: Map<fileId, {id,ownerClientId,chatType,chatId,name,content,createdAt}>  (聊天富媒体：图片等，content=base64)
+let groups = new Map();
+let groupMessages = new Map();
+let mediaFiles = new Map();
+const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
+function genGroupId() { return 'grp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
+function genGroupMsgId() { return 'gm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6); }
+function isGroupManager(g, clientId) { const m = g.members[String(clientId)]; return !!m && (m.role === 'owner' || m.role === 'admin'); }
+function groupPublic(g, viewerCid) {
+    const members = Object.keys(g.members).map(cid => {
+        const m = g.members[cid];
+        const op = onlinePlayers.get(cid) || {};
+        const prof = homeProfiles.get(cid) || {};
+        return {
+            clientId: cid,
+            name: (op.name || prof.name || '玩家').toString(),
+            avatar: prof.avatar || '😀',
+            color: prof.color || '#4CAF50',
+            online: !!onlinePlayers.has(cid),
+            role: m.role, nickname: m.nickname || '', muted: !!m.muted,
+            joinedAt: m.joinedAt, lastReadAt: m.lastReadAt
+        };
+    });
+    return { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members };
+}
+function loadGroupsFromJson() {
+    try {
+        if (fs.existsSync(GROUPS_FILE)) {
+            const d = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')) || {};
+            (d.groups || []).forEach(g => { if (g && g.id) groups.set(g.id, { id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members || {} }); });
+            (d.messages || []).forEach(({ groupId, msgs }) => { if (groupId && Array.isArray(msgs)) groupMessages.set(groupId, msgs); });
+        }
+    } catch (e) { console.error('[Groups] JSON 加载失败:', e.message); }
+}
+async function dbLoadGroups() {
+    if (!pool) return false;
+    try {
+        const [gs] = await pool.query('SELECT id,name,owner_client_id,created_at,announcement,members FROM chat_groups');
+        gs.forEach(r => { let members = {}; try { members = JSON.parse(r.members || '{}'); } catch (e) {} groups.set(r.id, { id: r.id, name: r.name, ownerClientId: r.owner_client_id, createdAt: r.created_at, announcement: r.announcement || '', members }); });
+        const [ms] = await pool.query('SELECT id,group_id,from_client_id,from_name,message,created_at,recalled,mentions,deleted_for FROM chat_group_messages');
+        ms.forEach(r => {
+            if (!groupMessages.has(r.group_id)) groupMessages.set(r.group_id, []);
+            let mentions = []; try { mentions = JSON.parse(r.mentions || '[]'); } catch (e) {}
+            let df = []; try { df = JSON.parse(r.deleted_for || '[]'); } catch (e) {}
+            groupMessages.get(r.group_id).push({ id: r.id, fromClientId: r.from_client_id, fromName: r.from_name, message: r.message, createdAt: r.created_at, recalled: !!r.recalled, mentions, deletedFor: df });
+        });
+        const [md] = await pool.query('SELECT id,owner_client_id,chat_type,chat_id,name,content,created_at FROM chat_media');
+        md.forEach(r => mediaFiles.set(r.id, { id: r.id, ownerClientId: r.owner_client_id, chatType: r.chat_type, chatId: r.chat_id, name: r.name, content: r.content, createdAt: r.created_at }));
+        return true;
+    } catch (e) { console.error('[Groups][DB] 加载失败:', e.message); return false; }
+}
+async function loadGroups() {
+    if (pool) { const ok = await dbLoadGroups(); if (!ok) loadGroupsFromJson(); }
+    else loadGroupsFromJson();
+}
+function saveGroups() {
+    ensureDataDir();
+    try {
+        const data = {
+            groups: Array.from(groups.values()).map(g => ({ id: g.id, name: g.name, ownerClientId: g.ownerClientId, createdAt: g.createdAt, announcement: g.announcement || '', members: g.members })),
+            messages: Array.from(groupMessages.entries()).map(([gid, arr]) => ({ groupId: gid, msgs: arr }))
+        };
+        fs.writeFileSync(GROUPS_FILE, JSON.stringify(data, null, 2));
+    } catch (e) { console.error('[Groups] JSON 保存失败:', e.message); }
+    if (pool) dbSaveGroups().catch(() => {});
+}
+async function dbSaveGroups() {
+    if (!pool) return false;
+    try {
+        for (const g of groups.values()) {
+            await pool.query('REPLACE INTO chat_groups (id,name,owner_client_id,created_at,announcement,members) VALUES (?,?,?,?,?,?)',
+                [g.id, g.name, g.ownerClientId, g.createdAt, g.announcement || '', JSON.stringify(g.members || {})]);
+        }
+        for (const [gid, arr] of groupMessages.entries()) {
+            for (const m of arr) {
+                await pool.query('REPLACE INTO chat_group_messages (id,group_id,from_client_id,from_name,message,created_at,recalled,mentions,deleted_for) VALUES (?,?,?,?,?,?,?,?,?)',
+                    [m.id, gid, m.fromClientId, m.fromName || '', m.message, m.createdAt, m.recalled ? 1 : 0, JSON.stringify(m.mentions || []), JSON.stringify(m.deletedFor || [])]);
+            }
+        }
+        for (const f of mediaFiles.values()) {
+            await pool.query('REPLACE INTO chat_media (id,owner_client_id,chat_type,chat_id,name,content,created_at) VALUES (?,?,?,?,?,?,?)',
+                [f.id, f.ownerClientId, f.chatType, f.chatId, f.name, f.content, f.createdAt]);
+        }
+        return true;
+    } catch (e) { console.error('[Groups][DB] 保存失败:', e.message); return false; }
+}
+
+// 创建群
+app.post('/api/groups/create', (req, res) => {
+    try {
+        const { clientId, name, memberClientIds } = req.body || {};
+        if (!clientId) return res.json({ success: false, message: '缺少账号' });
+        const nm = (name || '').toString().trim().slice(0, 30) || '新群聊';
+        const members = {};
+        const now = new Date().toISOString();
+        members[String(clientId)] = { role: 'owner', nickname: '', muted: false, joinedAt: now, lastReadAt: now };
+        const list = Array.isArray(memberClientIds) ? memberClientIds.map(String) : [];
+        for (const cid of list) {
+            cid = String(cid);
+            if (cid && cid !== String(clientId) && !members[cid]) members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: now, lastReadAt: null };
+        }
+        const g = { id: genGroupId(), name: nm, ownerClientId: String(clientId), createdAt: now, announcement: '', members };
+        groups.set(g.id, g);
+        saveGroups();
+        for (const cid of Object.keys(members)) {
+            if (cid !== String(clientId)) { try { pushToNotificationSocket(cid, 'group-member-added', { group: groupPublic(g, cid) }); } catch (e) {} }
+        }
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 创建失败:', e); res.status(500).json({ success: false, message: '创建失败' }); }
+});
+
+// 邀请成员（群主/管理员）
+app.post('/api/groups/invite', (req, res) => {
+    try {
+        const { clientId, groupId, memberClientIds } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可邀请' });
+        const list = Array.isArray(memberClientIds) ? memberClientIds.map(String) : [];
+        const added = [];
+        for (const cid of list) {
+            cid = String(cid);
+            if (cid && !g.members[cid]) { g.members[cid] = { role: 'member', nickname: '', muted: false, joinedAt: new Date().toISOString(), lastReadAt: null }; added.push(cid); }
+        }
+        if (added.length) {
+            saveGroups();
+            for (const cid of added) { try { pushToNotificationSocket(cid, 'group-member-added', { group: groupPublic(g, cid) }); } catch (e) {} }
+        }
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 邀请失败:', e); res.status(500).json({ success: false, message: '邀请失败' }); }
+});
+
+// 退出群（群主退出则转移给最早加入者；群空则解散）
+app.post('/api/groups/leave', (req, res) => {
+    try {
+        const { clientId, groupId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        const wasOwner = g.ownerClientId === String(clientId);
+        delete g.members[clientId];
+        if (wasOwner) {
+            const others = Object.keys(g.members);
+            if (others.length === 0) { groups.delete(groupId); }
+            else {
+                let next = null, min = Infinity;
+                for (const c of others) { const t = new Date(g.members[c].joinedAt || 0).getTime(); if (t < min) { min = t; next = c; } }
+                if (next) { g.ownerClientId = next; g.members[next].role = 'owner'; }
+            }
+        }
+        saveGroups();
+        res.json({ success: true, dissolved: !groups.has(groupId) });
+    } catch (e) { console.error('[Groups] 退群失败:', e); res.status(500).json({ success: false, message: '退群失败' }); }
+});
+
+// 踢人（群主/管理员）
+app.post('/api/groups/kick', (req, res) => {
+    try {
+        const { clientId, groupId, targetClientId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '无权限' });
+        if (String(targetClientId) === String(g.ownerClientId)) return res.json({ success: false, message: '不能踢群主' });
+        if (!g.members[targetClientId]) return res.json({ success: false, message: '该成员不在群内' });
+        delete g.members[targetClientId];
+        saveGroups();
+        try { pushToNotificationSocket(targetClientId, 'group-member-removed', { groupId, byClientId: clientId }); } catch (e) {}
+        res.json({ success: true, group: groupPublic(g, clientId) });
+    } catch (e) { console.error('[Groups] 踢人失败:', e); res.status(500).json({ success: false, message: '踢人失败' }); }
+});
+
+// 修改群公告（群主/管理员）
+app.put('/api/groups/announcement', (req, res) => {
+    try {
+        const { clientId, groupId, announcement } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!clientId || !isGroupManager(g, clientId)) return res.json({ success: false, message: '只有群主/管理员可修改公告' });
+        g.announcement = (announcement || '').toString().slice(0, 500);
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-announcement-updated', { groupId, announcement: g.announcement }); } catch (e) {} }
+        res.json({ success: true, announcement: g.announcement });
+    } catch (e) { console.error('[Groups] 公告修改失败:', e); res.status(500).json({ success: false, message: '修改失败' }); }
+});
+
+// 设置自己在该群的免打扰
+app.post('/api/groups/member/mute', (req, res) => {
+    try {
+        const { clientId, groupId, muted } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g || !g.members[clientId]) return res.json({ success: false, message: '无权限' });
+        g.members[clientId].muted = !!muted;
+        saveGroups();
+        res.json({ success: true, muted: g.members[clientId].muted });
+    } catch (e) { console.error('[Groups] 免打扰设置失败:', e); res.status(500).json({ success: false, message: '设置失败' }); }
+});
+
+// 群发消息（含 @提及）
+app.post('/api/groups/message', (req, res) => {
+    try {
+        const { clientId, groupId, message, mentions, clientMsgId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g) return res.json({ success: false, message: '群不存在' });
+        if (!g.members[clientId]) return res.json({ success: false, message: '你不在该群' });
+        const text = (message || '').toString();
+        if (!text.trim()) return res.json({ success: false, message: '消息为空' });
+        const id = clientMsgId ? ('gm_' + String(clientMsgId)) : genGroupMsgId();
+        if (groupMessages.has(groupId) && groupMessages.get(groupId).some(m => m.id === id)) {
+            return res.json({ success: true, message: { id, duplicate: true } });
+        }
+        const fromName = _resolveFriendName(clientId);
+        const msg = {
+            id, groupId, fromClientId: String(clientId), fromName,
+            message: text.slice(0, 2000), createdAt: new Date().toISOString(),
+            recalled: false, mentions: Array.isArray(mentions) ? mentions.map(String) : [], deletedFor: []
+        };
+        if (!groupMessages.has(groupId)) groupMessages.set(groupId, []);
+        groupMessages.get(groupId).push(msg);
+        const arr = groupMessages.get(groupId);
+        if (arr.length > 500) groupMessages.set(groupId, arr.slice(-500));
+        saveGroups();
+        for (const cid of Object.keys(g.members)) {
+            try { pushToNotificationSocket(cid, 'group-message-received', { groupId, message: msg, fromClientId: msg.fromClientId, fromName: msg.fromName }); } catch (e) {}
+        }
+        res.json({ success: true, message: msg });
+    } catch (e) { console.error('[Groups] 群发消息失败:', e); res.status(500).json({ success: false, message: '发送失败' }); }
+});
+
+// 获取群聊天记录
+app.get('/api/groups/messages', (req, res) => {
+    try {
+        const a = (req.query.clientId || '').toString();
+        const gid = (req.query.groupId || '').toString();
+        const g = groups.get(gid);
+        if (!g || !g.members[a]) return res.json({ success: true, messages: [] });
+        const arr = groupMessages.get(gid) || [];
+        const out = arr.slice(-200)
+            .filter(m => !(m.deletedFor || []).includes(a))
+            .map(m => ({ id: m.id, fromClientId: m.fromClientId, fromName: m.fromName, message: m.recalled ? '' : m.message, createdAt: m.createdAt, recalled: !!m.recalled, mentions: m.mentions || [], readAt: m.readAt || null }));
+        res.json({ success: true, messages: out });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
+// 我所在的群列表
+app.get('/api/groups/list', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, groups: [] });
+        const out = [];
+        for (const g of groups.values()) { if (g.members[clientId]) out.push(groupPublic(g, clientId)); }
+        res.json({ success: true, groups: out });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
+// 标记群聊已读（更新自己的 lastReadAt）
+app.post('/api/groups/read', (req, res) => {
+    try {
+        const { clientId, groupId } = req.body || {};
+        const g = groups.get(groupId);
+        if (!g || !g.members[clientId]) return res.json({ success: false });
+        g.members[clientId].lastReadAt = new Date().toISOString();
+        saveGroups();
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
+});
+
+// 群未读统计（按 lastReadAt 计算）
+app.get('/api/groups/unread', (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.json({ success: true, unread: {} });
+        const unread = {};
+        for (const [gid, arr] of groupMessages) {
+            const g = groups.get(gid);
+            if (!g || !g.members[clientId]) continue;
+            const lastRead = g.members[clientId].lastReadAt ? new Date(g.members[clientId].lastReadAt).getTime() : 0;
+            let n = 0;
+            for (const m of arr) {
+                if (m.fromClientId === clientId) continue;
+                if (m.recalled) continue;
+                if ((m.deletedFor || []).includes(clientId)) continue;
+                if (new Date(m.createdAt).getTime() > lastRead) n++;
+            }
+            if (n > 0) unread[gid] = n;
+        }
+        res.json({ success: true, unread });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
+// 撤回群消息（自己 2 分钟内，或群主/管理员任意时间）
+app.post('/api/groups/message/recall', (req, res) => {
+    try {
+        const { clientId, messageId } = req.body || {};
+        let found = null, gid = null;
+        for (const [k, arr] of groupMessages) { const m = arr.find(x => x.id === String(messageId)); if (m) { found = m; gid = k; break; } }
+        if (!found) return res.json({ success: false, message: '消息不存在' });
+        const g = groups.get(gid);
+        const isManager = g && isGroupManager(g, clientId);
+        if (found.fromClientId !== String(clientId) && !isManager) return res.json({ success: false, message: '只能撤回自己发送或群管可撤回的消息' });
+        if (found.recalled) return res.json({ success: false, message: '该消息已撤回' });
+        if (found.fromClientId === String(clientId) && Date.now() - new Date(found.createdAt).getTime() > 120000) return res.json({ success: false, message: '超过 2 分钟，无法撤回' });
+        found.recalled = true; found.message = '';
+        saveGroups();
+        for (const cid of Object.keys(g.members)) { try { pushToNotificationSocket(cid, 'group-message-recalled', { groupId: gid, messageId: found.id }); } catch (e) {} }
+        res.json({ success: true });
+    } catch (e) { console.error('[Groups] 撤回失败:', e); res.status(500).json({ success: false, message: '撤回失败' }); }
+});
+
+// 上传聊天富媒体（图片等，content=base64）。好友或群成员可上传到对应会话。
+app.post('/api/chat/media', (req, res) => {
+    try {
+        const { clientId, chatType, chatId, name, content } = req.body || {};
+        if (!clientId || !chatId) return res.json({ success: false, message: '缺少参数' });
+        if (chatType === 'group') { const g = groups.get(chatId); if (!g || !g.members[clientId]) return res.json({ success: false, message: '你不在该群' }); }
+        else { if (!areFriends(clientId, chatId)) return res.json({ success: false, message: '仅好友之间可发送' }); }
+        const raw = (content == null ? '' : content.toString());
+        if (!raw) return res.json({ success: false, message: '内容为空' });
+        if (raw.length > 3000000) return res.json({ success: false, message: '文件过大（上限 3MB）' });
+        const id = 'md_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+        mediaFiles.set(id, { id, ownerClientId: String(clientId), chatType: chatType || 'friend', chatId: String(chatId), name: (name || 'file').toString().slice(0, 120), content: raw, createdAt: new Date().toISOString() });
+        if (mediaFiles.size > 500) { const oldest = Array.from(mediaFiles.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0]; if (oldest) mediaFiles.delete(oldest.id); }
+        saveGroups();
+        res.json({ success: true, fileId: id });
+    } catch (e) { console.error('[Chat] 媒体上传失败:', e); res.status(500).json({ success: false, message: '上传失败' }); }
+});
+app.get('/api/chat/media/:fileId', (req, res) => {
+    try {
+        const f = mediaFiles.get(req.params.fileId);
+        if (!f) return res.status(404).json({ success: false, message: '文件不存在或已失效' });
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.send(f.content);
+    } catch (e) { res.status(500).json({ success: false, message: '下载失败' }); }
 });
 
 // 个人主页：管理员修改 / 禁用某玩家的主页
@@ -12500,6 +13020,7 @@ server.listen(PORT, () => {
     await loadAccounts();
     await loadHomeProfiles();
     await loadFriends();             // 好友请求 / 好友关系 / 私聊记录（MySQL 优先，JSON 兜底）
+    await loadGroups();             // 群聊（内存 + JSON / MySQL 兜底）
     loadFriendFiles();          // 好友聊天文件传输（JSON 等小文件，独立存储）
     await loadFriendCodes();          // 好友码（服务端权威随机码，MySQL 优先，JSON 兜底）
     loadGifts();                // 好友赠送礼物记录（JSON 文件持久化）
