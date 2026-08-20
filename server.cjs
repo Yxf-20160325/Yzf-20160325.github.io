@@ -779,6 +779,7 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     savereplay2fa: true,   // 云存档/云录像 账号是否允许使用二次认证（2FA）
     antiDevtools: false,
     showAntiCheatTab: true,
+    forceOfflineOnError: false, // 开启后：客户端加载服务器数据失败时不显示详情，自动强制进入离线模式（仅保留单人玩法）
     gamepadEnabled: true,  // 是否允许玩家连接/使用游戏手柄（含虚拟手柄测试）
     showKeybindTab: true,  // 是否显示 UI设置弹窗的「⌨️ 键位」标签页
     tutorialEnabled: true, // 是否允许新手指导（首次自动引导 + 调试页手动触发）
