@@ -13803,7 +13803,7 @@ server.listen(PORT, () => {
     console.log(`Socket.IO 服务已启动\n`);
 });
 
-(async () => {
+(async () => { 
     loadServerErrorsFromFile();   // 恢复重启前记录的异常
     await initDatabase();
     loadAdminState();
