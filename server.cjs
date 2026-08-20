@@ -1667,6 +1667,48 @@ app.use((req, res, next) => {
     next();
 });
 
+// ===== API 自定义规则（高级管理：改写返回 / 禁用 / 删除接口）=====
+// 管理员在后台配置规则，命中则按 action 处理：
+//   replace -> 返回自定义 JSON（默认 200）；disable -> 默认 403 拒绝；delete -> 默认 404 模拟接口不存在。
+// 规则 path 存完整形式（如 /api/ping、/api/admin/*，支持末尾 * 前缀通配）。
+// 规则自身管理接口（/api/admin/api-rules*）豁免，避免「删不掉规则」死锁。
+const API_RULES_FILE = path.join(DATA_DIR, 'api-rules.json');
+let apiRules = []; // { id, method('*'|'GET'|'POST'|...), path, action('replace'|'disable'|'delete'), status, bodyJson, note, enabled, createdAt }
+function loadApiRules() {
+    try { const a = JSON.parse(fs.readFileSync(API_RULES_FILE, 'utf8')); if (Array.isArray(a)) apiRules = a; } catch (e) {}
+}
+function saveApiRules() { try { fs.writeFileSync(API_RULES_FILE, JSON.stringify(apiRules, null, 2)); } catch (e) { console.error('[api-rules] 保存失败:', e.message); } }
+loadApiRules();
+function _apiRuleMatches(rule, method, fullPath) {
+    if (!rule || !rule.enabled) return false;
+    const mOk = rule.method === '*' || String(rule.method || 'GET').toUpperCase() === method;
+    if (!mOk) return false;
+    const rp = String(rule.path || '');
+    if (!rp) return false;
+    return rp.endsWith('*') ? fullPath.startsWith(rp.slice(0, -1)) : (fullPath === rp);
+}
+// 拦截中间件：挂在 /api 下，先于所有具体路由执行
+app.use('/api', (req, res, next) => {
+    const fullPath = '/api' + (req.path || '');
+    // 规则管理接口自身豁免
+    if (fullPath.startsWith('/api/admin/api-rules')) return next();
+    const method = (req.method || 'GET').toUpperCase();
+    for (const r of apiRules) {
+        if (!_apiRuleMatches(r, method, fullPath)) continue;
+        if (r.action === 'disable') {
+            return res.status(parseInt(r.status, 10) || 403).json({ success: false, message: r.note || '该接口已被管理员禁用' });
+        }
+        if (r.action === 'delete') {
+            return res.status(parseInt(r.status, 10) || 404).json({ success: false, message: r.note || '接口不存在' });
+        }
+        // replace：返回自定义 JSON
+        let body = null;
+        try { body = JSON.parse(r.bodyJson || '{}'); } catch (e) { body = { success: false, message: '自定义响应 JSON 无效' }; }
+        return res.status(parseInt(r.status, 10) || 200).json(body);
+    }
+    next();
+});
+
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 管理后台与超级管理员后台页面（游戏 403 拦截已排除这两个路径）
@@ -12106,6 +12148,68 @@ function publicGlobalFunctions() {
 }
 app.get('/api/admin/global-functions', (req, res) => {
     res.json({ success: true, functions: publicGlobalFunctions() });
+});
+
+// ===== API 自定义规则管理（admin 高级管理面板「🧪 API 自定义」）=====
+app.get('/api/admin/api-rules', requireAdminAuth, (req, res) => {
+    res.json({ success: true, rules: apiRules });
+});
+app.post('/api/admin/api-rules', requireAdminAuth, (req, res) => {
+    try {
+        const b = req.body || {};
+        const method = String(b.method || 'GET').toUpperCase();
+        const path = String(b.path || '').trim();
+        const action = ['replace', 'disable', 'delete'].includes(b.action) ? b.action : 'replace';
+        if (!path.startsWith('/api/')) return res.status(400).json({ success: false, message: '路径必须以 /api/ 开头（如 /api/ping）' });
+        if (path.startsWith('/api/admin/api-rules')) return res.status(400).json({ success: false, message: '不能为管理接口自身配置规则' });
+        const rule = {
+            id: 'rule-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+            method: ['*', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(method) ? method : 'GET',
+            path,
+            action,
+            status: parseInt(b.status, 10) || (action === 'replace' ? 200 : (action === 'disable' ? 403 : 404)),
+            bodyJson: String(b.bodyJson || ''),
+            note: String(b.note || '').slice(0, 200),
+            enabled: b.enabled !== false,
+            createdAt: Date.now()
+        };
+        apiRules.push(rule);
+        saveApiRules();
+        appendAudit('admin', 'create-api-rule', '新增API规则 ' + rule.method + ' ' + rule.path + ' -> ' + rule.action, req);
+        res.json({ success: true, rule });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '新增规则失败' });
+    }
+});
+app.put('/api/admin/api-rules/:id', requireAdminAuth, (req, res) => {
+    try {
+        const rule = apiRules.find(r => r.id === req.params.id);
+        if (!rule) return res.status(404).json({ success: false, message: '规则不存在' });
+        const b = req.body || {};
+        if (b.method) rule.method = ['*', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(String(b.method).toUpperCase()) ? String(b.method).toUpperCase() : rule.method;
+        if (b.path !== undefined) {
+            const p = String(b.path).trim();
+            if (p && !p.startsWith('/api/admin/api-rules')) rule.path = p;
+        }
+        if (b.action !== undefined) rule.action = ['replace', 'disable', 'delete'].includes(b.action) ? b.action : rule.action;
+        if (b.status !== undefined) rule.status = parseInt(b.status, 10) || rule.status;
+        if (b.bodyJson !== undefined) rule.bodyJson = String(b.bodyJson);
+        if (b.note !== undefined) rule.note = String(b.note).slice(0, 200);
+        if (b.enabled !== undefined) rule.enabled = b.enabled !== false;
+        saveApiRules();
+        appendAudit('admin', 'update-api-rule', '更新API规则 ' + rule.method + ' ' + rule.path, req);
+        res.json({ success: true, rule });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '更新规则失败' });
+    }
+});
+app.delete('/api/admin/api-rules/:id', requireAdminAuth, (req, res) => {
+    const i = apiRules.findIndex(r => r.id === req.params.id);
+    if (i < 0) return res.status(404).json({ success: false, message: '规则不存在' });
+    const removed = apiRules.splice(i, 1)[0];
+    saveApiRules();
+    appendAudit('admin', 'delete-api-rule', '删除API规则 ' + removed.method + ' ' + removed.path, req);
+    res.json({ success: true, message: '已删除规则' });
 });
 
 // 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
