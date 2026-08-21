@@ -199,6 +199,7 @@ const DB_TABLES_SQL = [
         button_url VARCHAR(1024) DEFAULT NULL,
         button_action VARCHAR(32) DEFAULT NULL,
         button_skin VARCHAR(32) DEFAULT NULL,
+        test_only TINYINT(1) DEFAULT 0,
         INDEX idx_ann_active_created (active, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS global_functions (
@@ -529,6 +530,17 @@ const DB_TABLES_SQL = [
         name VARCHAR(64),
         joined_at VARCHAR(32),
         INDEX idx_tm_joined (joined_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS test_feedback (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        client_id VARCHAR(64),
+        name VARCHAR(64),
+        feature_id VARCHAR(64),
+        feature_name VARCHAR(128),
+        content TEXT,
+        created_at VARCHAR(32),
+        INDEX idx_tf_feature (feature_id),
+        INDEX idx_tf_created (created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -570,6 +582,15 @@ async function initDatabase() {
                         await pool.query('ALTER TABLE announcements ADD COLUMN ' + col + ' ' + type);
                         console.log('🗄️ 已为 announcements 表补充 ' + col + ' 列（支持公告按钮）');
                     }
+                }
+                // 迁移：announcements 表补充 test_only 列（仅测试成员可见公告）
+                const [c2] = await pool.query(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='announcements' AND COLUMN_NAME='test_only'",
+                    [dbName]
+                );
+                if (!c2 || c2.length === 0) {
+                    await pool.query('ALTER TABLE announcements ADD COLUMN test_only TINYINT(1) DEFAULT 0');
+                    console.log('🗄️ 已为 announcements 表补充 test_only 列（支持仅测试成员可见公告）');
                 }
             } catch (e) { console.error('[公告] 补充按钮列失败:', e.message); }
             // 迁移：为已存在的 cloud_storage_accounts 表补充 max_mazes 列。
@@ -796,6 +817,8 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     tutorialEnabled: true, // 是否允许新手指导（首次自动引导 + 调试页手动触发）
     dailyCheckinEnabled: true, // 每日签到是否对玩家显示（admin 可关闭）
     testFeatures: true,    // 测试功能总开关：关闭后客户端「🧪 测试」标签页隐藏，无法加入测试 / 执行测试条目
+    fullVersion: true,     // 完整版激活码功能总开关：关闭后玩家无法兑换激活码（已解锁设备不受影响，本地激活标记仍有效）
+    trialMinutes: 30,      // 完整版试用时长（分钟）；0 表示不提供试用
     monthCard: { enabled: false, coinPrice: 300, realPrice: 30, wechatQr: '' }, // 月卡配置：开放开关 / 金币价 / 真钱价 / 微信收款码(base64)
     newUi: { mode: 'probability', prob: 100 }
 };
@@ -7630,7 +7653,7 @@ async function loadAnnouncementsFromStore() {
     if (DB_AVAILABLE && pool) {
         try {
             const [rows] = await pool.query(
-                'SELECT id, title, content, priority, active, created_by, created_at, button_text, button_url, button_action, button_skin FROM announcements ORDER BY created_at DESC'
+                'SELECT id, title, content, priority, active, created_by, created_at, button_text, button_url, button_action, button_skin, test_only FROM announcements ORDER BY created_at DESC'
             );
             return rows.map(r => ({
                 id: r.id,
@@ -7643,7 +7666,8 @@ async function loadAnnouncementsFromStore() {
                 buttonText: r.button_text,
                 buttonUrl: r.button_url,
                 buttonAction: r.button_action,
-                buttonSkin: r.button_skin
+                buttonSkin: r.button_skin,
+                testOnly: !!r.test_only
             }));
         } catch (e) {
             console.error('[公告] DB 读取失败，回退 JSON:', e.message);
@@ -7665,7 +7689,7 @@ async function saveAnnouncementsToJsonStore(arr) {
 }
 
 // 创建公告（返回创建的记录）。DB 优先，失败回退 JSON 文件。
-async function createAnnouncement({ title, content, priority, createdBy, buttonText, buttonUrl, buttonAction, buttonSkin }) {
+async function createAnnouncement({ title, content, priority, createdBy, buttonText, buttonUrl, buttonAction, buttonSkin, testOnly }) {
     const createdAt = new Date().toISOString();
     const rec = {
         id: null,
@@ -7678,13 +7702,14 @@ async function createAnnouncement({ title, content, priority, createdBy, buttonT
         buttonText: buttonText || null,
         buttonUrl: buttonUrl || null,
         buttonAction: buttonAction || null,
-        buttonSkin: buttonSkin || null
+        buttonSkin: buttonSkin || null,
+        testOnly: testOnly ? 1 : 0
     };
     if (DB_AVAILABLE && pool) {
         try {
             const [result] = await pool.query(
-                'INSERT INTO announcements (title, content, priority, active, created_by, created_at, button_text, button_url, button_action, button_skin) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt, rec.buttonText, rec.buttonUrl, rec.buttonAction, rec.buttonSkin]
+                'INSERT INTO announcements (title, content, priority, active, created_by, created_at, button_text, button_url, button_action, button_skin, test_only) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                [rec.title, rec.content, rec.priority, rec.active, rec.createdBy, rec.createdAt, rec.buttonText, rec.buttonUrl, rec.buttonAction, rec.buttonSkin, rec.testOnly]
             );
             rec.id = result.insertId;
             return rec;
@@ -7718,7 +7743,7 @@ async function deleteAnnouncementById(id) {
 // 管理员：发布公告（持久化 + 实时广播给所有在线客户端）
 app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
     try {
-        const { title, content, priority, buttonText, buttonUrl, buttonAction, buttonSkin } = req.body || {};
+        const { title, content, priority, buttonText, buttonUrl, buttonAction, buttonSkin, testOnly } = req.body || {};
         if (!title || !String(title).trim()) {
             return res.status(400).json({ success: false, message: '公告标题不能为空' });
         }
@@ -7756,7 +7781,7 @@ app.post('/api/admin/announcements', requireAdminAuth, async (req, res) => {
             }
         }
         const publisher = (req.admin && req.admin.name) || (req.admin && req.admin.role) || 'admin';
-        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher, buttonText: safeButtonText, buttonUrl: safeButtonUrl, buttonAction: safeButtonAction, buttonSkin: safeButtonSkin });
+        const rec = await createAnnouncement({ title, content, priority, createdBy: publisher, buttonText: safeButtonText, buttonUrl: safeButtonUrl, buttonAction: safeButtonAction, buttonSkin: safeButtonSkin, testOnly: !!testOnly });
         appendAudit('admin', 'announcement-create', `发布公告: ${String(title).slice(0, 80)}`);
         // 实时推送给所有在线客户端（游戏端监听 'announcement-new' 全屏弹出）
         io.emit('announcement-new', rec);
@@ -7794,11 +7819,15 @@ app.delete('/api/admin/announcements/:id', requireAdminAuth, async (req, res) =>
 });
 
 // 公开接口：游戏客户端拉取当前生效（active）公告，按优先级、时间排序
+// test_only 公告仅测试成员可见（query.clientId 为测试成员时返回）
 app.get('/api/announcements', async (req, res) => {
     try {
         const all = await loadAnnouncementsFromStore();
+        const cid = String(req.query.clientId || '').slice(0, 64);
+        const isTester = !!cid && testMembers.has(cid);
         const active = all
             .filter(a => a.active !== 0 && a.active !== false)
+            .filter(a => !a.testOnly || isTester) // 仅测试成员可见公告：非成员过滤掉
             .sort((a, b) => ((b.priority || 0) - (a.priority || 0)) || (a.createdAt < b.createdAt ? 1 : -1));
         res.json({ success: true, announcements: active });
     } catch (error) {
@@ -8485,6 +8514,135 @@ function genSaveCode() {
     return 'SV' + raw;
 }
 loadSaveCodes();
+
+// ===== 完整版激活码（admin 生成/管理；玩家兑换后解锁完整版退出演示模式；演示模式商业闭环）=====
+// 全局开关：globalFunctions.fullVersion（false 时禁止兑换；已解锁设备不受影响）
+// 存储：JSON 文件 data/activation-codes.json（Map code -> 激活码对象；与存档扩容码同构，无需 DB 迁移）
+// 绑定模式：'none' 不绑定 / 'device' 绑定设备 clientId / 'account' 绑定云账号（需登录）
+const ACTIVATION_CODES_FILE = path.join(DATA_DIR, 'activation-codes.json');
+let activationCodes = new Map(); // code -> { code, max_uses, used, bind, created_at, created_by, note, active, redeemed: [{clientId, accountId, name, ip, redeemedAt}] }
+function loadActivationCodes() {
+    try {
+        if (fs.existsSync(ACTIVATION_CODES_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(ACTIVATION_CODES_FILE, 'utf8'));
+            if (Array.isArray(arr)) arr.forEach(c => activationCodes.set(c.code, c));
+            console.log(`[激活码] 已从 ${ACTIVATION_CODES_FILE} 加载 ${activationCodes.size} 个激活码`);
+        }
+    } catch (e) { console.error('[激活码] 加载失败:', e.message); }
+}
+function saveActivationCodes() {
+    try { ensureDataDir(); fs.writeFileSync(ACTIVATION_CODES_FILE, JSON.stringify(Array.from(activationCodes.values()), null, 2)); }
+    catch (e) { console.error('[激活码] 保存失败:', e.message); }
+}
+function genActivationCode() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉易混字符 I O 0 1
+    let raw = '';
+    for (let i = 0; i < 16; i++) raw += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return 'VIP' + raw;
+}
+// 该 clientId / accountId 是否已激活过（任一激活码）
+function activationHitFor(clientId, accountId) {
+    for (const c of activationCodes.values()) {
+        const r = (c.redeemed || []).find(x => x.clientId === clientId || (accountId && x.accountId === accountId));
+        if (r) return { code: c.code, redeemedAt: r.redeemedAt, name: r.name || '', bind: c.bind };
+    }
+    return null;
+}
+loadActivationCodes();
+
+// 玩家：查询激活状态（本设备/账号是否已解锁完整版）
+app.get('/api/activation/status', (req, res) => {
+    const clientId = String(req.query.clientId || '').slice(0, 64);
+    const accountId = String(req.query.accountId || '').slice(0, 64);
+    const hit = (clientId || accountId) ? activationHitFor(clientId, accountId || null) : null;
+    res.json({
+        success: true,
+        enabled: globalFunctions.fullVersion !== false,
+        activated: !!hit,
+        activation: hit,
+        trialMinutes: (globalFunctions.trialMinutes && globalFunctions.trialMinutes > 0) ? globalFunctions.trialMinutes : 30
+    });
+});
+
+// 玩家：兑换激活码 → 解锁完整版
+app.post('/api/activation/redeem', (req, res) => {
+    try {
+        if (globalFunctions.fullVersion === false) return res.status(403).json({ success: false, message: '完整版激活功能当前未开放' });
+        const code = String((req.body && req.body.code) || '').trim().toUpperCase().slice(0, 32);
+        const clientId = String((req.body && req.body.clientId) || '').trim().slice(0, 64);
+        const accountId = String((req.body && req.body.accountId) || '').trim().slice(0, 64);
+        const name = String((req.body && req.body.name) || '').trim().slice(0, 40);
+        if (!code) return res.status(400).json({ success: false, message: '请输入激活码' });
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少设备标识' });
+        const c = activationCodes.get(code);
+        if (!c) return res.status(404).json({ success: false, message: '激活码不存在' });
+        if (c.active === false) return res.status(403).json({ success: false, message: '该激活码已停用' });
+        if ((c.redeemed || []).length >= c.max_uses) return res.status(400).json({ success: false, message: '该激活码已用尽' });
+        if (c.bind === 'account' && !accountId) return res.status(400).json({ success: false, message: '该激活码需登录云账号后兑换（防多端共用）' });
+        // 防重复/多端共用：本设备或本账号已激活过任意码
+        if (activationHitFor(clientId, accountId || null)) return res.status(400).json({ success: false, message: '该设备/账号已激活过完整版' });
+        c.redeemed = c.redeemed || [];
+        c.redeemed.push({ clientId, accountId: accountId || null, name: name || '玩家', ip: clientIp(req), redeemedAt: Date.now() });
+        c.used = c.redeemed.length;
+        saveActivationCodes();
+        appendAudit('player', 'activation-redeem', '兑换完整版激活码 ' + code + '（绑定:' + c.bind + ', 设备:' + clientId + (accountId ? ', 账号:' + accountId : '') + '）', req);
+        res.json({ success: true, message: '激活成功，完整版已解锁', code: c.code, bind: c.bind, redeemedAt: Date.now() });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '兑换失败' });
+    }
+});
+
+// admin：生成激活码
+app.post('/api/admin/activation-codes', requireAdminAuth, (req, res) => {
+    try {
+        const b = req.body || {};
+        const bind = ['account', 'device', 'none'].includes(b.bind) ? b.bind : 'none';
+        const code = genActivationCode();
+        activationCodes.set(code, {
+            code,
+            max_uses: parseInt(b.maxUses, 10) || 1,
+            used: 0,
+            bind,
+            created_at: Date.now(),
+            created_by: (req.admin && req.admin.name) || 'admin',
+            note: String(b.note || '').slice(0, 200),
+            active: true,
+            redeemed: []
+        });
+        saveActivationCodes();
+        appendAudit('admin', 'activation-code-create', '生成完整版激活码 ' + code + '（绑定:' + bind + ', 可用' + activationCodes.get(code).max_uses + '次）', req);
+        res.json({ success: true, code, message: '激活码已生成' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '生成失败' });
+    }
+});
+
+// admin：激活码列表
+app.get('/api/admin/activation-codes', requireAdminAuth, (req, res) => {
+    res.json({ success: true, codes: Array.from(activationCodes.values()) });
+});
+
+// admin：停用 / 启用激活码
+app.put('/api/admin/activation-codes/:code', requireAdminAuth, (req, res) => {
+    const code = String(req.params.code || '').toUpperCase();
+    const c = activationCodes.get(code);
+    if (!c) return res.status(404).json({ success: false, message: '激活码不存在' });
+    if (req.body && typeof req.body.active === 'boolean') c.active = req.body.active;
+    if (req.body && req.body.maxUses) c.max_uses = parseInt(req.body.maxUses, 10) || c.max_uses;
+    saveActivationCodes();
+    appendAudit('admin', 'activation-code-update', (c.active ? '启用' : '停用') + '激活码 ' + code, req);
+    res.json({ success: true, code: c });
+});
+
+// admin：删除激活码
+app.delete('/api/admin/activation-codes/:code', requireAdminAuth, (req, res) => {
+    const code = String(req.params.code || '').toUpperCase();
+    if (!activationCodes.has(code)) return res.status(404).json({ success: false, message: '激活码不存在' });
+    activationCodes.delete(code);
+    saveActivationCodes();
+    appendAudit('admin', 'activation-code-delete', '删除激活码 ' + code, req);
+    res.json({ success: true, message: '已删除激活码' });
+});
 
 // =============== 云链接（分享迷宫为可游玩的网页链接） ===============
 // 独立于「云储存」的一套轻量账号体系：玩家在工坊「查看/分享迷宫」里把一张迷宫发布成云链接，
@@ -12373,6 +12531,79 @@ app.delete('/api/admin/test-members/:clientId', requireAdminAuth, async (req, re
     await saveTestMembers();
     appendAudit('admin', 'remove-test-member', '移除测试成员: ' + cid + ' (' + (removed.name || '') + ')', req);
     res.json({ success: true, message: '已移除测试成员' });
+});
+
+// ===== 测试反馈（测试成员提交 → admin 面板聚合查看）=====
+// 存储：DB 优先（test_feedback 表），失败回退 data/test-feedback.json（新记录在前）。
+const TEST_FEEDBACK_FILE = path.join(DATA_DIR, 'test-feedback.json');
+let testFeedback = []; // [{ id, clientId, name, featureId, featureName, content, createdAt }] 新记录在前
+function loadTestFeedback() {
+    try {
+        if (fs.existsSync(TEST_FEEDBACK_FILE)) {
+            const arr = JSON.parse(fs.readFileSync(TEST_FEEDBACK_FILE, 'utf8'));
+            if (Array.isArray(arr)) testFeedback = arr;
+        }
+    } catch (e) { console.error('[测试反馈] 加载失败:', e.message); }
+}
+async function saveTestFeedback() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query('DELETE FROM test_feedback'); // 全量同步
+            if (testFeedback.length) {
+                await pool.query(
+                    'INSERT INTO test_feedback (id, client_id, name, feature_id, feature_name, content, created_at) VALUES ?',
+                    [testFeedback.map(f => [String(f.id).slice(0, 64), String(f.clientId || '').slice(0, 64), String(f.name || '玩家').slice(0, 64), String(f.featureId || '').slice(0, 64), String(f.featureName || '').slice(0, 128), String(f.content || ''), String(f.createdAt || Date.now())])]
+                );
+            }
+            return;
+        } catch (e) {
+            console.error('[测试反馈] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
+    ensureDataDir();
+    try { fs.writeFileSync(TEST_FEEDBACK_FILE, JSON.stringify(testFeedback, null, 2)); } catch (e) { console.error('[测试反馈] 保存失败:', e.message); }
+}
+loadTestFeedback();
+
+// 玩家侧：提交测试反馈（仅测试成员）
+app.post('/api/test/feedback', async (req, res) => {
+    try {
+        if (globalFunctions.testFeatures === false) return res.status(403).json({ success: false, message: '测试功能当前未开放' });
+        const cid = String((req.body && req.body.clientId) || '').trim().slice(0, 64);
+        if (!cid || !testMembers.has(cid)) return res.status(403).json({ success: false, message: '仅测试成员可提交反馈' });
+        const content = String((req.body && req.body.content) || '').trim().slice(0, 2000);
+        if (!content) return res.status(400).json({ success: false, message: '反馈内容不能为空' });
+        const fb = {
+            id: 'fb-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+            clientId: cid,
+            name: String((req.body && req.body.name) || testMembers.get(cid).name || '玩家').slice(0, 40),
+            featureId: String((req.body && req.body.featureId) || '').slice(0, 64),
+            featureName: String((req.body && req.body.featureName) || '通用').slice(0, 128),
+            content,
+            createdAt: Date.now()
+        };
+        testFeedback.unshift(fb);
+        if (testFeedback.length > 2000) testFeedback = testFeedback.slice(0, 2000); // 防无限增长
+        await saveTestFeedback();
+        res.json({ success: true, message: '反馈已提交，感谢反馈！' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '提交失败' });
+    }
+});
+
+// admin：测试反馈列表
+app.get('/api/admin/test-feedback', requireAdminAuth, (req, res) => {
+    res.json({ success: true, feedback: testFeedback });
+});
+
+// admin：删除测试反馈
+app.delete('/api/admin/test-feedback/:id', requireAdminAuth, async (req, res) => {
+    const id = String(req.params.id || '');
+    const i = testFeedback.findIndex(f => f.id === id);
+    if (i < 0) return res.status(404).json({ success: false, message: '反馈不存在' });
+    testFeedback.splice(i, 1);
+    await saveTestFeedback();
+    res.json({ success: true, message: '已删除反馈' });
 });
 
 // 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
