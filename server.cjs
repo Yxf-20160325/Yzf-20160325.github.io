@@ -518,6 +518,17 @@ const DB_TABLES_SQL = [
         content MEDIUMTEXT,
         created_at VARCHAR(32),
         INDEX idx_cm_chat (chat_type, chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS test_features (
+        id VARCHAR(32) PRIMARY KEY,
+        data JSON,
+        updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS test_members (
+        client_id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(64),
+        joined_at VARCHAR(32),
+        INDEX idx_tm_joined (joined_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -12216,18 +12227,79 @@ app.delete('/api/admin/api-rules/:id', requireAdminAuth, (req, res) => {
 
 // ===== 测试功能（admin 高级管理面板「🧪 测试」）=====
 // 客户端 UI设置「🧪 测试」标签页：玩家申请加入（服务器自动同意）后，可点击执行 admin 配置的测试条目（每条含一段 JS 命令）。
-// 存储：data/test-features.json（条目列表）+ data/test-members.json（已加入成员，按 clientId 唯一）。
+// 存储：DB 优先（test_features 单行 JSON + test_members 表），失败回退 data/test-features.json + data/test-members.json。
 const TEST_FEATURES_FILE = path.join(DATA_DIR, 'test-features.json');
 const TEST_MEMBERS_FILE = path.join(DATA_DIR, 'test-members.json');
 let testFeatures = []; // { id, name, desc, enabled, command, updatedAt }
 let testMembers = new Map(); // clientId -> { clientId, name, joinedAt }
-function loadTestData() {
+
+// 加载测试数据：DB 优先（test_features 单行 JSON + test_members 表），失败回退 JSON 文件
+async function loadTestData() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const [fr] = await pool.query("SELECT data FROM test_features WHERE id='global'");
+            if (fr && fr.length && fr[0].data) {
+                const parsed = (typeof fr[0].data === 'string') ? JSON.parse(fr[0].data) : fr[0].data;
+                if (parsed && Array.isArray(parsed.features)) testFeatures = parsed.features;
+            }
+            const [mr] = await pool.query('SELECT client_id, name, joined_at FROM test_members');
+            if (mr && mr.length) {
+                testMembers = new Map();
+                mr.forEach(r => testMembers.set(r.client_id, { clientId: r.client_id, name: r.name || '玩家', joinedAt: r.joined_at }));
+            }
+            // DB 无记录但 JSON 有历史数据 → 把 JSON 内容写回 DB（迁移）
+            if (!fr || !fr.length || !mr || !mr.length) { try { await saveTestFeatures(); await saveTestMembers(); } catch (_) {} }
+            return;
+        } catch (e) {
+            console.error('[Test] DB 读取失败，回退 JSON:', e.message);
+        }
+    }
+    // DB 无数据或不可用 → 尝试从 JSON 文件加载（保留历史配置）
     try { const a = JSON.parse(fs.readFileSync(TEST_FEATURES_FILE, 'utf8')); if (Array.isArray(a)) testFeatures = a; } catch (e) {}
     try { const m = JSON.parse(fs.readFileSync(TEST_MEMBERS_FILE, 'utf8')); if (Array.isArray(m)) m.forEach(x => { if (x && x.clientId) testMembers.set(String(x.clientId), x); }); } catch (e) {}
+    // 若 DB 可用但表无数据，把当前（默认值或 JSON 内容）写回 DB，使 SQL 成为权威存储
+    if (DB_AVAILABLE && pool) {
+        try { await saveTestFeatures(); await saveTestMembers(); } catch (_) {}
+    }
 }
-function saveTestFeatures() { try { fs.writeFileSync(TEST_FEATURES_FILE, JSON.stringify(testFeatures, null, 2)); } catch (e) { console.error('[test-features] 保存失败:', e.message); } }
-function saveTestMembers() { try { fs.writeFileSync(TEST_MEMBERS_FILE, JSON.stringify(Array.from(testMembers.values()), null, 2)); } catch (e) { console.error('[test-members] 保存失败:', e.message); } }
-loadTestData();
+// 保存测试条目：DB 优先（UPSERT 单行 JSON），失败回退 JSON 文件
+async function saveTestFeatures() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            const updatedAt = new Date().toISOString();
+            await pool.query(
+                "INSERT INTO test_features (id, data, updated_at) VALUES ('global', ?, ?) " +
+                "ON DUPLICATE KEY UPDATE data=VALUES(data), updated_at=VALUES(updated_at)",
+                [JSON.stringify({ features: testFeatures }), updatedAt]
+            );
+            return; // DB 写入成功，无需再写 JSON（JSON 仅作兜底）
+        } catch (e) {
+            console.error('[Test] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
+    ensureDataDir();
+    try { fs.writeFileSync(TEST_FEATURES_FILE, JSON.stringify(testFeatures, null, 2)); } catch (e) { console.error('[test-features] 保存失败:', e.message); }
+}
+// 保存测试成员：DB 优先（全量同步 test_members 表），失败回退 JSON 文件
+async function saveTestMembers() {
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query('DELETE FROM test_members'); // 全量同步（与热门迷宫保存同思路）
+            const vals = Array.from(testMembers.values());
+            if (vals.length) {
+                await pool.query(
+                    'INSERT INTO test_members (client_id, name, joined_at) VALUES ?',
+                    [vals.map(v => [String(v.clientId).slice(0, 64), String(v.name || '玩家').slice(0, 64), String(v.joinedAt || Date.now())])]
+                );
+            }
+            return;
+        } catch (e) {
+            console.error('[Test] DB 写入失败，回退 JSON:', e.message);
+        }
+    }
+    ensureDataDir();
+    try { fs.writeFileSync(TEST_MEMBERS_FILE, JSON.stringify(Array.from(testMembers.values()), null, 2)); } catch (e) { console.error('[test-members] 保存失败:', e.message); }
+}
 
 // 玩家侧：查询测试状态（总开关 / 是否已加入 / 测试条目列表）
 app.get('/api/test/status', (req, res) => {
@@ -12242,7 +12314,7 @@ app.get('/api/test/status', (req, res) => {
 });
 
 // 玩家侧：申请加入测试（服务器自动同意，幂等：重复申请返回已加入）
-app.post('/api/test/join', (req, res) => {
+app.post('/api/test/join', async (req, res) => {
     try {
         if (globalFunctions.testFeatures === false) return res.status(403).json({ success: false, message: '测试功能当前未开放' });
         const cid = String((req.body && req.body.clientId) || '').trim().slice(0, 64);
@@ -12252,7 +12324,7 @@ app.post('/api/test/join', (req, res) => {
         if (exist) return res.json({ success: true, already: true, member: exist });
         const member = { clientId: cid, name: name || '玩家', joinedAt: Date.now() };
         testMembers.set(cid, member);
-        saveTestMembers();
+        await saveTestMembers();
         appendAudit('player', 'test-join', '玩家加入测试: ' + cid + ' (' + member.name + ')', req);
         res.json({ success: true, already: false, member });
     } catch (e) {
@@ -12266,12 +12338,12 @@ app.get('/api/admin/test-features', requireAdminAuth, (req, res) => {
 });
 
 // admin：保存测试条目列表（整体替换；name/desc/command 有长度限制）
-app.put('/api/admin/test-features', requireAdminAuth, (req, res) => {
+app.put('/api/admin/test-features', requireAdminAuth, async (req, res) => {
     try {
         const b = req.body || {};
         if (b.enabled !== undefined) {
             globalFunctions.testFeatures = b.enabled !== false;
-            try { fs.writeFileSync(GLOBAL_FUNCTIONS_FILE, JSON.stringify(globalFunctions, null, 2)); } catch (e) {}
+            try { await saveGlobalFunctions(); } catch (e) {}
         }
         if (Array.isArray(b.features)) {
             const next = b.features.map(f => ({
@@ -12283,7 +12355,7 @@ app.put('/api/admin/test-features', requireAdminAuth, (req, res) => {
                 updatedAt: Date.now()
             }));
             testFeatures = next;
-            saveTestFeatures();
+            await saveTestFeatures();
         }
         appendAudit('admin', 'update-test-features', '更新测试配置: 条目' + testFeatures.length + '条, 总开关=' + (globalFunctions.testFeatures !== false), req);
         res.json({ success: true, enabled: globalFunctions.testFeatures !== false, features: testFeatures });
@@ -12293,12 +12365,12 @@ app.put('/api/admin/test-features', requireAdminAuth, (req, res) => {
 });
 
 // admin：移除测试成员
-app.delete('/api/admin/test-members/:clientId', requireAdminAuth, (req, res) => {
+app.delete('/api/admin/test-members/:clientId', requireAdminAuth, async (req, res) => {
     const cid = String(req.params.clientId || '');
     if (!testMembers.has(cid)) return res.status(404).json({ success: false, message: '成员不存在' });
     const removed = testMembers.get(cid);
     testMembers.delete(cid);
-    saveTestMembers();
+    await saveTestMembers();
     appendAudit('admin', 'remove-test-member', '移除测试成员: ' + cid + ' (' + (removed.name || '') + ')', req);
     res.json({ success: true, message: '已移除测试成员' });
 });
@@ -13910,4 +13982,5 @@ server.listen(PORT, () => {
     await loadFriendCodes();          // 好友码（服务端权威随机码，MySQL 优先，JSON 兜底）
     loadGifts();                // 好友赠送礼物记录（JSON 文件持久化）
     await loadMazes();         // DB 模式下从 popular_mazes 表载入热门迷宫到内存（与全局配置同模式）
+    await loadTestData();      // 测试功能数据（test_features / test_members，DB 优先，JSON 兜底）
 })().catch(e => console.error('[Init] 后台初始化失败:', e));
