@@ -779,11 +779,12 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     savereplay2fa: true,   // 云存档/云录像 账号是否允许使用二次认证（2FA）
     antiDevtools: false,
     showAntiCheatTab: true,
-    forceOfflineOnError: false, // 开启后：客户端加载服务器数据失败时不显示详情，自动强制进入离线模式（仅保留单人玩法）
+    forceOfflineOnError: false, // 开启后：客户端无条件强制进入离线模式（即使服务器正常返回数据），仅保留单人玩法——维护模式总开关
     gamepadEnabled: true,  // 是否允许玩家连接/使用游戏手柄（含虚拟手柄测试）
     showKeybindTab: true,  // 是否显示 UI设置弹窗的「⌨️ 键位」标签页
     tutorialEnabled: true, // 是否允许新手指导（首次自动引导 + 调试页手动触发）
     dailyCheckinEnabled: true, // 每日签到是否对玩家显示（admin 可关闭）
+    testFeatures: true,    // 测试功能总开关：关闭后客户端「🧪 测试」标签页隐藏，无法加入测试 / 执行测试条目
     monthCard: { enabled: false, coinPrice: 300, realPrice: 30, wechatQr: '' }, // 月卡配置：开放开关 / 金币价 / 真钱价 / 微信收款码(base64)
     newUi: { mode: 'probability', prob: 100 }
 };
@@ -12213,6 +12214,95 @@ app.delete('/api/admin/api-rules/:id', requireAdminAuth, (req, res) => {
     res.json({ success: true, message: '已删除规则' });
 });
 
+// ===== 测试功能（admin 高级管理面板「🧪 测试」）=====
+// 客户端 UI设置「🧪 测试」标签页：玩家申请加入（服务器自动同意）后，可点击执行 admin 配置的测试条目（每条含一段 JS 命令）。
+// 存储：data/test-features.json（条目列表）+ data/test-members.json（已加入成员，按 clientId 唯一）。
+const TEST_FEATURES_FILE = path.join(DATA_DIR, 'test-features.json');
+const TEST_MEMBERS_FILE = path.join(DATA_DIR, 'test-members.json');
+let testFeatures = []; // { id, name, desc, enabled, command, updatedAt }
+let testMembers = new Map(); // clientId -> { clientId, name, joinedAt }
+function loadTestData() {
+    try { const a = JSON.parse(fs.readFileSync(TEST_FEATURES_FILE, 'utf8')); if (Array.isArray(a)) testFeatures = a; } catch (e) {}
+    try { const m = JSON.parse(fs.readFileSync(TEST_MEMBERS_FILE, 'utf8')); if (Array.isArray(m)) m.forEach(x => { if (x && x.clientId) testMembers.set(String(x.clientId), x); }); } catch (e) {}
+}
+function saveTestFeatures() { try { fs.writeFileSync(TEST_FEATURES_FILE, JSON.stringify(testFeatures, null, 2)); } catch (e) { console.error('[test-features] 保存失败:', e.message); } }
+function saveTestMembers() { try { fs.writeFileSync(TEST_MEMBERS_FILE, JSON.stringify(Array.from(testMembers.values()), null, 2)); } catch (e) { console.error('[test-members] 保存失败:', e.message); } }
+loadTestData();
+
+// 玩家侧：查询测试状态（总开关 / 是否已加入 / 测试条目列表）
+app.get('/api/test/status', (req, res) => {
+    const cid = String(req.query.clientId || '').slice(0, 64);
+    const enabled = globalFunctions.testFeatures !== false;
+    res.json({
+        success: true,
+        enabled,
+        member: cid && testMembers.has(cid) ? testMembers.get(cid) : null,
+        features: testFeatures.map(f => ({ id: f.id, name: f.name, desc: f.desc, enabled: f.enabled !== false, command: f.command || '' }))
+    });
+});
+
+// 玩家侧：申请加入测试（服务器自动同意，幂等：重复申请返回已加入）
+app.post('/api/test/join', (req, res) => {
+    try {
+        if (globalFunctions.testFeatures === false) return res.status(403).json({ success: false, message: '测试功能当前未开放' });
+        const cid = String((req.body && req.body.clientId) || '').trim().slice(0, 64);
+        if (!cid) return res.status(400).json({ success: false, message: '缺少 clientId' });
+        const name = String((req.body && req.body.name) || '').trim().slice(0, 40);
+        const exist = testMembers.get(cid);
+        if (exist) return res.json({ success: true, already: true, member: exist });
+        const member = { clientId: cid, name: name || '玩家', joinedAt: Date.now() };
+        testMembers.set(cid, member);
+        saveTestMembers();
+        appendAudit('player', 'test-join', '玩家加入测试: ' + cid + ' (' + member.name + ')', req);
+        res.json({ success: true, already: false, member });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '加入失败' });
+    }
+});
+
+// admin：查看测试配置（总开关 / 条目 / 成员）
+app.get('/api/admin/test-features', requireAdminAuth, (req, res) => {
+    res.json({ success: true, enabled: globalFunctions.testFeatures !== false, features: testFeatures, members: Array.from(testMembers.values()) });
+});
+
+// admin：保存测试条目列表（整体替换；name/desc/command 有长度限制）
+app.put('/api/admin/test-features', requireAdminAuth, (req, res) => {
+    try {
+        const b = req.body || {};
+        if (b.enabled !== undefined) {
+            globalFunctions.testFeatures = b.enabled !== false;
+            try { fs.writeFileSync(GLOBAL_FUNCTIONS_FILE, JSON.stringify(globalFunctions, null, 2)); } catch (e) {}
+        }
+        if (Array.isArray(b.features)) {
+            const next = b.features.map(f => ({
+                id: String(f.id || ('tf-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6))).slice(0, 64),
+                name: String(f.name || '未命名测试').slice(0, 50),
+                desc: String(f.desc || '').slice(0, 200),
+                enabled: f.enabled !== false,
+                command: String(f.command || '').slice(0, 3000),
+                updatedAt: Date.now()
+            }));
+            testFeatures = next;
+            saveTestFeatures();
+        }
+        appendAudit('admin', 'update-test-features', '更新测试配置: 条目' + testFeatures.length + '条, 总开关=' + (globalFunctions.testFeatures !== false), req);
+        res.json({ success: true, enabled: globalFunctions.testFeatures !== false, features: testFeatures });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '保存失败' });
+    }
+});
+
+// admin：移除测试成员
+app.delete('/api/admin/test-members/:clientId', requireAdminAuth, (req, res) => {
+    const cid = String(req.params.clientId || '');
+    if (!testMembers.has(cid)) return res.status(404).json({ success: false, message: '成员不存在' });
+    const removed = testMembers.get(cid);
+    testMembers.delete(cid);
+    saveTestMembers();
+    appendAudit('admin', 'remove-test-member', '移除测试成员: ' + cid + ' (' + (removed.name || '') + ')', req);
+    res.json({ success: true, message: '已移除测试成员' });
+});
+
 // 修改全局功能开关（需管理员或超级管理员权限；保存后实时广播给所有客户端）
 // ===== 月卡开通审核流：存储（玩家申请 → admin 审核 → 后端记录，玩家端轮询生效）=====
 const MONTHCARD_APPLICATIONS_FILE = path.join(DATA_DIR, 'monthcard-applications.json');
@@ -13803,7 +13893,7 @@ server.listen(PORT, () => {
     console.log(`Socket.IO 服务已启动\n`);
 });
 
-(async () => { 
+(async () => {
     loadServerErrorsFromFile();   // 恢复重启前记录的异常
     await initDatabase();
     loadAdminState();
