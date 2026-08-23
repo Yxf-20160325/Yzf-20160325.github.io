@@ -541,6 +541,12 @@ const DB_TABLES_SQL = [
         created_at VARCHAR(32),
         INDEX idx_tf_feature (feature_id),
         INDEX idx_tf_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS test_runs (
+        client_id VARCHAR(64) NOT NULL,
+        feature_id VARCHAR(64) NOT NULL,
+        run_at VARCHAR(32),
+        PRIMARY KEY (client_id, feature_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 async function createTables() {
@@ -4148,12 +4154,12 @@ app.post('/api/friends/gift', (req, res) => {
             amt = parseInt(amount, 10);
             if (isNaN(amt) || amt <= 0) return res.json({ success: false, message: '数量必须大于 0' });
             if (amt > 1000000) return res.json({ success: false, message: '单次赠送数量过大' });
-            const ledger = giftType === 'coins' ? userCoins : userStars;
-            // 玩家实有金币/星星在本地钱包；服务器账本(userCoins/userStars)仅记录 admin 发放/扣除。
-            // 优先以客户端上报的本地余额(balance)校验，未上报时回退 admin 账本（兼容旧版客户端）。
-            // 注意：此处不写回账本，避免破坏客户端 dbCoins 差额去重逻辑（admin 账本语义独立）。
+            // 礼物采用「本地钱包权威」模型：玩家真实金币/星星保存在客户端本地，
+            // 服务器 userCoins/userStars 账本仅用于 admin 发放/扣除与红包（独立闭环），不代表礼物余额。
+            // 余额校验以客户端上报的本地余额(balance)为准（前端发送前已先行校验过）；
+            // 不再回退服务端账本，否则普通玩家服务端账本为 0/负会误报「余额不足」，导致礼物永远无法送出。
             const bNum = Number(balance);
-            const cliBal = (isFinite(bNum) && bNum >= 0) ? bNum : (ledger.get(fromClientId) || 0);
+            const cliBal = (isFinite(bNum) && bNum >= 0) ? bNum : 0;
             if (cliBal < amt) return res.json({ success: false, message: '你的余额不足，无法赠送' });
         }
         const id = 'gift_' + Date.now().toString(36) + '_' + (_giftSeq++);
@@ -4227,18 +4233,10 @@ app.post('/api/friends/gift/respond', (req, res) => {
                 });
                 return res.json({ success: true, status: 'accepted', gift });
             }
-            // coins / stars：领取时转账（服务端账本差额模型，客户端按差额对账，不会污染本地钱包）
-            const ledger = gift.giftType === 'coins' ? userCoins : userStars;
-            const senderBal = ledger.get(gift.fromClientId) || 0;
-            if (senderBal < gift.amount) {
-                gift.status = 'failed';
-                gift.updatedAt = now;
-                saveGifts();
-                return res.json({ success: false, message: '赠送方余额已不足，无法领取' });
-            }
-            ledger.set(gift.fromClientId, senderBal - gift.amount);
-            const recipBal = ledger.get(gift.toClientId) || 0;
-            ledger.set(gift.toClientId, recipBal + gift.amount);
+            // coins / stars：礼物采用「本地钱包权威」模型，真实余额在客户端本地。
+            // 发送方已在本地扣减、且服务端校验过其上报余额；此处只标记已领取，
+            // 不再动服务端 userCoins/userStars 账本（那是 admin/红包独立账本，与礼物无关）。
+            // 接收方的到账由客户端本地直接加 amount 完成（见 acceptGift），避免服务端账本为 0 时误判失败。
             gift.status = 'accepted';
             gift.updatedAt = now;
             saveGifts();
@@ -12403,7 +12401,13 @@ async function loadTestData() {
             const [mr] = await pool.query('SELECT client_id, name, joined_at FROM test_members');
             if (mr && mr.length) {
                 testMembers = new Map();
-                mr.forEach(r => testMembers.set(r.client_id, { clientId: r.client_id, name: r.name || '玩家', joinedAt: r.joined_at }));
+                mr.forEach(r => {
+                    // 兜底：joined_at 为空或非法时回退为当前时间戳，避免前端 new Date('') → Invalid Date
+                    let ja = r.joined_at;
+                    if (ja === null || ja === undefined || ja === '') ja = String(Date.now());
+                    else if (isNaN(Number(ja))) ja = String(Date.now());
+                    testMembers.set(r.client_id, { clientId: r.client_id, name: r.name || '玩家', joinedAt: ja });
+                });
             }
             // DB 无记录但 JSON 有历史数据 → 把 JSON 内容写回 DB（迁移）
             if (!fr || !fr.length || !mr || !mr.length) { try { await saveTestFeatures(); await saveTestMembers(); } catch (_) {} }
@@ -12438,16 +12442,19 @@ async function saveTestFeatures() {
     ensureDataDir();
     try { fs.writeFileSync(TEST_FEATURES_FILE, JSON.stringify(testFeatures, null, 2)); } catch (e) { console.error('[test-features] 保存失败:', e.message); }
 }
-// 保存测试成员：DB 优先（全量同步 test_members 表），失败回退 JSON 文件
+// 保存测试成员：DB 优先（UPSERT 增量写入，绝不 DELETE 全表，避免并发/重载时丢失已加入成员 → 防止「反复退出」），
+// 失败回退 JSON 文件（JSON 为全量覆盖，仅作兜底）
 async function saveTestMembers() {
     if (DB_AVAILABLE && pool) {
         try {
-            await pool.query('DELETE FROM test_members'); // 全量同步（与热门迷宫保存同思路）
             const vals = Array.from(testMembers.values());
-            if (vals.length) {
+            // UPSERT：client_id 为主键，已存在则更新 name/joined_at，不存在则插入。保留历史 joined_at（不覆盖）
+            for (const v of vals) {
+                const ja = (v.joinedAt === null || v.joinedAt === undefined || v.joinedAt === '') ? String(Date.now()) : String(v.joinedAt);
                 await pool.query(
-                    'INSERT INTO test_members (client_id, name, joined_at) VALUES ?',
-                    [vals.map(v => [String(v.clientId).slice(0, 64), String(v.name || '玩家').slice(0, 64), String(v.joinedAt || Date.now())])]
+                    'INSERT INTO test_members (client_id, name, joined_at) VALUES (?, ?, ?) ' +
+                    'ON DUPLICATE KEY UPDATE name=VALUES(name), joined_at=IFNULL(NULLIF(joined_at, \'\'), VALUES(joined_at))',
+                    [String(v.clientId).slice(0, 64), String(v.name || '玩家').slice(0, 64), ja]
                 );
             }
             return;
@@ -12528,7 +12535,10 @@ app.delete('/api/admin/test-members/:clientId', requireAdminAuth, async (req, re
     if (!testMembers.has(cid)) return res.status(404).json({ success: false, message: '成员不存在' });
     const removed = testMembers.get(cid);
     testMembers.delete(cid);
-    await saveTestMembers();
+    // 显式从 DB 删除该行（saveTestMembers 已改为增量 UPSERT，不会清全表）
+    if (DB_AVAILABLE && pool) {
+        try { await pool.query('DELETE FROM test_members WHERE client_id = ?', [cid]); } catch (e) { console.error('[Test] 删除成员 DB 失败:', e.message); }
+    }
     appendAudit('admin', 'remove-test-member', '移除测试成员: ' + cid + ' (' + (removed.name || '') + ')', req);
     res.json({ success: true, message: '已移除测试成员' });
 });
@@ -12589,6 +12599,78 @@ app.post('/api/test/feedback', async (req, res) => {
     } catch (e) {
         res.status(500).json({ success: false, message: '提交失败' });
     }
+});
+
+// 玩家侧：执行测试条目前先经服务端校验「按 clientId 限制执行次数」（默认每 clientId 每 feature 仅一次）
+// 流程：客户端 runTestFeature 先 fetch('/api/test/run', {clientId, featureId})
+//   → 已执行过：返回 {success:false, alreadyRun:true} → 前端拒绝执行；
+//   → 未执行：插入 (client_id, feature_id) 记录并返回 {success:true} → 前端才真正执行 command。
+// 与客户端 localStorage（mazeTestUnlockDone 等）双保险：清缓存/换设备也无法绕过本服务端限制。
+app.post('/api/test/run', async (req, res) => {
+    try {
+        if (globalFunctions.testFeatures === false) return res.status(403).json({ success: false, message: '测试功能当前未开放' });
+        const cid = String((req.body && req.body.clientId) || '').trim().slice(0, 64);
+        const fid = String((req.body && req.body.featureId) || '').trim().slice(0, 64);
+        if (!cid) return res.status(400).json({ success: false, message: '缺少 clientId' });
+        if (!fid) return res.status(400).json({ success: false, message: '缺少 featureId' });
+        if (!testMembers.has(cid)) return res.status(403).json({ success: false, message: '请先申请加入测试' });
+        // 查是否已执行过
+        if (DB_AVAILABLE && pool) {
+            try {
+                const [rows] = await pool.query('SELECT client_id FROM test_runs WHERE client_id = ? AND feature_id = ?', [cid, fid]);
+                if (rows && rows.length) {
+                    return res.json({ success: false, alreadyRun: true, message: '此测试项目每个账号仅可使用一次' });
+                }
+                await pool.query('INSERT INTO test_runs (client_id, feature_id, run_at) VALUES (?, ?, ?)', [cid, fid, String(Date.now())]);
+                return res.json({ success: true, alreadyRun: false });
+            } catch (e) {
+                console.error('[Test] /api/test/run DB 失败:', e.message);
+                // DB 失败时不阻断执行（避免误拦），但记录错误
+                return res.json({ success: true, alreadyRun: false, warning: 'server_log_failed' });
+            }
+        }
+        // 无 DB 时：用内存 Set 兜底（进程内限制一次）
+        if (!global.__testRunsMemory) global.__testRunsMemory = new Set();
+        const key = cid + '\u0000' + fid;
+        if (global.__testRunsMemory.has(key)) {
+            return res.json({ success: false, alreadyRun: true, message: '此测试项目每个账号仅可使用一次' });
+        }
+        global.__testRunsMemory.add(key);
+        return res.json({ success: true, alreadyRun: false });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '校验失败' });
+    }
+});
+
+// admin：查看某测试条目的执行记录（可选 featureId 过滤）
+app.get('/api/admin/test-runs', requireAdminAuth, async (req, res) => {
+    try {
+        const fid = String(req.query.featureId || '').slice(0, 64);
+        if (DB_AVAILABLE && pool) {
+            const [rows] = await pool.query(
+                'SELECT client_id, feature_id, run_at FROM test_runs' + (fid ? ' WHERE feature_id = ?' : '') + ' ORDER BY run_at DESC LIMIT 1000',
+                fid ? [fid] : []
+            );
+            return res.json({ success: true, runs: rows || [] });
+        }
+        return res.json({ success: true, runs: [] });
+    } catch (e) {
+        res.status(500).json({ success: false, message: '查询失败' });
+    }
+});
+
+// admin：清除某 clientId + featureId 的执行记录（解除单次限制，便于重新测试）
+app.delete('/api/admin/test-runs/:clientId/:featureId', requireAdminAuth, async (req, res) => {
+    const cid = String(req.params.clientId || '').slice(0, 64);
+    const fid = String(req.params.featureId || '').slice(0, 64);
+    if (DB_AVAILABLE && pool) {
+        try {
+            await pool.query('DELETE FROM test_runs WHERE client_id = ? AND feature_id = ?', [cid, fid]);
+        } catch (e) { console.error('[Test] 清除执行记录失败:', e.message); }
+    }
+    if (global.__testRunsMemory) global.__testRunsMemory.delete(cid + '\u0000' + fid);
+    appendAudit('admin', 'clear-test-run', '清除测试执行记录: ' + cid + ' / ' + fid, req);
+    res.json({ success: true, message: '已清除执行记录' });
 });
 
 // admin：测试反馈列表
