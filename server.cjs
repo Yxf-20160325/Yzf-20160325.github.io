@@ -3478,6 +3478,38 @@ app.get('/api/friend-code/:clientId', (req, res) => {
     }
 });
 
+// 管理员设置/替换某用户的好友码（强制覆盖，与旧的恒定不变策略不同，仅供后台管理使用）
+// body: { code?: string, auto?: boolean } —— 不传 code 或 auto=true 则随机生成新码
+app.put('/api/admin/friend-code/:clientId', requireAdminAuth, (req, res) => {
+    try {
+        const id = String(req.params.clientId || '');
+        if (!id) return res.json({ success: false, message: '缺少 clientId' });
+        const body = req.body || {};
+        let newCode = body.auto ? '' : normalizeFriendCode(body.code || '');
+        if (!newCode) {
+            // 随机生成，避免与现有冲突
+            newCode = generateFriendCode();
+            while (friendCodeExists(newCode) && newCode !== friendCodes.get(id)) newCode = generateFriendCode();
+        } else {
+            if (newCode.length < 6 || newCode.length > 12) {
+                return res.json({ success: false, message: '好友码长度需为 6~12 位字母或数字' });
+            }
+            // 校验是否与别人冲突（排除自身旧码）
+            const old = friendCodes.get(id);
+            if (friendCodeExists(newCode) && normalizeFriendCode(old) !== newCode) {
+                return res.json({ success: false, message: '该好友码已被其他用户占用' });
+            }
+        }
+        friendCodes.set(id, newCode);
+        saveFriendCodes();
+        const actor = (req.admin && (req.admin.username || req.admin.name)) || 'admin';
+        appendAudit(actor, 'admin-set-friend-code', `为玩家「${id}」设置/替换好友码为 ${newCode}`, req);
+        res.json({ success: true, code: newCode });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
+    }
+});
+
 // 收到的好友请求列表（pending）
 app.get('/api/friends/requests', (req, res) => {
     try {
@@ -3561,7 +3593,8 @@ app.get('/api/friends/list', (req, res) => {
                 name: (op.name || prof.name || '玩家').toString(),
                 avatar: prof.avatar || '😀',
                 color: prof.color || '#4CAF50',
-                online: !!onlinePlayers.has(other)
+                online: !!onlinePlayers.has(other),
+                lastSeen: op.lastSeen || prof.lastSeen || null
             });
         }
         res.json({ success: true, friends });
@@ -5382,6 +5415,28 @@ app.get('/api/users', requireAdminAuth, (req, res) => {
     } catch (error) {
         console.error('[API] 获取用户列表失败:', error);
         res.status(500).json({ success: false, message: '获取用户列表失败' });
+    }
+});
+
+// 管理员：获取全部账号（含离线），用于「离线用户管理」。在线状态以 onlinePlayers 为准，lastSeen 取在线/档案最后记录。
+app.get('/api/admin/all-accounts', requireAdminAuth, (req, res) => {
+    try {
+        const list = [];
+        for (const [clientId, p] of homeProfiles) {
+            const op = onlinePlayers.get(clientId) || {};
+            list.push({
+                id: clientId,
+                username: (p && p.name) || (op && op.name) || '未知用户',
+                avatar: (p && p.avatar) || '🙂',
+                online: !!onlinePlayers.has(clientId),
+                lastSeen: op.lastSeen || p.lastSeen || null,
+                disabled: !!(p && p.disabled),
+                platform: (op && op.platform) || 'web'
+            });
+        }
+        res.json({ success: true, accounts: list, total: list.length });
+    } catch (e) {
+        res.json({ success: false, message: e.message });
     }
 });
 
