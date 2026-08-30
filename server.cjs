@@ -1877,6 +1877,30 @@ const reportedStars = new Map();
 // 管理员是否调整过该用户金币/星星（调整后以管理员账本为准，客户端下次上报需直接覆盖本地，否则被玩家本地值冲掉）
 const adminCoinOverride = new Map();
 const adminStarOverride = new Map();
+// 管理员金币/星星账本持久化（防止服务器重启后账本丢失、客户端差额模型把已发放金额扣回）
+const COINS_LEDGER_FILE = path.join(DATA_DIR, 'coins-ledger.json');
+function loadCoinsLedger() {
+    try {
+        if (fs.existsSync(COINS_LEDGER_FILE)) {
+            const d = JSON.parse(fs.readFileSync(COINS_LEDGER_FILE, 'utf8')) || {};
+            if (d.userCoins && typeof d.userCoins === 'object') Object.entries(d.userCoins).forEach(([k, v]) => userCoins.set(k, v));
+            if (d.userStars && typeof d.userStars === 'object') Object.entries(d.userStars).forEach(([k, v]) => userStars.set(k, v));
+            if (d.adminCoinOverride && typeof d.adminCoinOverride === 'object') Object.entries(d.adminCoinOverride).forEach(([k, v]) => adminCoinOverride.set(k, !!v));
+            if (d.adminStarOverride && typeof d.adminStarOverride === 'object') Object.entries(d.adminStarOverride).forEach(([k, v]) => adminStarOverride.set(k, !!v));
+        }
+    } catch (e) { console.error('[coins-ledger] 加载失败:', e.message); }
+}
+function saveCoinsLedger() {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(COINS_LEDGER_FILE, JSON.stringify({
+            userCoins: Object.fromEntries(userCoins),
+            userStars: Object.fromEntries(userStars),
+            adminCoinOverride: Object.fromEntries(adminCoinOverride),
+            adminStarOverride: Object.fromEntries(adminStarOverride)
+        }, null, 2));
+    } catch (e) { console.error('[coins-ledger] 保存失败:', e.message); }
+}
 // 玩家档案（客户端上报的 IP / 金币 / 时长 / 统计 / 游戏状态快照；持久保存最近一次，供管理后台离线查看）
 const playerProfiles = new Map();
 
@@ -5603,6 +5627,7 @@ app.post('/api/users/:userId/coins', requireAdminAuth, (req, res) => {
         // 同步到上报账本 + 标记管理员覆盖：客户端下次 player-online 需以此值为准（直接覆盖本地）
         reportedCoins.set(userId, Math.max(0, updated));
         adminCoinOverride.set(userId, true);
+        saveCoinsLedger();
 
         console.log(`[Admin] 用户 ${userId} 金币变更 ${delta >= 0 ? '+' : ''}${delta}，当前余额 ${updated}`);
         appendAudit('admin', 'coins', `用户 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 金币，余额 ${updated}`);
@@ -5635,6 +5660,7 @@ app.post('/api/users/:userId/stars', requireAdminAuth, (req, res) => {
         // 同步到上报账本 + 标记管理员覆盖：客户端下次 player-online 需以此值为准（直接覆盖本地）
         reportedStars.set(userId, Math.max(0, updated));
         adminStarOverride.set(userId, true);
+        saveCoinsLedger();
 
         console.log(`[Admin] 用户 ${userId} 星星变更 ${delta >= 0 ? '+' : ''}${delta}，当前余额 ${updated}`);
         appendAudit('admin', 'stars', `用户 ${userId} ${delta >= 0 ? '增加' : '扣除'} ${Math.abs(delta)} 星星，余额 ${updated}`);
@@ -11202,6 +11228,20 @@ app.post('/api/account/restore', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: '恢复失败' }); }
 });
 
+// 查询账号注销状态（公开，无需登录态）：供「恢复账号」界面自动搜索本机保存的账号是否处于注销冷静期
+app.get('/api/account/status', async (req, res) => {
+    try {
+        const kind = (req.query.kind || '').toString();
+        const username = ((req.query.username || '').toString() || '').trim();
+        if (!ACCOUNT_TABLE[kind]) return res.status(400).json({ success: false, message: '未知账号类型' });
+        if (!username) return res.status(400).json({ success: false, message: '缺少用户名' });
+        const acc = await getAccountByKind(kind, username);
+        if (!acc) return res.json({ success: true, exists: false, pendingDelete: false });
+        const pd = pendingDeleteNotice(acc);
+        return res.json({ success: true, exists: true, pendingDelete: !!pd, deleteExpiresAt: acc.deleted_at || null, twoFactor: !!acc.two_factor_enabled });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
 // 当前账号信息
 app.get('/api/savereplay/me', requireSaveReplayAuth, async (req, res) => {
     try { const acc = await dbGetSaveReplayAccount(req.savereplayUser); res.json({ success: true, username: req.savereplayUser, twoFactor: !!acc.two_factor_enabled }); }
@@ -14343,6 +14383,7 @@ server.listen(PORT, () => {
     await loadDailyChallengeConfig();
     await loadWeeklySkinTheme();
     await loadAccounts();
+    loadCoinsLedger();   // 管理员金币/星星账本（JSON 持久化，防止重启丢失被客户端扣回）
     await loadHomeProfiles();
     await loadFriends();             // 好友请求 / 好友关系 / 私聊记录（MySQL 优先，JSON 兜底）
     await loadGroups();             // 群聊（内存 + JSON / MySQL 兜底）
