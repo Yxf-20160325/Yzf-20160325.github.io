@@ -1,0 +1,12 @@
+# 依赖
+node_modules/
+
+# 密码 / 密钥（切勿提交，泄露即失陷）
+admin-password.txt
+superadmin-password.txt
+*.password.txt
+
+# 系统 / 工具目录
+.DS_Store
+.workbuddy/
+.trae/

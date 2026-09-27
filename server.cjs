@@ -1,4 +1,3 @@
-
 const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
@@ -780,6 +779,10 @@ const AUDIT_FILE = path.join(DATA_DIR, 'admin-audit.log');
 const TELEMETRY_FILE = path.join(DATA_DIR, 'telemetry.log');
 const GLOBAL_FUNCTIONS_FILE = path.join(DATA_DIR, 'global-functions.json');
 
+// 支持「关闭提示弹窗」文案自定义的功能键（客户端按 key 读取：
+// 这些功能被关闭后入口按钮仍保留显示，玩家点击时弹出管理员配置的提示）
+const GLOBAL_FUNCTION_MESSAGE_KEYS = ['showAntiCheatTab', 'pluginEnabled', 'showKeybindTab', 'testFeatures'];
+
 // ===== 全局功能控制（管理员统一开关，影响所有游戏客户端）=====
 // 各开关含义：
 //   export          —— 导出进度（单人/解密）功能
@@ -820,11 +823,14 @@ const GLOBAL_FUNCTIONS_DEFAULT = {
     forceOfflineOnError: false, // 开启后：客户端无条件强制进入离线模式（即使服务器正常返回数据），仅保留单人玩法——维护模式总开关
     gamepadEnabled: true,  // 是否允许玩家连接/使用游戏手柄（含虚拟手柄测试）
     showKeybindTab: true,  // 是否显示 UI设置弹窗的「⌨️ 键位」标签页
+    pluginEnabled: true,   // 插件系统总开关：关闭后客户端主菜单「🧩 插件」标签页隐藏，所有插件停止加载与运行（已安装插件与数据保留在本机）
     tutorialEnabled: true, // 是否允许新手指导（首次自动引导 + 调试页手动触发）
     dailyCheckinEnabled: true, // 每日签到是否对玩家显示（admin 可关闭）
     testFeatures: true,    // 测试功能总开关：关闭后客户端「🧪 测试」标签页隐藏，无法加入测试 / 执行测试条目
     fullVersion: true,     // 完整版激活码功能总开关：关闭后玩家无法兑换激活码（已解锁设备不受影响，本地激活标记仍有效）
     trialMinutes: 30,      // 完整版试用时长（分钟）；0 表示不提供试用
+    // 功能被关闭时客户端弹窗文案：{ <功能key>: { title, content } }；留空/缺省时客户端用内置兜底文案
+    disabledMessages: {},
     monthCard: { enabled: false, coinPrice: 300, realPrice: 30, wechatQr: '' }, // 月卡配置：开放开关 / 金币价 / 真钱价 / 微信收款码(base64)
     newUi: { mode: 'probability', prob: 100 }
 };
@@ -3355,11 +3361,13 @@ app.get('/api/admin/telemetry', requireAdminAuth, async (req, res) => {
 
 // 个人主页：公开读取（游戏内点击对方名称时拉取）
 app.get('/api/profile/:clientId', (req, res) => {
+    // 身份徽章用：附带该玩家的游戏内角色（user / admin / superadmin），无主页档案时也返回
+    const role = getUserRole(req.params.clientId);
     const p = homeProfiles.get(req.params.clientId);
-    if (!p) return res.json({ success: true, profile: null });
+    if (!p) return res.json({ success: true, profile: null, role: role });
     // 社交与隐私：附带接收方的「资料公开范围」，供客户端按需隐藏详情
     const scope = (getEffectiveUISettings(req.params.clientId) || {}).profileScope || 'all';
-    res.json({ success: true, profile: Object.assign({ clientId: req.params.clientId, profileScope: scope }, p) });
+    res.json({ success: true, role: role, profile: Object.assign({}, p, { clientId: req.params.clientId, profileScope: scope, role: role }) });
 });
 
 // 好友搜索：按显示名搜索当前在线玩家（公开，无鉴权）
@@ -12885,6 +12893,21 @@ app.put('/api/admin/global-functions', requireAdminAuth, async (req, res) => {
                 realPrice: Math.max(0, parseInt(mc.realPrice, 10) || 0),
                 wechatQr: (typeof mc.wechatQr === 'string') ? mc.wechatQr : ''
             };
+        }
+        // 功能「关闭提示」文案（对象）：{ <功能key>: { title, content } }
+        // 只接受白名单里的功能键；标题 60 字、正文 600 字截断；两项都为空则视为「用内置兜底文案」不保存。
+        // 语义：这些功能被关闭后，客户端仍保留入口按钮，玩家点击时弹出这里配置的提示。
+        if (body.disabledMessages && typeof body.disabledMessages === 'object') {
+            const msgs = {};
+            for (const k of GLOBAL_FUNCTION_MESSAGE_KEYS) {
+                const v = body.disabledMessages[k];
+                if (!v || typeof v !== 'object') continue;
+                const title = String(v.title == null ? '' : v.title).trim().slice(0, 60);
+                const content = String(v.content == null ? '' : v.content).trim().slice(0, 600);
+                if (!title && !content) continue;
+                msgs[k] = { title, content };
+            }
+            next.disabledMessages = msgs;
         }
         globalFunctions = next;
         await saveGlobalFunctions();
