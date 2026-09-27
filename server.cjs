@@ -1763,6 +1763,138 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'superadmin.html')));
 
+// ===== 角色说明 Wiki（公开文档页）：GET /wiki =====
+// 内容与代码里的实际鉴权保持一致，核对依据：
+//   · 后台 REST：requireAdminAuth / requireAnyAdminAuth 同时接受「管理员令牌」与「超级管理员令牌」
+//   · 后台 /api/superadmin/*：只认超级管理员令牌（账号管理 / 遥测 / 审计）
+//   · 游戏内 socket：admin-set-role / admin-rename / admin-kick / admin-ban / admin-complete-all /
+//     admin-save-settings / admin-ban-ip / admin-unban-ip 等走 assertSuperadminOp（仅超管）；
+//     admin-kick-player（联机房间踢人）放行 admin 与 superadmin
+//   · 客户端：调试信息 roleUnlocked、玩家列表踢人 canKickByRole、超级管理员面板均按 myRole 判定
+//   · 角色变更：POST /api/admin/users/:userId/role（后台令牌）可授予任意角色，但对「现任超管」的变更/撤销仅超管可做
+const WIKI_ROLES = [
+    {
+        key: 'user', icon: '👤', name: '普通用户', color: '#90a4ae',
+        tag: '正常游玩，没有任何管理权限',
+        can: ['全部玩家功能：单人闯关 / 解密 / 多人联机 / 每日挑战 / 签到 / 皮肤 / 宠物 / 成就 / 云存档 / 插件系统', '在「我的信息 → 主页」看到自己的身份徽章 👤'],
+        cannot: ['看不到调试信息', '不能踢人 / 改名 / 封禁 / 重置他人通关', '登录不了后台管理面板']
+    },
+    {
+        key: 'admin', icon: '🛡️', name: '管理员', color: '#0288d1',
+        tag: '拥有后台管理面板 + 少量游戏内管理能力',
+        can: ['登录后台管理面板（/admin.html）：公告、激活码、封禁与申诉、玩家与云数据、全局功能设定（含「功能关闭提示」文案）、API 自定义规则、审计日志、测试名单等',
+              '游戏内查看调试信息（FPS / 网络 / 角色等）',
+              '联机房间里踢出任意玩家（不依赖房主身份）',
+              '主页自动带「官方认证」标识'],
+        cannot: ['不能修改任何人的角色（含把自己设为管理员或超管）', '不能改名 / 封禁 / 解封 / 重置他人通关 / 改玩家设置', '不能封禁 IP，也进不了超级管理员后台']
+    },
+    {
+        key: 'superadmin', icon: '👑', name: '超级管理员', color: '#e83e8c',
+        tag: '最高权限，管理员能力 + 账号与角色管理',
+        can: ['拥有管理员的全部能力',
+              '游戏内「超级管理员管理面板」（仅超管可见）：改角色、改名、踢出、封禁 / 解封、重置全部通关、玩家设置、封禁 / 解封 IP',
+              '唯一能修改他人角色的身份（游戏内通道仅超管；后台对「现任超管」的变更也只有超管能做）',
+              '后台超级管理面板（/superadmin.html）：创建 / 删除管理员账号、停用账号、修改密码、遥测与审计、关闭游戏页面访问（403 维护）'],
+        cannot: ['不能修改自己的角色（客户端与服务端都会拦），需要另一个超管操作']
+    }
+];
+const WIKI_MATRIX = [
+    { cap: '正常游玩全部玩家功能', user: 1, admin: 1, superadmin: 1 },
+    { cap: '查看调试信息', user: 0, admin: 1, superadmin: 1 },
+    { cap: '联机房间内踢出任意玩家', user: 0, admin: 1, superadmin: 1 },
+    { cap: '主页「官方认证」标识', user: 0, admin: 1, superadmin: 1, note: '普通用户可由管理员单独标记' },
+    { cap: '登录后台管理面板（/admin.html）', user: 0, admin: 1, superadmin: 1 },
+    { cap: '改名 / 封禁 / 解封 / 重置全部通关 / 玩家设置（游戏内）', user: 0, admin: 0, superadmin: 1 },
+    { cap: '封禁 / 解封 IP（游戏内）', user: 0, admin: 0, superadmin: 1 },
+    { cap: '修改他人的角色', user: 0, admin: 0, superadmin: 1, note: '游戏内仅超管；后台改「现任超管」也只有超管能做' },
+    { cap: '后台账号管理（创建 / 停用管理员、遥测、审计）', user: 0, admin: 0, superadmin: 1 }
+];
+function buildWikiHtml() {
+    const roleCard = function (r) {
+        const li = function (arr, color) { return arr.map(function (t) { return '<li style="margin:4px 0;">' + t + '</li>'; }).join(''); };
+        return '<div style="flex:1 1 280px;min-width:0;background:#191923;border:1px solid ' + r.color + ';border-radius:14px;padding:16px 18px;">' +
+            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">' +
+                '<span style="font-size:26px;line-height:1;">' + r.icon + '</span>' +
+                '<span style="font-size:18px;font-weight:bold;color:' + r.color + ';">' + r.name + '</span>' +
+                '<code style="font-size:11px;color:#8b949e;background:#0d1117;border:1px solid #2a2a35;border-radius:5px;padding:1px 6px;">' + r.key + '</code>' +
+            '</div>' +
+            '<div style="color:#b3b3c0;font-size:13px;line-height:1.6;margin-bottom:10px;">' + r.tag + '</div>' +
+            '<div style="font-size:13px;font-weight:bold;color:#66bb6a;margin-bottom:4px;">可以做</div>' +
+            '<ul style="margin:0 0 10px;padding-left:18px;color:#cfd8dc;font-size:13px;line-height:1.7;">' + li(r.can) + '</ul>' +
+            '<div style="font-size:13px;font-weight:bold;color:#ef9a9a;margin-bottom:4px;">做不到</div>' +
+            '<ul style="margin:0;padding-left:18px;color:#a8b3bd;font-size:13px;line-height:1.7;">' + li(r.cannot) + '</ul>' +
+        '</div>';
+    };
+    const cell = function (v, color) {
+        return '<td style="text-align:center;padding:9px 10px;border-bottom:1px solid #26262f;' + (v ? '' : 'color:#5b6470;') + '">' +
+            (v ? '<span style="color:' + color + ';font-weight:bold;">✔</span>' : '—') + '</td>';
+    };
+    const rows = WIKI_MATRIX.map(function (m) {
+        return '<tr>' +
+            '<td style="padding:9px 10px;border-bottom:1px solid #26262f;color:#e6e6ef;">' + m.cap +
+                (m.note ? '<div style="font-size:12px;color:#8b949e;margin-top:3px;">' + m.note + '</div>' : '') + '</td>' +
+            cell(m.user, '#90a4ae') + cell(m.admin, '#4fc3f7') + cell(m.superadmin, '#f06292') +
+        '</tr>';
+    }).join('');
+    return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<title>角色说明 · Wiki</title>' +
+        '<style>' +
+            '*{box-sizing:border-box}' +
+            'body{margin:0;background:#101017;color:#e6e6ef;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;line-height:1.7}' +
+            '.wrap{max-width:940px;margin:0 auto;padding:28px 18px 60px}' +
+            'h1{font-size:26px;margin:0 0 6px}' +
+            'h2{font-size:19px;margin:34px 0 12px;padding-left:10px;border-left:4px solid #4fc3f7}' +
+            '.sub{color:#90a4ae;font-size:14px;margin-bottom:8px}' +
+            'table{width:100%;border-collapse:collapse;background:#15151d;border:1px solid #2a2a35;border-radius:12px;overflow:hidden;font-size:14px}' +
+            'th{background:#1d1d27;color:#cfd8dc;font-size:13px;padding:10px;border-bottom:1px solid #2a2a35;white-space:nowrap}' +
+            '.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}' +
+            'code{font-family:ui-monospace,Menlo,Consolas,monospace}' +
+            'ul{padding-left:20px}' +
+            'a{color:#4fc3f7}' +
+            '.note{background:#15151d;border:1px solid #2a2a35;border-radius:12px;padding:14px 16px;font-size:14px;color:#cfd8dc}' +
+            '@media (max-width:600px){h1{font-size:22px}table{font-size:13px}.wrap{padding:20px 12px 48px}}' +
+        '</style></head><body><div class="wrap">' +
+        '<h1>🔐 角色说明</h1>' +
+        '<div class="sub">本页说明游戏内三种身份（普通用户 / 管理员 / 超级管理员）的权限差异。内容与实际服务端鉴权一致，最后更新：2026-09-27。</div>' +
+        '<h2>三种身份</h2>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:14px;">' + WIKI_ROLES.map(roleCard).join('') + '</div>' +
+        '<h2>能力对比</h2>' +
+        '<div class="scroll"><table>' +
+            '<tr><th style="text-align:left;">能力</th><th>👤 用户</th><th>🛡️ 管理员</th><th>👑 超级管理员</th></tr>' +
+            rows +
+        '</table></div>' +
+        '<h2>角色从哪来</h2>' +
+        '<div class="note">' +
+            '<div>· 角色保存在服务端（默认所有人都是 <code>user</code>），由超级管理员设置，不在客户端、也无法由玩家自己修改。</div>' +
+            '<div>· 变更后<b>实时生效</b>：在线玩家会立刻收到新角色（无需重登），调试信息、踢人按钮等入口随之开合。</div>' +
+            '<div>· 不能修改自己的角色；后台调整「现任超级管理员」的角色时，只有超级管理员本人操作才被接受。</div>' +
+        '</div>' +
+        '<h2>身份徽章</h2>' +
+        '<div class="note">' +
+            '<div>在「我的信息 → 📋 主页」与「他人主页」里，名字下方会显示身份徽章：' +
+            '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#90a4ae;color:#fff;font-size:12px;font-weight:bold;">👤 用户</span> ' +
+            '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#0288d1;color:#fff;font-size:12px;font-weight:bold;">🛡️ 管理员</span> ' +
+            '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#e83e8c;color:#fff;font-size:12px;font-weight:bold;">👑 超级管理员</span></div>' +
+            '<div>鼠标悬停在徽章上（手机可点一下）可看到该身份的详细说明。</div>' +
+        '</div>' +
+        '<h2>常见疑问</h2>' +
+        '<div class="note">' +
+            '<div>· <b>角色 ≠ 云账号</b>：云储存 / 云链接 / 云备份 / 云存档是四套<b>独立</b>账号体系，与游戏内角色无关，互不影响。</div>' +
+            '<div>· <b>二次认证（2FA）</b>是云账号自身的安全设置，不是身份特权；管理员在后台可临时关闭某套 2FA（已开启的会暂停生效，避免锁死）。</div>' +
+            '<div>· 「官方认证」标识：管理员与超级管理员默认拥有；普通用户可由管理员单独标记（本地标记）。</div>' +
+            '<div>· 身份只影响管理能力，不影响游戏数值、关卡、皮肤等任何玩法内容。</div>' +
+        '</div>' +
+        '<h2>安全说明</h2>' +
+        '<div class="note">所有管理动作都由服务端按<b>服务端保存的角色</b>重新校验；客户端上的图标与按钮只是显示，改前端不会获得任何真实权限。发现冒充管理员的行为请向管理员反馈。</div>' +
+        '<div style="margin-top:26px;color:#5b6470;font-size:12px;">迷宫冒险 · 服务器文档页 · 路径 <code>/wiki</code></div>' +
+        '</div></body></html>';
+}
+app.get('/wiki', (req, res) => {
+    // 注意：res.type() 只接受扩展名/MIME，写成 'html; charset=utf-8' 会退化成 application/octet-stream
+    res.type('html').send(buildWikiHtml());
+});
+
 // ===== 音乐目录访问 API =====
 // 通过 /music/ 访问服务器根目录下的 music 文件夹：
 //   GET /music/         -> 仅以 HTTP 状态码表示目录是否可访问（不返回内容）
