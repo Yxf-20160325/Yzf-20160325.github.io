@@ -1763,8 +1763,13 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'superadmin.html')));
 
-// ===== 角色说明 Wiki（公开文档页）：GET /wiki =====
-// 内容与代码里的实际鉴权保持一致，核对依据：
+// ===== 帮助中心 Wiki（公开文档页）：GET /wiki =====
+// 页面结构：左侧导航 + 右侧正文（每节一个面板，点导航只显示对应一节；无 JS 时全部展开，降级可用）。
+// 内容与代码里的实际实现保持一致。
+// 【已下线】角色说明（WIKI_ROLES / WIKI_MATRIX）——2026-09-29 按要求从 /wiki 页面移除，
+// 现仅保留「月卡权益 / 常见疑问 / 数据与安全」三节。
+// 如需恢复角色说明章节：内容见 server.cjs 的 git 历史（提交 48cf180 及以前）或 .workbuddy/memory/2026-09-29.md。
+// 参考（角色鉴权事实，供日后需要时核对）：
 //   · 后台 REST：requireAdminAuth / requireAnyAdminAuth 同时接受「管理员令牌」与「超级管理员令牌」
 //   · 后台 /api/superadmin/*：只认超级管理员令牌（账号管理 / 遥测 / 审计）
 //   · 游戏内 socket：admin-set-role / admin-rename / admin-kick / admin-ban / admin-complete-all /
@@ -1772,44 +1777,7 @@ app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'sup
 //     admin-kick-player（联机房间踢人）放行 admin 与 superadmin
 //   · 客户端：调试信息 roleUnlocked、玩家列表踢人 canKickByRole、超级管理员面板均按 myRole 判定
 //   · 角色变更：POST /api/admin/users/:userId/role（后台令牌）可授予任意角色，但对「现任超管」的变更/撤销仅超管可做
-const WIKI_ROLES = [
-    {
-        key: 'user', icon: '👤', name: '普通用户', color: '#90a4ae',
-        tag: '正常游玩，没有任何管理权限',
-        can: ['全部玩家功能：单人闯关 / 解密 / 多人联机 / 每日挑战 / 签到 / 皮肤 / 宠物 / 成就 / 云存档 / 插件系统', '在「我的信息 → 主页」看到自己的身份徽章 👤'],
-        cannot: ['看不到调试信息', '不能踢人 / 改名 / 封禁 / 重置他人通关', '登录不了后台管理面板']
-    },
-    {
-        key: 'admin', icon: '🛡️', name: '管理员', color: '#0288d1',
-        tag: '拥有后台管理面板 + 少量游戏内管理能力',
-        can: ['登录后台管理面板（/admin.html）：公告、激活码、封禁与申诉、玩家与云数据、全局功能设定（含「功能关闭提示」文案）、API 自定义规则、审计日志、测试名单等',
-              '游戏内查看调试信息（FPS / 网络 / 角色等）',
-              '联机房间里踢出任意玩家（不依赖房主身份）',
-              '主页自动带「官方认证」标识'],
-        cannot: ['不能修改任何人的角色（含把自己设为管理员或超管）', '不能改名 / 封禁 / 解封 / 重置他人通关 / 改玩家设置', '不能封禁 IP，也进不了超级管理员后台']
-    },
-    {
-        key: 'superadmin', icon: '👑', name: '超级管理员', color: '#e83e8c',
-        tag: '最高权限，管理员能力 + 账号与角色管理',
-        can: ['拥有管理员的全部能力',
-              '游戏内「超级管理员管理面板」（仅超管可见）：改角色、改名、踢出、封禁 / 解封、重置全部通关、玩家设置、封禁 / 解封 IP',
-              '唯一能修改他人角色的身份（游戏内通道仅超管；后台对「现任超管」的变更也只有超管能做）',
-              '后台超级管理面板（/superadmin.html）：创建 / 删除管理员账号、停用账号、修改密码、遥测与审计、关闭游戏页面访问（403 维护）'],
-        cannot: ['不能修改自己的角色（客户端与服务端都会拦），需要另一个超管操作']
-    }
-];
-const WIKI_MATRIX = [
-    { cap: '正常游玩全部玩家功能', user: 1, admin: 1, superadmin: 1 },
-    { cap: '查看调试信息', user: 0, admin: 1, superadmin: 1 },
-    { cap: '联机房间内踢出任意玩家', user: 0, admin: 1, superadmin: 1 },
-    { cap: '主页「官方认证」标识', user: 0, admin: 1, superadmin: 1, note: '普通用户可由管理员单独标记' },
-    { cap: '登录后台管理面板（/admin.html）', user: 0, admin: 1, superadmin: 1 },
-    { cap: '改名 / 封禁 / 解封 / 重置全部通关 / 玩家设置（游戏内）', user: 0, admin: 0, superadmin: 1 },
-    { cap: '封禁 / 解封 IP（游戏内）', user: 0, admin: 0, superadmin: 1 },
-    { cap: '修改他人的角色', user: 0, admin: 0, superadmin: 1, note: '游戏内仅超管；后台改「现任超管」也只有超管能做' },
-    { cap: '后台账号管理（创建 / 停用管理员、遥测、审计）', user: 0, admin: 0, superadmin: 1 }
-];
-// 月卡权益（2026-09-29 扩充）。数值需与客户端 MONTH_CARD_PERKS / 服务端 SRV_MONTH_CARD_PERKS 保持一致。
+
 const WIKI_MONTHCARD = {
     updated: '2026-09-29',
     duration: 30,
@@ -1824,39 +1792,14 @@ const WIKI_MONTHCARD = {
     ],
     notes: [
         '加成与「永久升级」「宠物」的加成<b>叠加</b>生效；<b>未开通月卡时，所有数值与未开通前完全一致</b>，不影响任何未开卡玩家的游戏体验。',
+        '<b>金币通道免审核</b>：金币足够时在「每日签到 → 👑 月卡特权」点一下即<b>立即开通</b>（价格以服务端配置为准）；<b>微信通道</b>需管理员审核后开通。',
         '每日签到奖励由<b>服务端结算</b>（以服务器日期为准），改本机时间无法重复领取，也无法延长有效期。',
         '签到本身已有「金币 ×1.5」，因此<b>不再额外叠加</b>金币 +20%，避免重复加成。',
-        '开通需管理员审核，可用金币或微信支付；有效期 30 天，到期前剩余 3 天内会提醒续费；到期后全部权益立即失效（未用完的跳关次数同时作废）。',
+        '有效期 30 天；到期前剩余 3 天内会提醒续费；到期后全部权益立即失效（未用完的跳关次数同时作废）。',
         '在游戏内「每日签到 → 👑 月卡特权 → 📜 查看月卡权益」可随时查看当前生效状态与剩余次数。'
     ]
 };
 function buildWikiHtml() {
-    const roleCard = function (r) {
-        const li = function (arr, color) { return arr.map(function (t) { return '<li style="margin:4px 0;">' + t + '</li>'; }).join(''); };
-        return '<div style="flex:1 1 280px;min-width:0;background:#191923;border:1px solid ' + r.color + ';border-radius:14px;padding:16px 18px;">' +
-            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">' +
-                '<span style="font-size:26px;line-height:1;">' + r.icon + '</span>' +
-                '<span style="font-size:18px;font-weight:bold;color:' + r.color + ';">' + r.name + '</span>' +
-                '<code style="font-size:11px;color:#8b949e;background:#0d1117;border:1px solid #2a2a35;border-radius:5px;padding:1px 6px;">' + r.key + '</code>' +
-            '</div>' +
-            '<div style="color:#b3b3c0;font-size:13px;line-height:1.6;margin-bottom:10px;">' + r.tag + '</div>' +
-            '<div style="font-size:13px;font-weight:bold;color:#66bb6a;margin-bottom:4px;">可以做</div>' +
-            '<ul style="margin:0 0 10px;padding-left:18px;color:#cfd8dc;font-size:13px;line-height:1.7;">' + li(r.can) + '</ul>' +
-            '<div style="font-size:13px;font-weight:bold;color:#ef9a9a;margin-bottom:4px;">做不到</div>' +
-            '<ul style="margin:0;padding-left:18px;color:#a8b3bd;font-size:13px;line-height:1.7;">' + li(r.cannot) + '</ul>' +
-        '</div>';
-    };
-    const cell = function (v, color) {
-        return '<td style="text-align:center;padding:9px 10px;border-bottom:1px solid #26262f;' + (v ? '' : 'color:#5b6470;') + '">' +
-            (v ? '<span style="color:' + color + ';font-weight:bold;">✔</span>' : '—') + '</td>';
-    };
-    const rows = WIKI_MATRIX.map(function (m) {
-        return '<tr>' +
-            '<td style="padding:9px 10px;border-bottom:1px solid #26262f;color:#e6e6ef;">' + m.cap +
-                (m.note ? '<div style="font-size:12px;color:#8b949e;margin-top:3px;">' + m.note + '</div>' : '') + '</td>' +
-            cell(m.user, '#90a4ae') + cell(m.admin, '#4fc3f7') + cell(m.superadmin, '#f06292') +
-        '</tr>';
-    }).join('');
     const mcRows = WIKI_MONTHCARD.perks.map(function (p) {
         return '<tr>' +
             '<td style="padding:9px 10px;border-bottom:1px solid #26262f;color:#e6e6ef;white-space:nowrap;">' + p.name + '</td>' +
@@ -1865,68 +1808,108 @@ function buildWikiHtml() {
         '</tr>';
     }).join('');
     const mcNotes = WIKI_MONTHCARD.notes.map(function (t) { return '<div>· ' + t + '</div>'; }).join('');
+
+    // 左侧导航 + 右侧正文：每节一个面板，点导航只显示对应一节（未启用 JS 时全部显示，降级可用）
+    const SECTIONS = [
+        {
+            id: 'monthcard', icon: '👑', name: '月卡权益',
+            body: '<div class="note" style="margin-bottom:12px;">月卡是<b>面向玩家</b>的增值特权，<b>不提供任何管理权限</b>。有效期 ' +
+                WIKI_MONTHCARD.duration + ' 天。<b>金币通道免审核</b>（金币足够即点即开通），<b>微信通道</b>需管理员审核。</div>' +
+                '<div class="scroll"><table>' +
+                    '<tr><th style="text-align:left;">权益</th><th>数值</th><th style="text-align:left;">说明</th></tr>' +
+                    mcRows +
+                '</table></div>' +
+                '<div class="note" style="margin-top:12px;">' + mcNotes + '</div>'
+        },
+        {
+            id: 'faq', icon: '❓', name: '常见疑问',
+            body: '<div class="note">' +
+                '<div>· <b>月卡不附带管理权限</b>：它只影响金币 / 星星 / 冒险经验产出、商店折扣与跳关次数，不改变任何管理能力；反过来，管理员身份也不会自动获得月卡。</div>' +
+                '<div>· <b>月卡与「完整版激活」是两回事</b>：两者互不影响，各自独立生效。</div>' +
+                '<div>· <b>账号体系互相独立</b>：云储存 / 云链接 / 云备份 / 云存档是四套独立账号，彼此之间、以及与游戏进度都不通用。</div>' +
+                '<div>· <b>二次认证（2FA）</b>属于云账号自身的安全设置，不是特权；后台可临时关闭某套 2FA（已开启的会暂停生效，避免锁死）。</div>' +
+                '<div>· 月卡快到期时会提醒续费；到期后权益立即失效，未用完的跳关次数同时作废。</div>' +
+            '</div>'
+        },
+        {
+            id: 'safety', icon: '🔒', name: '数据与安全',
+            body: '<div class="note">' +
+                '<div>· <b>进度与钱包保存在你自己的设备上</b>（localStorage + 签名校验）：金币、星星、关卡进度、皮肤、宠物等换设备不会自动同步；要用云存档需单独登录云账号上传。</div>' +
+                '<div>· <b>签到奖励由服务端结算</b>：以服务器日期为准，修改本机时间无法重复领取；月卡有效期同样以服务端记录为准。</div>' +
+                '<div>· <b>管理动作全部在服务端校验</b>：身份与权限保存在服务端并逐次核对，客户端上的按钮只是显示，改前端拿不到真实权限。</div>' +
+                '<div>· 请勿在他人设备上保存云账号密码；发现异常登录请及时改密。</div>' +
+            '</div>'
+        }
+    ];
+
+    const navBtns = SECTIONS.map(function (s) {
+        return '<button type="button" data-sec="' + s.id + '">' + s.icon + ' ' + s.name + '</button>';
+    }).join('');
+    const secsHtml = SECTIONS.map(function (s) {
+        return '<section class="doc-sec" id="sec-' + s.id + '">' +
+            '<h2>' + s.icon + ' ' + s.name + '</h2>' + s.body +
+        '</section>';
+    }).join('');
+
     return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
         '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-        '<title>角色说明 · Wiki</title>' +
+        '<title>帮助中心 · 迷宫冒险</title>' +
         '<style>' +
             '*{box-sizing:border-box}' +
             'body{margin:0;background:#101017;color:#e6e6ef;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;line-height:1.7}' +
-            '.wrap{max-width:940px;margin:0 auto;padding:28px 18px 60px}' +
-            'h1{font-size:26px;margin:0 0 6px}' +
-            'h2{font-size:19px;margin:34px 0 12px;padding-left:10px;border-left:4px solid #4fc3f7}' +
-            '.sub{color:#90a4ae;font-size:14px;margin-bottom:8px}' +
+            '.shell{display:flex;gap:24px;align-items:flex-start;max-width:1040px;margin:0 auto;padding:26px 18px 64px}' +
+            '.doc-nav{flex:0 0 212px;position:sticky;top:22px;display:flex;flex-direction:column;gap:6px}' +
+            '.doc-nav-title{font-size:14px;font-weight:bold;color:#90a4ae;padding:0 4px 6px}' +
+            '.doc-nav button{display:block;width:100%;text-align:left;padding:9px 12px;border:1px solid #26262f;border-radius:9px;background:#15151d;color:#cfd8dc;font-size:14px;cursor:pointer;font-family:inherit}' +
+            '.doc-nav button:hover{border-color:#3a4a5a}' +
+            '.doc-nav button.active{background:#152430;border-color:#4fc3f7;color:#e6f4ff;font-weight:bold}' +
+            '.doc-content{flex:1;min-width:0}' +
+            'h1{font-size:24px;margin:0 0 6px}' +
+            'h2{font-size:18px;margin:0 0 12px;padding-left:10px;border-left:4px solid #4fc3f7}' +
+            '.sub{color:#90a4ae;font-size:13px;margin-bottom:16px}' +
+            '.doc-sec{margin-bottom:30px}' +
             'table{width:100%;border-collapse:collapse;background:#15151d;border:1px solid #2a2a35;border-radius:12px;overflow:hidden;font-size:14px}' +
             'th{background:#1d1d27;color:#cfd8dc;font-size:13px;padding:10px;border-bottom:1px solid #2a2a35;white-space:nowrap}' +
             '.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}' +
             'code{font-family:ui-monospace,Menlo,Consolas,monospace}' +
-            'ul{padding-left:20px}' +
-            'a{color:#4fc3f7}' +
             '.note{background:#15151d;border:1px solid #2a2a35;border-radius:12px;padding:14px 16px;font-size:14px;color:#cfd8dc}' +
-            '@media (max-width:600px){h1{font-size:22px}table{font-size:13px}.wrap{padding:20px 12px 48px}}' +
-        '</style></head><body><div class="wrap">' +
-        '<h1>🔐 角色说明</h1>' +
-        '<div class="sub">本页说明游戏内三种身份（普通用户 / 管理员 / 超级管理员）的权限差异，以及玩家可选的「月卡」权益。内容与实际服务端鉴权一致，最后更新：' + WIKI_MONTHCARD.updated + '。</div>' +
-        '<h2>三种身份</h2>' +
-        '<div style="display:flex;flex-wrap:wrap;gap:14px;">' + WIKI_ROLES.map(roleCard).join('') + '</div>' +
-        '<h2>能力对比</h2>' +
-        '<div class="scroll"><table>' +
-            '<tr><th style="text-align:left;">能力</th><th>👤 用户</th><th>🛡️ 管理员</th><th>👑 超级管理员</th></tr>' +
-            rows +
-        '</table></div>' +
-        '<h2>角色从哪来</h2>' +
-        '<div class="note">' +
-            '<div>· 角色保存在服务端（默认所有人都是 <code>user</code>），由超级管理员设置，不在客户端、也无法由玩家自己修改。</div>' +
-            '<div>· 变更后<b>实时生效</b>：在线玩家会立刻收到新角色（无需重登），调试信息、踢人按钮等入口随之开合。</div>' +
-            '<div>· 不能修改自己的角色；后台调整「现任超级管理员」的角色时，只有超级管理员本人操作才被接受。</div>' +
+            '.note>div{margin:3px 0}' +
+            '.foot{margin-top:28px;color:#5b6470;font-size:12px}' +
+            '@media (max-width:760px){' +
+                '.shell{flex-direction:column;gap:14px;padding:18px 12px 48px}' +
+                '.doc-nav{position:static;flex:none;width:100%;flex-direction:row;overflow-x:auto;-webkit-overflow-scrolling:touch;gap:8px;padding-bottom:4px}' +
+                '.doc-nav-title{display:none}' +
+                '.doc-nav button{width:auto;white-space:nowrap}' +
+                'h1{font-size:21px}table{font-size:13px}' +
+            '}' +
+        '</style></head><body>' +
+        '<div class="shell">' +
+            '<aside class="doc-nav">' +
+                '<div class="doc-nav-title">📖 帮助中心</div>' +
+                navBtns +
+            '</aside>' +
+            '<main class="doc-content">' +
+                '<h1>帮助中心</h1>' +
+                '<div class="sub">迷宫冒险的玩法说明与常见问题。内容与实际实现一致，最后更新：' + WIKI_MONTHCARD.updated + '。</div>' +
+                secsHtml +
+                '<div class="foot">迷宫冒险 · 服务器文档页 · 路径 <code>/wiki</code></div>' +
+            '</main>' +
         '</div>' +
-        '<h2>身份徽章</h2>' +
-        '<div class="note">' +
-            '<div>在「我的信息 → 📋 主页」与「他人主页」里，名字下方会显示身份徽章：' +
-            '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#90a4ae;color:#fff;font-size:12px;font-weight:bold;">👤 用户</span> ' +
-            '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#0288d1;color:#fff;font-size:12px;font-weight:bold;">🛡️ 管理员</span> ' +
-            '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#e83e8c;color:#fff;font-size:12px;font-weight:bold;">👑 超级管理员</span></div>' +
-            '<div>鼠标悬停在徽章上（手机可点一下）可看到该身份的详细说明。</div>' +
-        '</div>' +
-        '<h2>月卡权益</h2>' +
-        '<div class="note" style="margin-bottom:12px;">月卡是<b>面向玩家</b>的增值特权，与上面的三种身份<b>互不影响</b>：它不提供任何管理权限，身份也不会附带月卡。有效期 ' + WIKI_MONTHCARD.duration + ' 天，开通需管理员审核（可用金币或微信支付）。</div>' +
-        '<div class="scroll"><table>' +
-            '<tr><th style="text-align:left;">权益</th><th>数值</th><th style="text-align:left;">说明</th></tr>' +
-            mcRows +
-        '</table></div>' +
-        '<div class="note" style="margin-top:12px;">' + mcNotes + '</div>' +
-        '<h2>常见疑问</h2>' +
-        '<div class="note">' +
-            '<div>· <b>角色 ≠ 云账号</b>：云储存 / 云链接 / 云备份 / 云存档是四套<b>独立</b>账号体系，与游戏内角色无关，互不影响。</div>' +
-            '<div>· <b>月卡 ≠ 身份</b>：月卡只影响金币/星星/经验产出、商店折扣与跳关次数，<b>不提供任何管理权限</b>；反过来，管理员/超管身份也不会自动获得月卡。</div>' +
-            '<div>· <b>二次认证（2FA）</b>是云账号自身的安全设置，不是身份特权；管理员在后台可临时关闭某套 2FA（已开启的会暂停生效，避免锁死）。</div>' +
-            '<div>· 「官方认证」标识：管理员与超级管理员默认拥有；普通用户可由管理员单独标记（本地标记）。</div>' +
-            '<div>· 身份只影响管理能力，不影响游戏数值、关卡、皮肤等任何玩法内容。</div>' +
-        '</div>' +
-        '<h2>安全说明</h2>' +
-        '<div class="note">所有管理动作都由服务端按<b>服务端保存的角色</b>重新校验；客户端上的图标与按钮只是显示，改前端不会获得任何真实权限。发现冒充管理员的行为请向管理员反馈。</div>' +
-        '<div style="margin-top:26px;color:#5b6470;font-size:12px;">迷宫冒险 · 服务器文档页 · 路径 <code>/wiki</code></div>' +
-        '</div></body></html>';
+        '<script>(function(){try{' +
+            'var navs=[].slice.call(document.querySelectorAll(".doc-nav button"));' +
+            'var secs=[].slice.call(document.querySelectorAll(".doc-sec"));' +
+            'function show(id){' +
+                'for(var i=0;i<secs.length;i++){secs[i].style.display=(secs[i].id==="sec-"+id)?"":"none";}' +
+                'for(var j=0;j<navs.length;j++){navs[j].className=(navs[j].getAttribute("data-sec")===id)?"active":"";}' +
+                'if(history.replaceState){history.replaceState(null,"","#"+id);}' +
+            '}' +
+            'for(var k=0;k<navs.length;k++){(function(b){b.addEventListener("click",function(){show(b.getAttribute("data-sec"));});})(navs[k]);}' +
+            'var h=(location.hash||"").replace("#","");' +
+            'if(h&&document.getElementById("sec-"+h)){show(h);}else if(navs.length){show(navs[0].getAttribute("data-sec"));}' +
+        '}catch(e){}})();' + '</' + 'script>' +
+        '</body></html>';
 }
+
 app.get('/wiki', (req, res) => {
     // 注意：res.type() 只接受扩展名/MIME，写成 'html; charset=utf-8' 会退化成 application/octet-stream
     res.type('html').send(buildWikiHtml());
@@ -13178,6 +13161,41 @@ app.post('/api/monthcard/apply', async (req, res) => {
         appendAudit('player', 'monthcard-apply', `玩家 ${app.playerName}(${clientId}) 申请${method === 'coin' ? '金币' : '微信'}月卡 价${price}`);
         res.json({ success: true, id, message: '已提交，等待管理员审核' });
     } catch (e) { res.status(500).json({ success: false, message: '提交失败' }); }
+});
+// 金币通道：**免审核直连开通**（公开）。
+// 说明：金币钱包保存在客户端本地（服务端 `/api/my-coins` 只记管理端的增减），服务端无法校验余额，
+// 因此这里只负责「记录开通并返回到期时间」，扣费由客户端在本地完成（拿到成功响应后才扣）。
+// 微信通道仍走 /api/monthcard/apply + admin 审核。价格一律以服务端配置为准，不信任客户端传值。
+app.post('/api/monthcard/buy-with-coins', async (req, res) => {
+    try {
+        if (!monthCardIsOpen()) return res.status(403).json({ success: false, message: '月卡暂未开放' });
+        const b = req.body || {};
+        const clientId = (b.clientId || '').toString().slice(0, 128);
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少玩家标识' });
+        const mc = (globalFunctions && globalFunctions.monthCard) || {};
+        const price = Math.max(0, parseInt(mc.coinPrice, 10) || 0);
+        const g0 = monthCardGrants.get(clientId);
+        if (g0 && g0.until > Date.now()) {
+            return res.json({ success: false, alreadyActive: true, until: g0.until, price, message: '月卡已生效，无需重复开通' });
+        }
+        // 顺带把该玩家遗留的「金币」待审申请标记为已处理，避免后台列表里挂着作废的申请
+        let touched = false;
+        for (const x of monthCardApplications.values()) {
+            if (x.clientId === clientId && x.status === 'pending' && x.method === 'coin') {
+                x.status = 'approved';
+                x.resolvedAt = Date.now();
+                x.adminNote = '金币通道已直连开通（免审核，系统自动处理）';
+                x.adminName = 'system';
+                touched = true;
+            }
+        }
+        if (touched) saveMonthCardApplications();
+        const until = Date.now() + 30 * 86400000;
+        monthCardGrants.set(clientId, { until, method: 'coin', grantedAt: Date.now(), applicationId: null, direct: true });
+        saveMonthCardGrants();
+        appendAudit('player', 'monthcard-buy-coin', `玩家 ${(b.playerName || '玩家').toString().slice(0, 40)}(${clientId}) 金币直连开通月卡 价${price}`);
+        res.json({ success: true, until, price, message: '月卡已开通' });
+    } catch (e) { res.status(500).json({ success: false, message: '开通失败' }); }
 });
 // admin 查看申请列表（可按 ?status=pending 过滤）
 app.get('/api/admin/monthcard-applications', requireAdminAuth, async (req, res) => {
