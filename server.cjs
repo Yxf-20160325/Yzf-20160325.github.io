@@ -1809,6 +1809,27 @@ const WIKI_MATRIX = [
     { cap: '修改他人的角色', user: 0, admin: 0, superadmin: 1, note: '游戏内仅超管；后台改「现任超管」也只有超管能做' },
     { cap: '后台账号管理（创建 / 停用管理员、遥测、审计）', user: 0, admin: 0, superadmin: 1 }
 ];
+// 月卡权益（2026-09-29 扩充）。数值需与客户端 MONTH_CARD_PERKS / 服务端 SRV_MONTH_CARD_PERKS 保持一致。
+const WIKI_MONTHCARD = {
+    updated: '2026-09-29',
+    duration: 30,
+    perks: [
+        { name: '金币收入', value: '+20%', desc: '通关奖励、关卡内拾取金币、每日挑战等所有正向金币收入' },
+        { name: '星星收入', value: '+20%', desc: '每日挑战与秘境奖励结算的星星' },
+        { name: '秘境冒险经验', value: '+20%', desc: '冒险经验只能通过秘境获得' },
+        { name: '商店道具', value: '9 折', desc: '游戏内商店的道具按折后价结算，价格区会带 👑 标记（悬停显示原价）' },
+        { name: '跳关', value: '共 5 次', desc: '在「单人游戏」关卡列表里直接跳过下一关：记为已通关并解锁下一层，但不发放关卡奖励；到期作废，续费后重置' },
+        { name: '每日签到', value: '金币 ×1.5、额外 +1⭐', desc: '在原有签到奖励之上加成' },
+        { name: '签到满轮奖励', value: '额外 +50💰 +3⭐', desc: '连续签到满 7 天（一整轮）时额外发放一次' }
+    ],
+    notes: [
+        '加成与「永久升级」「宠物」的加成<b>叠加</b>生效；<b>未开通月卡时，所有数值与未开通前完全一致</b>，不影响任何未开卡玩家的游戏体验。',
+        '每日签到奖励由<b>服务端结算</b>（以服务器日期为准），改本机时间无法重复领取，也无法延长有效期。',
+        '签到本身已有「金币 ×1.5」，因此<b>不再额外叠加</b>金币 +20%，避免重复加成。',
+        '开通需管理员审核，可用金币或微信支付；有效期 30 天，到期前剩余 3 天内会提醒续费；到期后全部权益立即失效（未用完的跳关次数同时作废）。',
+        '在游戏内「每日签到 → 👑 月卡特权 → 📜 查看月卡权益」可随时查看当前生效状态与剩余次数。'
+    ]
+};
 function buildWikiHtml() {
     const roleCard = function (r) {
         const li = function (arr, color) { return arr.map(function (t) { return '<li style="margin:4px 0;">' + t + '</li>'; }).join(''); };
@@ -1836,6 +1857,14 @@ function buildWikiHtml() {
             cell(m.user, '#90a4ae') + cell(m.admin, '#4fc3f7') + cell(m.superadmin, '#f06292') +
         '</tr>';
     }).join('');
+    const mcRows = WIKI_MONTHCARD.perks.map(function (p) {
+        return '<tr>' +
+            '<td style="padding:9px 10px;border-bottom:1px solid #26262f;color:#e6e6ef;white-space:nowrap;">' + p.name + '</td>' +
+            '<td style="text-align:center;padding:9px 10px;border-bottom:1px solid #26262f;color:#e1bee7;font-weight:bold;white-space:nowrap;">' + p.value + '</td>' +
+            '<td style="padding:9px 10px;border-bottom:1px solid #26262f;color:#cfd8dc;font-size:13px;">' + p.desc + '</td>' +
+        '</tr>';
+    }).join('');
+    const mcNotes = WIKI_MONTHCARD.notes.map(function (t) { return '<div>· ' + t + '</div>'; }).join('');
     return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
         '<meta name="viewport" content="width=device-width,initial-scale=1">' +
         '<title>角色说明 · Wiki</title>' +
@@ -1856,7 +1885,7 @@ function buildWikiHtml() {
             '@media (max-width:600px){h1{font-size:22px}table{font-size:13px}.wrap{padding:20px 12px 48px}}' +
         '</style></head><body><div class="wrap">' +
         '<h1>🔐 角色说明</h1>' +
-        '<div class="sub">本页说明游戏内三种身份（普通用户 / 管理员 / 超级管理员）的权限差异。内容与实际服务端鉴权一致，最后更新：2026-09-27。</div>' +
+        '<div class="sub">本页说明游戏内三种身份（普通用户 / 管理员 / 超级管理员）的权限差异，以及玩家可选的「月卡」权益。内容与实际服务端鉴权一致，最后更新：' + WIKI_MONTHCARD.updated + '。</div>' +
         '<h2>三种身份</h2>' +
         '<div style="display:flex;flex-wrap:wrap;gap:14px;">' + WIKI_ROLES.map(roleCard).join('') + '</div>' +
         '<h2>能力对比</h2>' +
@@ -1878,9 +1907,17 @@ function buildWikiHtml() {
             '<span style="display:inline-block;padding:1px 8px;border-radius:11px;background:#e83e8c;color:#fff;font-size:12px;font-weight:bold;">👑 超级管理员</span></div>' +
             '<div>鼠标悬停在徽章上（手机可点一下）可看到该身份的详细说明。</div>' +
         '</div>' +
+        '<h2>月卡权益</h2>' +
+        '<div class="note" style="margin-bottom:12px;">月卡是<b>面向玩家</b>的增值特权，与上面的三种身份<b>互不影响</b>：它不提供任何管理权限，身份也不会附带月卡。有效期 ' + WIKI_MONTHCARD.duration + ' 天，开通需管理员审核（可用金币或微信支付）。</div>' +
+        '<div class="scroll"><table>' +
+            '<tr><th style="text-align:left;">权益</th><th>数值</th><th style="text-align:left;">说明</th></tr>' +
+            mcRows +
+        '</table></div>' +
+        '<div class="note" style="margin-top:12px;">' + mcNotes + '</div>' +
         '<h2>常见疑问</h2>' +
         '<div class="note">' +
             '<div>· <b>角色 ≠ 云账号</b>：云储存 / 云链接 / 云备份 / 云存档是四套<b>独立</b>账号体系，与游戏内角色无关，互不影响。</div>' +
+            '<div>· <b>月卡 ≠ 身份</b>：月卡只影响金币/星星/经验产出、商店折扣与跳关次数，<b>不提供任何管理权限</b>；反过来，管理员/超管身份也不会自动获得月卡。</div>' +
             '<div>· <b>二次认证（2FA）</b>是云账号自身的安全设置，不是身份特权；管理员在后台可临时关闭某套 2FA（已开启的会暂停生效，避免锁死）。</div>' +
             '<div>· 「官方认证」标识：管理员与超级管理员默认拥有；普通用户可由管理员单独标记（本地标记）。</div>' +
             '<div>· 身份只影响管理能力，不影响游戏数值、关卡、皮肤等任何玩法内容。</div>' +
@@ -12937,6 +12974,68 @@ function saveMonthCardApplications() { try { fs.writeFileSync(MONTHCARD_APPLICAT
 function saveMonthCardGrants() { try { fs.writeFileSync(MONTHCARD_GRANTS_FILE, JSON.stringify(Object.fromEntries(monthCardGrants), null, 2)); } catch (e) {} }
 loadMonthCardData();
 
+// ===== 每日签到（服务端权威结算）=====
+// 目的：签到奖励不再由客户端自行判定（避免改本机日期重复领取 / 篡改连签）。
+// 服务端保存每个玩家的「最后签到日期 / 连签天数 / 累计天数 / 领取流水」，一律以服务端日期为准。
+// ⚠️ 奖励规则必须与客户端 CHECKIN_REWARDS / monthCardCheckinReward 保持一致（改一处要同步两边）。
+const MONTHCARD_CHECKINS_FILE = path.join(DATA_DIR, 'monthcard-checkins.json');
+let monthCardCheckins = new Map(); // clientId -> { lastDate, streak, totalDays, updatedAt, history:[{date,coins,stars,streak,cycleBonus}] }
+const SRV_CHECKIN_REWARDS = [
+    { coins: 20, stars: 1 },
+    { coins: 25, stars: 1 },
+    { coins: 30, stars: 2 },
+    { coins: 35, stars: 2 },
+    { coins: 40, stars: 2 },
+    { coins: 50, stars: 3 },
+    { coins: 80, stars: 5 }
+];
+// 月卡权益默认值（同时通过 /api/monthcard/config 下发，客户端可用它覆盖本地默认值）
+const SRV_MONTH_CARD_PERKS = {
+    coinPct: 20, starPct: 20, expPct: 20, shopDiscount: 0.9,
+    skipLevels: 5, cycleBonusCoins: 50, cycleBonusStars: 3
+};
+function loadMonthCardCheckins() {
+    try {
+        const o = JSON.parse(fs.readFileSync(MONTHCARD_CHECKINS_FILE, 'utf8'));
+        if (o && typeof o === 'object') Object.keys(o).forEach(k => monthCardCheckins.set(k, o[k]));
+    } catch (e) {}
+}
+function saveMonthCardCheckins() {
+    try { fs.writeFileSync(MONTHCARD_CHECKINS_FILE, JSON.stringify(Object.fromEntries(monthCardCheckins), null, 2)); } catch (e) {}
+}
+loadMonthCardCheckins();
+// 服务端本地日期（YYYY-MM-DD，按服务器时区）
+function srvTodayStr() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+function srvDaysBetween(a, b) {
+    const da = new Date(a + 'T00:00:00'), db = new Date(b + 'T00:00:00');
+    if (isNaN(da.getTime()) || isNaN(db.getTime())) return 0;
+    return Math.round((db - da) / 86400000);
+}
+function srvMonthCardUntil(clientId) {
+    const g = monthCardGrants.get(clientId);
+    return (g && g.until > Date.now()) ? g.until : 0;
+}
+// 与客户端 monthCardCheckinReward 同规则：基础档位 → 月卡 ×1.5 金币 / +1⭐ → 月卡满一轮额外奖
+function srvCheckinReward(streak, mcActive) {
+    const st = Math.max(1, Number(streak) || 1);
+    const base = SRV_CHECKIN_REWARDS[(st - 1) % 7] || { coins: 0, stars: 0 };
+    let coins = base.coins, stars = base.stars, cycleBonus = false;
+    if (mcActive) {
+        coins = Math.round(coins * 1.5);
+        stars += 1;
+        if (st % 7 === 0) {
+            coins += SRV_MONTH_CARD_PERKS.cycleBonusCoins;
+            stars += SRV_MONTH_CARD_PERKS.cycleBonusStars;
+            cycleBonus = true;
+        }
+    }
+    return { coins: coins, stars: stars, cycleBonus: cycleBonus };
+}
+
 // ===== 客户端错误上报（玩家端运行时错误，admin 后台可查看）=====
 const CLIENT_ERRORS_FILE = path.join(DATA_DIR, 'client-errors.json');
 let clientErrors = []; // {id, clientId, playerName, message, stack, context, gameVersion, userAgent, time}
@@ -13138,9 +13237,72 @@ app.get('/api/monthcard/config', (req, res) => {
             enabled: !!mc.enabled,
             coinPrice: mc.coinPrice || 0,
             realPrice: mc.realPrice || 0,
-            wechatQr: mc.wechatQr || ''
+            wechatQr: mc.wechatQr || '',
+            // 月卡权益数值（客户端默认值由它覆盖；改这里即对所有客户端生效，无需发版）
+            perks: (mc && mc.perks && typeof mc.perks === 'object') ? Object.assign({}, SRV_MONTH_CARD_PERKS, mc.perks) : SRV_MONTH_CARD_PERKS
         });
     } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
+// ===== 每日签到（服务端权威）=====
+// 查询签到状态（公开）：返回服务端记录的最后签到日期 / 连签 / 累计、今天是否已领、下一档奖励、月卡状态
+app.get('/api/checkin/status', async (req, res) => {
+    try {
+        const clientId = (req.query.clientId || '').toString();
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId' });
+        const c = monthCardCheckins.get(clientId) || { lastDate: '', streak: 0, totalDays: 0 };
+        const until = srvMonthCardUntil(clientId);
+        const mcActive = until > 0;
+        const today = srvTodayStr();
+        const claimedToday = (c.lastDate === today);
+        const nextStreak = claimedToday ? (c.streak || 1)
+            : ((c.lastDate && srvDaysBetween(c.lastDate, today) === 1) ? ((c.streak || 0) + 1) : 1);
+        res.json({
+            success: true,
+            lastDate: c.lastDate || '', streak: c.streak || 0, totalDays: c.totalDays || 0,
+            claimedToday: claimedToday, today: today,
+            nextStreak: nextStreak, todayReward: srvCheckinReward(nextStreak, mcActive),
+            monthCardActive: mcActive, monthCardUntil: until,
+            monthCardDaysLeft: mcActive ? Math.ceil((until - Date.now()) / 86400000) : 0,
+            perks: SRV_MONTH_CARD_PERKS
+        });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+// 领取每日签到奖励（公开）：服务端按自己的日期判定连签并记账，客户端只负责入账与展示
+app.post('/api/checkin/claim', async (req, res) => {
+    try {
+        const b = req.body || {};
+        const clientId = (b.clientId || '').toString();
+        if (!clientId) return res.status(400).json({ success: false, message: '缺少 clientId' });
+        const today = srvTodayStr();
+        const c = monthCardCheckins.get(clientId) || { lastDate: '', streak: 0, totalDays: 0, history: [] };
+        if (c.lastDate === today) {
+            return res.json({
+                success: false, code: 'already', message: '今天已经签到过了',
+                lastDate: c.lastDate, streak: c.streak || 0, totalDays: c.totalDays || 0
+            });
+        }
+        c.streak = (c.lastDate && srvDaysBetween(c.lastDate, today) === 1) ? ((c.streak || 0) + 1) : 1;
+        c.totalDays = (c.totalDays || 0) + 1;
+        const until = srvMonthCardUntil(clientId);
+        const mcActive = until > 0;
+        const r = srvCheckinReward(c.streak, mcActive);
+        c.lastDate = today;
+        c.updatedAt = Date.now();
+        if (!Array.isArray(c.history)) c.history = [];
+        c.history.push({ date: today, coins: r.coins, stars: r.stars, streak: c.streak, cycleBonus: !!r.cycleBonus });
+        if (c.history.length > 60) c.history = c.history.slice(-60);
+        monthCardCheckins.set(clientId, c);
+        saveMonthCardCheckins();
+        res.json({
+            success: true, code: 'ok',
+            lastDate: c.lastDate, streak: c.streak, totalDays: c.totalDays,
+            coins: r.coins, stars: r.stars, cycleBonus: r.cycleBonus,
+            monthCardActive: mcActive, monthCardUntil: until,
+            monthCardDaysLeft: mcActive ? Math.ceil((until - Date.now()) / 86400000) : 0,
+            perks: SRV_MONTH_CARD_PERKS
+        });
+    } catch (e) { res.status(500).json({ success: false, message: '签到失败' }); }
 });
 
 // ===== 每日挑战自定义配置（admin 可编辑并设持续天数，默认1天）=====
