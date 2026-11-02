@@ -1,4 +1,4 @@
-# 依赖
+# 依赖（体积大且无必要入库）
 node_modules/
 
 # 密码 / 密钥（切勿提交，泄露即失陷）
@@ -6,7 +6,23 @@ admin-password.txt
 superadmin-password.txt
 *.password.txt
 
-# 系统 / 工具目录
-.DS_Store
+# 运行时数据（含玩家隐私数据，勿提交）
+data/
+
+# 本地 / 工具目录
 .workbuddy/
 .trae/
+.DS_Store
+
+# 非后端产物（本仓库只收后端 server）
+desktop/
+ios/
+wechat-minigame/
+wechat-miniprogram/
+public/
+music/
+plugins/
+*.html
+
+# 管理后台页面需要随仓库分发（服务端 /admin 与 /admin.html 直接读取该文件）
+!admin.html

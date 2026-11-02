@@ -1760,8 +1760,27 @@ app.use('/api', (req, res, next) => {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 管理后台与超级管理员后台页面（游戏 403 拦截已排除这两个路径）
-app.get('/admin.html', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
-app.get('/superadmin.html', (req, res) => res.sendFile(path.join(__dirname, 'superadmin.html')));
+// 注意：全局安全头中间件预置了 application/json，sendFile 不会覆盖已存在的类型，
+// 所以这里必须先 res.type('html')，否则浏览器会把页面当 JSON 显示/下载。
+app.get('/admin.html', (req, res) => {
+    res.type('html');
+    res.sendFile(path.join(__dirname, 'admin.html'));
+});
+app.get('/superadmin.html', (req, res) => {
+    res.type('html');
+    res.sendFile(path.join(__dirname, 'superadmin.html'));
+});
+// 管理后台简洁入口：/admin（等价于 /admin.html）。
+// 不以 .html 结尾 → 维护期不会被游戏的 403 拦截，方便管理员随时进后台处理故障。
+app.get('/admin', (req, res) => {
+    res.type('html');
+    res.sendFile(path.join(__dirname, 'admin.html'), function (err) {
+        if (err) {
+            console.error('[Admin] 页面发送失败:', err.message);
+            if (!res.headersSent) res.status(500).type('text/plain; charset=utf-8').send('管理后台页面缺失（admin.html 未部署）');
+        }
+    });
+});
 
 // ===== 帮助中心 Wiki（公开文档页）：GET /wiki =====
 // 页面结构：左侧导航 + 右侧正文（每节一个面板，点导航只显示对应一节；无 JS 时全部展开，降级可用）。
