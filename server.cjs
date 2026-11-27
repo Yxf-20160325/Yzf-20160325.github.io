@@ -13,13 +13,99 @@ let QRCode = null;
 try { QRCode = require('qrcode'); } catch (e) { QRCode = null; }
 
 const app = express();
-// 配置CORS以支持跨网络连接
+app.disable('x-powered-by');
+
+// ===== Better Stack 健康端点 =====
+// 注册在所有中间件与路由之前：不鉴权、不受 CSRF/限流/API 规则影响、不依赖数据库。
+// 关键：必须在任何 catch-all（如 /:id）之前注册，确保 /health 不被吞掉。
+const SERVER_STARTED_AT = Date.now();
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'ok',
+        uptimeSeconds: Math.floor((Date.now() - SERVER_STARTED_AT) / 1000),
+        timestamp: new Date().toISOString()
+    });
+});
+app.get('/health/ping', (req, res) => {
+    res.status(200).type('text/plain; charset=utf-8').send('pong');
+});
+
+// ===== Better Stack Heartbeat（可选）=====
+// 配置 BETTERSTACK_HEARTBEAT_URL 后：启动即上报一次，之后按间隔定时上报。
+// 上报失败只记录日志，绝不影响主服务；未配置时完全不启动定时器。
+function startBetterStackHeartbeat() {
+    const url = process.env.BETTERSTACK_HEARTBEAT_URL;
+    if (!url) return;
+    let intervalMs = parseInt(process.env.BETTERSTACK_HEARTBEAT_INTERVAL_MS, 10);
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) intervalMs = 60000;
+    async function pingOnce() {
+        try {
+            const mod = /^https:\/\//i.test(url) ? require('https') : require('http');
+            await new Promise((resolve, reject) => {
+                const r = mod.get(url, resp => {
+                    resp.resume();
+                    resp.on('end', () => {
+                        if (resp.statusCode >= 200 && resp.statusCode < 300) resolve();
+                        else reject(new Error('HTTP ' + resp.statusCode));
+                    });
+                });
+                r.on('error', reject);
+                r.setTimeout(10000, () => r.destroy(new Error('timeout')));
+            });
+        } catch (e) {
+            // 失败不影响主服务，仅记录日志
+            console.error('[Heartbeat] 上报失败（不影响主服务）:', e.message);
+        }
+    }
+    pingOnce();
+    setInterval(pingOnce, intervalMs).unref();
+    console.log('[Heartbeat] 已启动，间隔 ' + intervalMs + 'ms');
+}
+// 配置CORS以支持跨网络连接：生产环境严格白名单，本地开发放宽
+const corsWhitelist = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+const isDev = process.env.NODE_ENV !== 'production';
+
 app.use(cors({
-    origin: '*', // 允许所有来源
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], // 支持所有必要的HTTP方法
-    allowedHeaders: '*', // 允许客户端自定义头（如 Client-Version、Admin-Auto-Connect），避免预检被拦
-    credentials: true // 允许发送凭证信息
+    origin: (origin, callback) => {
+        // 允许非浏览器请求（origin 为 undefined）和本地开发
+        if (!origin || isDev) return callback(null, true);
+        if (corsWhitelist.length === 0 || corsWhitelist.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error('Not allowed by CORS'), false);
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: '*',
+    credentials: true
 }));
+
+// ===== 安全响应头（等价 helmet，避免新增依赖）=====
+// 单文件前端含大量内联脚本/样式，script-src/style-src 需放行 'unsafe-inline'；
+// 生产环境可进一步收紧并设置 Content-Security-Policy 报告端点。
+app.use((req, res, next) => {
+    res.removeHeader('X-Powered-By');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (process.env.NODE_ENV === 'production' && req.secure) {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    // 默认放行同源与内联（单 HTML 交付），生产环境建议通过 CSP_ORIGIN 环境变量收紧
+    const csp = [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "connect-src 'self' ws: wss:",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'"
+    ].join('; ');
+    res.setHeader('Content-Security-Policy', csp);
+    next();
+});
 
 // ===== 超级管理员 / 访问控制状态 =====
 const superAdminTokens = new Map();      // 超级管理员令牌
@@ -729,6 +815,17 @@ async function initDatabase() {
                 if (!ltsCols || ltsCols.length === 0) {
                     await pool.query('ALTER TABLE cloud_link_accounts ADD COLUMN totp_scopes VARCHAR(255)');
                     console.log('🗄️ 已为 cloud_link_accounts 表补充 totp_scopes 列（2FA 作用范围）');
+                }
+                // 补充 backup_codes 列：2FA 应急恢复码（一次性，bcrypt 哈希后以 JSON 数组存储）
+                for (const tbl of ['cloud_storage_accounts', 'cloud_link_accounts', 'cloud_backup_accounts', 'savereplay_accounts']) {
+                    const [bcCols] = await pool.query(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME='backup_codes'",
+                        [dbName, tbl]
+                    );
+                    if (!bcCols || bcCols.length === 0) {
+                        await pool.query(`ALTER TABLE ${tbl} ADD COLUMN backup_codes TEXT`);
+                        console.log(`🗄️ 已为 ${tbl} 表补充 backup_codes 列（2FA 应急恢复码）`);
+                    }
                 }
                 // 补充 ip 列：记录会话登录 IP，供"管理设备"展示
                 const [sessIpCols] = await pool.query(
@@ -2037,8 +2134,17 @@ function cmpVersion(a, b) {
     return 0;
 }
 
-// JWT 配置
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+// JWT 配置：生产环境缺失 JWT_SECRET 时拒绝启动（fail-closed），禁止使用默认密钥；
+// 本地开发允许临时默认密钥，生产严禁。
+let JWT_SECRET;
+if (process.env.NODE_ENV === 'production') {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('FATAL: 生产环境必须设置 JWT_SECRET 环境变量。请在 onrender Secret 中配置后重新部署。');
+    }
+    JWT_SECRET = process.env.JWT_SECRET;
+} else {
+    JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+}
 
 // 全局房间数据存储
 const rooms = new Map(); // 存储所有房间信息 {roomId: roomData}
@@ -8358,9 +8464,9 @@ async function dbSaveCloudAccount(acc) {
     const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
     const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
-    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes];
+    const SQL = 'INSERT INTO cloud_storage_accounts (username, password_hash, created_at, updated_at, max_mazes, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes, backup_codes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), max_mazes=VALUES(max_mazes), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes), backup_codes=VALUES(backup_codes)'
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, maxMazes, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes, acc.backup_codes || null];
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(SQL, PARAMS);
@@ -9031,9 +9137,9 @@ async function dbSaveLinkAccount(acc) {
     const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
     const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
-    const SQL = 'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor, creatorClientId, totpSecret, totpScopes];
+    const SQL = 'INSERT INTO cloud_link_accounts (username, password_hash, created_at, updated_at, client_id, disabled, two_factor_enabled, creator_client_id, totp_secret, totp_scopes, backup_codes) VALUES (?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes), backup_codes=VALUES(backup_codes)'
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, twoFactor, creatorClientId, totpSecret, totpScopes, acc.backup_codes || null];
     if (DB_AVAILABLE && pool) {
         try {
             await pool.query(SQL, PARAMS);
@@ -9330,7 +9436,15 @@ app.post('/api/cloud-links/login', async (req, res) => {
         if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
             const code = read2faCode(req);
             if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
-            const deny = assert2faCode(acc, code);
+            let deny = assert2faCode(acc, code);
+            if (deny) {
+                // TOTP 失败，尝试一次性应急恢复码
+                const bc = await verifyBackupCode(acc, code);
+                if (!bc.ok) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+                // 恢复码验证通过，已作废（从 acc.backup_codes 移除），持久化
+                try { await saveAccountByKind('clink', acc); } catch (_) {}
+                deny = null;
+            }
             if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
         }
         const clientId = (req.body.clientId || '').toString().trim() || null;
@@ -9511,11 +9625,45 @@ app.post('/api/cloud-links/2fa/confirm', requireLinkAuth, async (req, res) => {
         acc.totp_secret = pend.secret;
         acc.two_factor_enabled = 1;
         acc.updated_at = new Date().toISOString();
+        // 生成一次性应急恢复码（开启 2FA 时一并生成，bcrypt 哈希后存储；原始码仅此一次明文）
+        const _backupCodes = genBackupCodes();
+        acc.backup_codes = JSON.stringify((await hashBackupCodes(_backupCodes)).map(h => ({ h: h, used: false })));
         await dbSaveLinkAccount(acc);
-        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-change', `云链接账号「${req.linkUser}」二次认证开启（已通过二次确认）`, req);
-        res.json({ success: true, enabled: true, message: '二次认证已开启' });
+        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-change', `云链接账号「${req.linkUser}」二次认证开启（已通过二次确认，已生成 ${_backupCodes.length} 个应急恢复码）`, req);
+        res.json({ success: true, enabled: true, backupCodes: _backupCodes, message: '二次认证已开启，请妥善保存下方的应急恢复码，丢失后将无法找回' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
+
+// 查看应急恢复码状态（不返回明码，仅返回剩余数量与是否已用完）
+app.get('/api/cloud-links/2fa/backup-codes', requireLinkAuth, async (req, res) => {
+    try {
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const hashes = getBackupCodeHashes(acc);
+        const remaining = hashes.filter(h => !h.used).length;
+        res.json({ success: true, enabled: !!(acc.two_factor_enabled), remaining, total: BACKUP_CODE_COUNT });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
+// 重新生成应急恢复码（需当前动态码验证，原有恢复码全部作废）
+app.post('/api/cloud-links/2fa/backup-codes/regenerate', requireLinkAuth, async (req, res) => {
+    if (!cloudLink2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const code = read2faCode(req);
+        const acc = await dbGetLinkAccount(req.linkUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const deny = assert2faCode(acc, code || '');
+        if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+        const _backupCodes = genBackupCodes();
+        acc.backup_codes = JSON.stringify((await hashBackupCodes(_backupCodes)).map(h => ({ h: h, used: false })));
+        acc.updated_at = new Date().toISOString();
+        await dbSaveLinkAccount(acc);
+        appendAudit(req.linkUser || 'clink', 'cloud-link-2fa-backup-codes-regenerate', '云链接账号「' + req.linkUser + '」重新生成应急恢复码', req);
+        res.json({ success: true, backupCodes: _backupCodes, message: '已重新生成应急恢复码，请妥善保存，原有恢复码全部失效' });
+    } catch (e) { res.status(500).json({ success: false, message: '重新生成失败' }); }
+});
+
+
 // 二次认证「升级验证」：敏感操作前校验账号密码
 app.post('/api/cloud-links/verify', requireLinkAuth, async (req, res) => {
     if (!cloudLinkEnabled()) return res.status(403).json({ success: false, message: '云链接功能已关闭' });
@@ -10014,7 +10162,15 @@ app.post('/api/cloud-storage/login', async (req, res) => {
         if (acc.two_factor_enabled && twofaGlobalEnabledFor(acc)) {
             const code = read2faCode(req);
             if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
-            const deny = assert2faCode(acc, code);
+            let deny = assert2faCode(acc, code);
+            if (deny) {
+                // TOTP 失败，尝试一次性应急恢复码
+                const bc = await verifyBackupCode(acc, code);
+                if (!bc.ok) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+                // 恢复码验证通过，已作废（从 acc.backup_codes 移除），持久化
+                try { await saveAccountByKind('cloud', acc); } catch (_) {}
+                deny = null;
+            }
             if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
         }
         // 登录时绑定/更新游戏 clientId（使管理端能用游戏用户定位云账号）
@@ -10200,11 +10356,44 @@ app.post('/api/cloud-storage/2fa/confirm', requireCloudAuth, async (req, res) =>
         acc.totp_secret = pend.secret;
         acc.two_factor_enabled = 1;
         acc.updated_at = new Date().toISOString();
+        // 生成一次性应急恢复码（开启 2FA 时一并生成，bcrypt 哈希后存储；原始码仅此一次明文）
+        const _backupCodes = genBackupCodes();
+        acc.backup_codes = JSON.stringify((await hashBackupCodes(_backupCodes)).map(h => ({ h: h, used: false })));
         await dbSaveCloudAccount(acc);
-        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-change', `云储存账号「${req.cloudUser}」二次认证开启（已通过二次确认）`, req);
-        res.json({ success: true, enabled: true, message: '二次认证已开启' });
+        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-change', `云储存账号「${req.cloudUser}」二次认证开启（已通过二次确认，已生成 ${_backupCodes.length} 个应急恢复码）`, req);
+        res.json({ success: true, enabled: true, backupCodes: _backupCodes, message: '二次认证已开启，请妥善保存下方的应急恢复码，丢失后将无法找回' });
     } catch (e) { res.status(500).json({ success: false, message: '操作失败' }); }
 });
+
+// 查看应急恢复码状态（不返回明码，仅返回剩余数量与是否已用完）
+app.get('/api/cloud-storage/2fa/backup-codes', requireCloudAuth, async (req, res) => {
+    try {
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const hashes = getBackupCodeHashes(acc);
+        const remaining = hashes.filter(h => !h.used).length;
+        res.json({ success: true, enabled: !!(acc.two_factor_enabled), remaining, total: BACKUP_CODE_COUNT });
+    } catch (e) { res.status(500).json({ success: false, message: '查询失败' }); }
+});
+
+// 重新生成应急恢复码（需当前动态码验证，原有恢复码全部作废）
+app.post('/api/cloud-storage/2fa/backup-codes/regenerate', requireCloudAuth, async (req, res) => {
+    if (!cloud2faEnabled()) return res.status(403).json({ success: false, message: '管理员已关闭二次认证功能' });
+    try {
+        const code = read2faCode(req);
+        const acc = await dbGetCloudAccount(req.cloudUser);
+        if (!acc) return res.status(404).json({ success: false, message: '账号不存在' });
+        const deny = assert2faCode(acc, code || '');
+        if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+        const _backupCodes = genBackupCodes();
+        acc.backup_codes = JSON.stringify((await hashBackupCodes(_backupCodes)).map(h => ({ h: h, used: false })));
+        acc.updated_at = new Date().toISOString();
+        await dbSaveCloudAccount(acc);
+        appendAudit(req.cloudUser || 'cloud', 'cloud-2fa-backup-codes-regenerate', '云储存账号「' + req.cloudUser + '」重新生成应急恢复码', req);
+        res.json({ success: true, backupCodes: _backupCodes, message: '已重新生成应急恢复码，请妥善保存，原有恢复码全部失效' });
+    } catch (e) { res.status(500).json({ success: false, message: '重新生成失败' }); }
+});
+
 // 二次认证「升级验证」：敏感操作（打开账号设置/管理设备/踢出设备）前校验账号密码，
 // 由注册账号本人输入密码授权后方放行。仅校验，不改任何状态。
 app.post('/api/cloud-storage/verify', requireCloudAuth, async (req, res) => {
@@ -10346,6 +10535,98 @@ function twofaScopeEnabled(acc, scope) {
 function assert2faScope(acc, scope, code) {
     if (!twofaScopeEnabled(acc, scope)) return null;
     return assert2faCode(acc, code || '');
+}
+
+// ===== 2FA 应急恢复码（Backup Codes）=====
+// 开启 2FA 时生成 10 个一次性恢复码，bcrypt 哈希后以 JSON 数组存入 acc.backup_codes。
+// 用户丢失 2FA 插件/换手机时，可用任意一个未使用的恢复码登录；验证通过后该码立即作废（从数组移除）。
+const BACKUP_CODE_COUNT = 10;
+const BACKUP_CODE_LEN = 8; // 每码 8 位大写字母+数字
+const BACKUP_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function genBackupCodes() {
+    const codes = [];
+    for (let i = 0; i < BACKUP_CODE_COUNT; i++) {
+        let code = '';
+        for (let j = 0; j < BACKUP_CODE_LEN; j++) code += BACKUP_ALPHABET[crypto.randomInt(BACKUP_ALPHABET.length)];
+        codes.push(code);
+    }
+    return codes;
+}
+function formatBackupCode(code) {
+    // 显示时每 4 位加一个连字符，便于阅读和输入（如 ABCD-EFGH）
+    return code.match(/.{1,4}/g).join('-');
+}
+function parseBackupCode(input) {
+    return String(input || '').replace(/-/g, '').toUpperCase();
+}
+async function hashBackupCodes(codes) {
+    const hashes = [];
+    for (const code of codes) hashes.push(await bcrypt.hash(code, 10));
+    return hashes;
+}
+// 从账号对象读取恢复码哈希数组（每项 { h: hash, used: boolean }）
+function getBackupCodeHashes(acc) {
+    if (!acc || !acc.backup_codes) return [];
+    try {
+        const arr = JSON.parse(acc.backup_codes);
+        return Array.isArray(arr) ? arr : [];
+    } catch (e) {
+        // 兼容旧格式：纯哈希数组字符串
+        try {
+            const arr = JSON.parse(acc.backup_codes);
+            return Array.isArray(arr) ? arr.map(h => ({ h: String(h), used: false })) : [];
+        } catch (_) { return []; }
+    }
+}
+// 验证恢复码：通过后将该码标记 used（从数组移除，即一次性）；返回 { ok: boolean, code?: string }
+async function verifyBackupCode(acc, inputCode) {
+    if (!acc) return { ok: false };
+    const code = parseBackupCode(inputCode);
+    if (!/^[A-Z2-7]{8}$/.test(code)) return { ok: false };
+    const hashes = getBackupCodeHashes(acc);
+    let matchedIndex = -1;
+    for (let i = 0; i < hashes.length; i++) {
+        const item = hashes[i];
+        const hash = item.h || item;
+        if (hash && await bcrypt.compare(code, hash)) { matchedIndex = i; break; }
+    }
+    if (matchedIndex < 0) return { ok: false };
+    // 一次性：移除该码
+    hashes.splice(matchedIndex, 1);
+    acc.backup_codes = JSON.stringify(hashes);
+    return { ok: true, code };
+}
+// 按账号类型分发读取/保存
+const ACCOUNT_KIND_GET = { cloud: dbGetCloudAccount, clink: dbGetLinkAccount, backup: dbGetBackupAccount, savereplay: dbGetSaveReplayAccount };
+const ACCOUNT_KIND_SAVE = { cloud: dbSaveCloudAccount, clink: dbSaveLinkAccount, backup: dbSaveBackupAccount, savereplay: dbSaveSaveReplayAccount };
+async function getAccountByKind(kind, username) {
+    const fn = ACCOUNT_KIND_GET[kind];
+    if (!fn) return null;
+    try { const acc = await fn(username); if (acc) acc.__kind = kind; return acc; } catch (e) { return null; }
+}
+async function saveAccountByKind(kind, acc) {
+    const fn = ACCOUNT_KIND_SAVE[kind];
+    if (!fn) throw new Error('未知账号类型: ' + kind);
+    return fn(acc);
+}
+// 生成并保存恢复码（开启 2FA 时调用）；返回原始码数组（仅此一次明文，前端须妥善保存）
+async function generateAndSaveBackupCodes(kind, username) {
+    const codes = genBackupCodes();
+    const hashes = await hashBackupCodes(codes);
+    const acc = await getAccountByKind(kind, username);
+    if (!acc) throw new Error('账号不存在');
+    acc.backup_codes = JSON.stringify(hashes.map(h => ({ h: h, used: false })));
+    acc.updated_at = new Date().toISOString();
+    await saveAccountByKind(kind, acc);
+    return codes;
+}
+// 重置/清空恢复码（后台救援或用户重新生成时调用）
+async function resetBackupCodes(kind, username) {
+    const acc = await getAccountByKind(kind, username);
+    if (!acc) throw new Error('账号不存在');
+    acc.backup_codes = JSON.stringify([]);
+    acc.updated_at = new Date().toISOString();
+    await saveAccountByKind(kind, acc);
 }
 // ===== 2FA 随机抽查（服务端安全抽查）=====
 // 每分钟按概率从「正在管理页面（已 checkin 心跳）」的云储存/云链接用户中随机抽一个，
@@ -10709,9 +10990,9 @@ async function dbSaveBackupAccount(acc) {
     const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
     const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
-    const SQL = 'INSERT INTO cloud_backup_accounts (username, password_hash, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes];
+    const SQL = 'INSERT INTO cloud_backup_accounts (username, password_hash, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes, backup_codes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes), backup_codes=VALUES(backup_codes)'
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes, acc.backup_codes || null];
     if (DB_AVAILABLE && pool) {
         try { await pool.query(SQL, PARAMS); return; }
         catch (e) {
@@ -10886,6 +11167,12 @@ app.post('/api/cloud-backup/login', async (req, res) => {
             const code = read2faCode(req);
             if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
             const deny = assert2faCode(acc, code);
+            if (deny) {
+                const bc = await verifyBackupCode(acc, code);
+                if (!bc.ok) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+                try { await dbSaveBackupAccount(acc); } catch (_) {}
+                deny = null;
+            }
             if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
         }
         const clientId = (req.body.clientId || '').toString().trim() || null;
@@ -11170,9 +11457,9 @@ async function dbSaveSaveReplayAccount(acc) {
     const creatorClientId = (acc.creator_client_id != null && acc.creator_client_id !== '') ? acc.creator_client_id : null;
     const totpSecret = (acc.totp_secret != null && acc.totp_secret !== '') ? acc.totp_secret : null;
     const totpScopes = (acc.totp_scopes != null && acc.totp_scopes !== '') ? String(acc.totp_scopes) : null;
-    const SQL = 'INSERT INTO savereplay_accounts (username, password_hash, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes) VALUES (?,?,?,?,?,?,?,?,?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes)';
-    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes];
+    const SQL = 'INSERT INTO savereplay_accounts (username, password_hash, created_at, updated_at, client_id, disabled, banned_until, two_factor_enabled, creator_client_id, totp_secret, totp_scopes, backup_codes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ' +
+        'ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), updated_at=VALUES(updated_at), client_id=VALUES(client_id), disabled=VALUES(disabled), banned_until=VALUES(banned_until), two_factor_enabled=VALUES(two_factor_enabled), totp_secret=VALUES(totp_secret), totp_scopes=VALUES(totp_scopes), backup_codes=VALUES(backup_codes)'
+    const PARAMS = [acc.username, acc.password_hash, acc.created_at, acc.updated_at, clientId, disabled, bannedUntil, twoFactor, creatorClientId, totpSecret, totpScopes, acc.backup_codes || null];
     if (DB_AVAILABLE && pool) {
         try { await pool.query(SQL, PARAMS); return; }
         catch (e) {
@@ -11311,7 +11598,12 @@ app.post('/api/savereplay/login', async (req, res) => {
             const code = read2faCode(req);
             if (!code) return res.status(401).json({ success: false, twoFactorRequired: true, message: '该账号已开启二次认证，请输入动态验证码' });
             const deny = assert2faCode(acc, code);
-            if (deny) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+            if (deny) {
+                const bc = await verifyBackupCode(acc, code);
+                if (!bc.ok) return res.status(401).json({ success: false, twoFactorRequired: true, message: deny });
+                try { await dbSaveSaveReplayAccount(acc); } catch (_) {}
+                deny = null;
+            }
         }
         const clientId = (req.body.clientId || '').toString().trim() || null;
         if (clientId && acc.client_id !== clientId) { acc.client_id = clientId; acc.updated_at = new Date().toISOString(); await dbSaveSaveReplayAccount(acc); }
@@ -14725,6 +15017,7 @@ server.listen(PORT, () => {
     console.log(`🏠 房间列表: http://localhost:${PORT}/api/rooms`);
     console.log(`👤 创建房间: http://localhost:${PORT}/api/create-room`);
     console.log(`Socket.IO 服务已启动\n`);
+    startBetterStackHeartbeat();
 });
 
 (async () => {
