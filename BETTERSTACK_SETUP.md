@@ -2,7 +2,7 @@
 
 > 项目：**迷宫冒险** ｜ 线上域名：`maze-game-apiserver.onrender.com` ｜ 平台：Render
 
-本文档说明如何为本项目接入 Better Stack 的两种监控方式，并创建对外状态页。
+本文档说明如何为本项目接入 Better Stack 的两种监控方式（HTTP 监控与 Heartbeat）。
 
 ---
 
@@ -85,24 +85,9 @@ Better Stack 的 Uptime 监控会主动定期请求你的 URL，按状态码 / �
 
 ---
 
-## 3. 创建状态页并绑定监控
+## 3. 验证命令
 
-1. Better Stack → **Status pages** → **Create status page**。
-2. 填写名称（如 `迷宫冒险服务状态`）、自定义域名（可选，如 `status.yourdomain.com`）。
-3. 在 **Monitors** 区域勾选第 1 节创建的 HTTP 监控和/或第 2 节的 Heartbeat。
-4. 保存后得到状态页地址（形如 `https://<your-slug>.betterstackstatus.com`）。
-5. 把该地址替换到首页 `public/index.html` 中的状态页链接占位符：
-   ```html
-   <!-- TODO: 替换为 Better Stack 实际状态页地址 -->
-   <a href="https://YOUR-STATUS-PAGE.betterstackstatus.com" target="_blank" rel="noopener">服务状态</a>
-   ```
-   当前该链接为**占位符**，需在第 6 阶段状态页创建后由项目所有者替换。
-
----
-
-## 4. 验证命令
-
-### 4.1 本地
+### 3.1 本地
 
 ```bash
 # 启动服务
@@ -115,7 +100,7 @@ curl -i http://localhost:234/health/ping
 
 期望：`/health` 返回 `200` 且 JSON 含 `status`/`uptimeSeconds`/`timestamp`；`/health/ping` 返回 `200 pong`。
 
-### 4.2 线上（部署生效后）
+### 3.2 线上（部署生效后）
 
 ```bash
 curl -i https://maze-game-apiserver.onrender.com/health
@@ -125,27 +110,25 @@ curl -i https://maze-game-apiserver.onrender.com/health/ping
 curl -s -o /dev/null -w '%{http_code}\n' https://maze-game-apiserver.onrender.com/health
 ```
 
-### 4.3 Heartbeat 生效验证
+### 3.3 Heartbeat 生效验证
 
 - 配置 `BETTERSTACK_HEARTBEAT_URL` 并重启后，查看服务日志是否出现 `[Heartbeat] 已启动…`。
 - 在 Better Stack Heartbeat 详情页确认最近一次 Ping 时间持续更新。
 
 ---
 
-## 5. Token / URL 安全说明
+## 4. Token / URL 安全说明
 
 - **Heartbeat URL 内含写入令牌**，等同于凭据：
   - 只能存放在服务端环境变量（Render Environment / 本地 `.env`）中。
   - **绝不写入前端代码、不提交到 Git 仓库**。
   - 若不慎泄露，立即在 Better Stack 控制台 **Rotate / 重建 Heartbeat**，旧 URL 随即失效。
 - `.env.example` 只放**空的占位变量名**，不含任何真实 token。
-- 本项目 `.gitignore` 已忽略 `*.html` 与 `public/`，但**不忽略 `.env`**（当前无 `.env` 文件）；请自行确认 `.env` 未被 `git add`，或在 `.gitignore` 中追加 `.env` 一行（本指南未擅自修改 `.gitignore`）。
+- 项目 `.gitignore` 当前不忽略 `.env`；请确认 `.env` 未被 `git add`，或追加 `.env` 一行（本指南未擅自修改 `.gitignore`）。
 - Better Stack API Token（用于自动化创建监控）同样只存环境变量，不写入任何源码或文档。
-- 公开状态页不应展示敏感端点；本方案只绑定 `/health` 与 Heartbeat，不暴露管理接口。
 
 ---
 
-## 6. 已知限制 / 待办
+## 5. 已知限制 / 待办
 
-- 状态页 URL 当前为占位符，需第 6 阶段（用户登录 Better Stack 控制台）创建后替换。
-- `public/` 被 `.gitignore` 忽略，首页链接的改动为**本地改动**，不会随本次提交推送；如需上线，请项目所有者决定将 `public/index.html` 纳入版本控制或在部署流程中注入该链接。
+- 无（监控端点的线上验证需在 Render 部署生效后进行）。
