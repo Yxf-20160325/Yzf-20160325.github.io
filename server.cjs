@@ -207,10 +207,14 @@ function loadServerErrorsFromFile() {
     const orig = console[level].bind(console);
     console[level] = (...args) => { pushRecentLog(level, args); orig(...args); };
 });
-// 全局兜底：未捕获异常 / 未处理的 Promise 拒绝 —— 记录但不退出进程，保证服务持续可用
-process.on('uncaughtException', (err) => { recordServerError('uncaughtException', err); });
+// 全局兜底：未捕获异常 / 未处理的 Promise 拒绝 —— 记录并打印，保证可观测且不退出进程
+process.on('uncaughtException', (err) => {
+    try { console.error('[uncaughtException]', err && err.stack ? err.stack : err); } catch (_) {}
+    recordServerError('uncaughtException', err);
+});
 process.on('unhandledRejection', (reason) => {
     const e = (reason instanceof Error) ? reason : new Error('UnhandledRejection: ' + safeStringify(reason));
+    try { console.error('[unhandledRejection]', e.stack || e); } catch (_) {}
     recordServerError('unhandledRejection', e);
 });
 
@@ -15013,22 +15017,23 @@ app.use((err, req, res, next) => {
     if (!res.headersSent) res.status(500).json({ success: false, message: '服务器内部错误，已记录' });
 });
 
-// 在服务器启动时初始化管理员密码
-console.log('🚀 正在初始化服务器...');
-initializeAdminPassword();
-initializeSuperAdminPassword();
-
+// ===== 启动：先绑定端口，再做其余初始化 =====
+// 关键：PaaS（Render 等）依赖端口先开才做健康检查。任何初始化失败都不能挡住 listen，
+// 否则会出现「构建成功但端口永远不开 → 部署超时」。密码/数据库等初始化放到 listen 之后，且失败不致命。
 const PORT = process.env.PORT || 234;
-// 先监听，保证 onrender 等平台的健康检查能立即通过；数据库初始化与数据加载放到后台异步进行，
-// 避免 MySQL 不可达/缓慢时阻塞启动（否则 onrender 会因启动超时判定为“运行报错”）。
 server.listen(PORT, () => {
     console.log(`\n✅ 服务器运行在 http://localhost:${PORT}`);
     console.log(`📊 服务器状态: http://localhost:${PORT}/api/server-status`);
     console.log(`🏠 房间列表: http://localhost:${PORT}/api/rooms`);
     console.log(`👤 创建房间: http://localhost:${PORT}/api/create-room`);
-    console.log(`Socket.IO 服务已启动\n`);
+    console.log('Socket.IO 服务已启动\n');
     startBetterStackHeartbeat();
 });
+
+// 在服务器启动后初始化管理员密码（只读文件系统等场景下失败不影响端口监听）
+console.log('🚀 正在初始化服务器...');
+try { initializeAdminPassword(); } catch (e) { console.error('[启动] 管理员密码初始化失败（忽略）:', e.message); }
+try { initializeSuperAdminPassword(); } catch (e) { console.error('[启动] 超级管理员密码初始化失败（忽略）:', e.message); }
 
 (async () => {
     loadServerErrorsFromFile();   // 恢复重启前记录的异常

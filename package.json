@@ -4,6 +4,7 @@
     "test:mp-relay": "node test_mp_relay.cjs"
   },
   "dependencies": {
+    "ws": "^8.17.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "express": "^5.1.0",
