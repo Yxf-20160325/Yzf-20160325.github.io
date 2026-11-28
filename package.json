@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "start": "node server.cjs"
+    "start": "node server.cjs",
+    "test:mp-relay": "node test_mp_relay.cjs"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

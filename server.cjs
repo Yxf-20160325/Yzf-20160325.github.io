@@ -7129,6 +7129,16 @@ const io = new Server(server, {
     }
 });
 
+// 微信小游戏原生 WebSocket 实时联机中继（替代 PeerJS/WebRTC，不依赖 web-view）。
+// 必须放在 io / rooms / roomChats / 全局函数 / 封禁表初始化之后。
+try {
+    require('./server-mp-relay.cjs')({
+        app, server, io, rooms, roomChats, players, onlinePlayers, globalFunctions, userBans,
+        clientIp, isIPBanned, generateRoomId, getRandomColor, getAllRoomsList, broadcastRoomList,
+        WebSocket: require('ws')
+    });
+} catch (e) { console.error('[MP-RELAY] 挂载失败:', e); }
+
 io.on('connection', (socket) => {
     console.log(`用户连接: ${socket.id}`);
 
